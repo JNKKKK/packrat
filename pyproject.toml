@@ -1,0 +1,50 @@
+[project]
+name = "packrat"
+version = "0.1.0"
+description = "Local, GPU-accelerated daemon + CLI/TUI for managing a personal photo/video collection: fingerprint-based dedup and an Explorer-driven merge/trash workflow."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "NK" }]
+dependencies = [
+    # Core runtime (daemon + CLI client). Deliberately lean: media/embed deps
+    # live in optional extras so the runtime installs and runs without the
+    # heavier, wheel-uncertain packages (pdqhash, PyAV, rawpy, torch).
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "typer>=0.12",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Fingerprinting / decode stack — needed by `scan` (M1+) and the §9.1 smoke test.
+media = [
+    "blake3>=0.4",
+    "numpy>=1.26",
+    "pillow>=10.3",
+    "pillow-heif>=0.16",
+    "av>=12.0",
+    "pyexiftool>=0.5",
+    "pdqhash>=0.2.5",
+    "rawpy>=0.21",
+]
+# Opt-in semantic embeddings (M7). Heavy; only for `scan --embed`.
+embed = [
+    "torch>=2.2",
+    "open-clip-torch>=2.24",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+packrat = "packrat.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/packrat"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

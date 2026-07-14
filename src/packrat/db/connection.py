@@ -1,0 +1,142 @@
+"""SQLite connection management (§4, §10): WAL mode, FK enforcement, init.
+
+The daemon owns a single writer connection (§3 concurrency). WAL lets read-only
+queries (``status``, ``roots``, TUI stats) run concurrently with the writer.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from contextlib import contextmanager
+from pathlib import Path
+
+from .. import paths
+from .schema import SCHEMA_SQL, SCHEMA_VERSION
+
+
+def connect(
+    db_file: Path | None = None,
+    *,
+    read_only: bool = False,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
+    """Open a tuned SQLite connection.
+
+    WAL mode + ``foreign_keys=ON`` (the schema relies on ``ON DELETE CASCADE``,
+    which SQLite only enforces when this pragma is set). ``row_factory`` yields
+    ``sqlite3.Row`` for name-based access.
+
+    ``check_same_thread=False`` is used for the daemon's shared write connection,
+    which is accessed from both the API thread (submit) and the worker thread —
+    all writes are serialized by :class:`Database`'s lock, so it is safe.
+    """
+    p = db_file or paths.db_path()
+    if read_only:
+        # URI mode so we can open read-only even while the writer holds WAL.
+        uri = f"file:{p.as_posix()}?mode=ro"
+        conn = sqlite3.connect(
+            uri, uri=True, timeout=30.0, check_same_thread=check_same_thread
+        )
+    else:
+        conn = sqlite3.connect(p, timeout=30.0, check_same_thread=check_same_thread)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+class Database:
+    """The daemon's single write connection, guarded by a lock (§3 single writer).
+
+    Both the API thread (creating a ``jobs`` row on submit) and the worker thread
+    (progress + op writes) go through this. Read-only snapshot queries
+    (``status``/``roots``) should instead open their own short-lived read-only
+    connection via :func:`connect` so they never contend with the writer.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._lock = threading.RLock()
+
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
+    @property
+    def raw(self) -> sqlite3.Connection:
+        """The underlying connection. Hold :attr:`lock` while using it."""
+        return self._conn
+
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            self._conn.commit()
+            return cur
+
+    def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def query_one(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchone()
+
+    @contextmanager
+    def transaction(self):
+        """Atomic unit of work, serialized against all other writers."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                yield self._conn
+            except Exception:
+                self._conn.rollback()
+                raise
+            else:
+                self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def init_db(db_file: Path | None = None) -> sqlite3.Connection:
+    """Create the schema if missing and return an open connection (§4).
+
+    Idempotent — every DDL statement is ``IF NOT EXISTS``. Records/updates the
+    ``schema_version`` in ``meta``.
+    """
+    conn = connect(db_file)
+    with transaction(conn):
+        conn.executescript(SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+    return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection):
+    """Transaction context: commit on success, rollback on exception.
+
+    Uses an explicit ``BEGIN`` so a whole unit of work is atomic (important for
+    the "single transaction" writes the plan calls for — §8 A2 step 9, §8 C step 11).
+    """
+    conn.execute("BEGIN")
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
+def schema_version(conn: sqlite3.Connection) -> int | None:
+    """Return the recorded schema version, or None if unset."""
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    return int(row["value"]) if row else None

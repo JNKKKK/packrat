@@ -25,3 +25,64 @@ it organized.
 
 packrat doesn't show you your photos — your file explorer already does that.
 Instead, it works quietly in the background to keep the whole collection tidy.
+
+## Getting started
+
+packrat is managed with [uv](https://docs.astral.sh/uv/). Install dependencies once:
+
+```sh
+uv sync                       # core runtime (daemon + CLI)
+uv sync --extra media --extra dev   # + decode/fingerprint stack + test deps
+```
+
+## Running the daemon
+
+The daemon **auto-spawns** the first time you run any command, so you rarely need
+to start it by hand. The lifecycle commands are there for control and troubleshooting:
+
+```sh
+uv run packrat daemon start    # explicitly spawn the detached daemon (no-op if up)
+uv run packrat daemon status   # is it running? pid, port, in-flight job
+uv run packrat daemon stop     # graceful shutdown (an in-flight job is left resumable)
+```
+
+Check collection state anytime (read-only, never blocked by a running job):
+
+```sh
+uv run packrat status          # collection rollup + any running/interrupted job
+```
+
+### Dev-only commands (M0 scaffolding)
+
+These aren't part of the planned CLI surface — they exist to exercise the job
+runtime before the real operations (`scan`/`dedup`/`merge`) land in M1+:
+
+```sh
+uv run packrat demo            # submit + stream a throwaway demo job
+uv run packrat jobs            # list recent job runs (the TUI will own this later)
+```
+
+`demo` streams its progress live; Ctrl-C detaches the view but the job keeps
+running in the daemon, exactly like a real job will.
+
+## Development
+
+Run the unit tests:
+
+```sh
+uv run pytest                  # full suite
+uv run pytest -q               # quiet
+uv run pytest tests/test_jobs.py -v   # one file, verbose
+```
+
+Confirm the decode/fingerprint wheels work on your machine (the §9.1 smoke test):
+
+```sh
+uv run packrat smoke-test                    # report which deps are available
+uv run packrat smoke-test --generate         # synthesize samples, then run the full path
+uv run packrat smoke-test path/to/samples    # decode → hash → perceptual over your own samples
+```
+
+`--generate` synthesizes one sample per photo/video format in a temp dir, so it's
+a one-command self-test. RAW formats (cr3, dng, …) can't be synthesized — point
+the command at a folder of real camera files to exercise those.

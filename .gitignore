@@ -218,3 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 .claude/
+
+# packrat: local test scratch dirs (isolated PACKRAT_HOME) + sample media
+.tmp_*/
+
