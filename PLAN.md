@@ -39,7 +39,10 @@ Target: Windows 10, single user, RTX GPU available, collection >100K assets.
 2. **Explorer is the review surface.** The system stages files into folders; the human
    accepts/rejects by keeping/removing files; the CLI resumes.
 3. **Never destroy silently.** Merges are copy-only. Deletions go to a trash folder /
-   Recycle Bin, and originals are removed only after explicit confirmation.
+   Recycle Bin, and originals are removed only after explicit confirmation. **Caveat (§10):**
+   the Recycle Bin exists only for local volumes — on NAS/SMB roots (most of the collection,
+   §10.1) deletion is **permanent**, so typed confirmation + `--dry-run` are the real safety net
+   there, and the confirm prompt warns when the delete set includes network-path files.
 4. **Idempotent & resumable.** Any index/merge/tag job can be interrupted and re-run.
 5. **Lazy when safe, thorough on schedule.** Skip re-fingerprinting when `path` + exact `size` +
    near-`mtime` (tolerant) are unchanged; do full sweeps on a fixed interval as the backstop.
@@ -69,8 +72,8 @@ Target: Windows 10, single user, RTX GPU available, collection >100K assets.
      re-fingerprinting unchanged files, never for identity.
   2. **Content hash**: BLAKE3 of file bytes — exact-duplicate identity.
   3. **Perceptual signature**: robust to recompression/resize.
-     - Photo: PDQ (256-bit, primary) + pHash (corroborating).
-     - Video: duration + sequence of frame pHashes sampled across the timeline.
+     - Photo: PDQ (256-bit) — the single photo signal.
+     - Video: duration + sequence of per-frame PDQ hashes sampled across the timeline.
   4. **Semantic embedding**: CLIP vector — computed **only** on an opt-in `scan --embed`, for
      future semantic search / junk-flagging (§7, TBD). **Never used in any duplicate decision**
      (dedup, merge, or cleanup) — those rely solely on the content hash (exact) and perceptual
@@ -112,7 +115,70 @@ cancel. This is what makes a job survive the terminal that launched it.
   cancellable and checkpointed/resumable (per §8);
 - the **scheduler** for interval scans (submits scan jobs like any client);
 - the review-run state (`review_runs`) and audit trail.
-Exposes a small HTTP API on `127.0.0.1` with a local token (`%APPDATA%\packrat\token`).
+Exposes a small HTTP API on `127.0.0.1` with a local token (`%APPDATA%\packrat\token`). Reads
+tunable settings from `%APPDATA%\packrat\config.toml` (§9.2), reloaded at each job start.
+
+**Progress transport — server-sent events (SSE), not polling.** A client that submits (or attaches
+to) a job holds an SSE stream on the HTTP API; the daemon pushes progress/state events (bar, counts,
+ETA, completion). The TUI uses the same stream for the running job. Read-only *snapshots*
+(`status`, `roots`, TUI stat panels) are plain request/response — polled on a light timer for the
+"recent jobs" list. SSE is chosen over polling for the live progress path so a moving bar doesn't
+require a busy-loop of requests; it degrades gracefully (a dropped stream just reconnects, since job
+state is durable in the `jobs` table).
+
+**Auto-spawn handshake (race-free).** Auto-spawn on first client use must tolerate *two* clients
+racing to start the daemon at once. The client does **bind-or-connect**, not check-then-spawn: it
+tries to connect to the API port; on failure it attempts to become the daemon by acquiring a
+single-instance lock (an exclusively-created lockfile / a bind on the fixed loopback port — whoever
+wins is the daemon) and writing the `token`; a loser that fails the lock simply retries the connect
+against the winner. So concurrent first-uses converge on **one** daemon, never two. The token file
+is written by the winner before it accepts requests, so clients authenticate against a live server.
+
+**Startup reconciliation (crash / kill / power-loss recovery).** The daemon owns the worker slot
+*in memory*, so if it dies mid-job the `jobs` row is orphaned — still `status='running'` though no
+worker exists. On **every** daemon start, before serving any request, it reconciles:
+- **Orphaned `running` jobs → `interrupted`.** Any `running` job row is stale by definition (a live
+  daemon has at most one, in *this* process, which just started). Mark each `interrupted`,
+  `finished_at`=now, `error='daemon restarted'`. The daemon **does not auto-resume or re-enqueue**
+  the work (per §11-recovery decision): the durable per-op plan is intact, so the user re-runs the
+  command to continue. This avoids a **crash-loop** (a file/bug that killed the daemon would
+  re-kill it on boot) and never resumes a *destructive* apply (`dedup`/`cleanup --confirm`) with
+  nobody watching. Resume paths per type (all already specified — this step only flips the stale
+  status flag so the machinery can re-engage):
+  - **scan** → re-run `scan`; the **fast-path** (path+size+mtime skip, §8 A2 step 4) makes already-
+    fingerprinted files no-ops, so it effectively continues where it left off — `jobs.done` is just
+    the progress number, not the resume key. Deletion-detection is naturally safe (it keys off this
+    pass's enumeration, §8 A2 step 11).
+  - **merge** → its `merge_runs` row is still open (`planning`/`copying`); re-running `merge`
+    silently auto-resumes from the frozen plan (§8 C). *(A crash in Phase 1 before the plan was
+    committed leaves no open `merge_runs` → re-run just starts fresh.)*
+  - **trash refresh** → idempotent by construction (record-then-delete, §6.1); re-run re-processes
+    only the trash files still present.
+  - **untrash** → idempotent (hash → forget/reactivate, §6.3); re-run is a no-op on already-handled
+    files.
+  - **dedup/cleanup analyze** interrupted mid-staging → the crash left a `pending` review_run with
+    **half-built staging**. Reconciliation **rolls it back**: delete the partial
+    `_packrat_review\` staging folders and mark that review_run `cancelled` (record it as
+    `interrupted-analyze` in the audit `applied.json`, §8.1). This clears the way for a clean
+    re-run — otherwise the pending row would reject a fresh `dedup`, and `--confirm` on partial
+    staging would apply a wrong plan. *(A **completed** analyze — paused, fully staged, awaiting the
+    user — has no `running` job row, so it is untouched: its `pending` review_run and staging remain
+    exactly as left, ready for `--confirm`/`--cancel`.)*
+  - **dedup/cleanup `--confirm`** interrupted mid-apply → the review_run is still `pending` and the
+    plan (`review_actions`) records intended deletions; re-running `--confirm` re-reads shortcut
+    presence and re-applies via the per-file lazy-liveness gate (§8 B Phase 6), which is idempotent
+    (already-deleted files → "already-gone"). The DB backup taken before apply is the backstop.
+- **Idempotency is what makes "just re-run" safe** for every case above — each op either resumes
+  from a committed checkpoint/plan or re-derives a no-op for work already done. Reconciliation only
+  *unblocks* re-running by clearing stale `running`/half-staged state; it performs no file I/O
+  except the analyze-rollback staging cleanup.
+
+**Clean shutdown (`daemon stop`) is a resumable interruption, not a cancel.** A graceful stop
+signals the running job to checkpoint, then exits; its `jobs` row becomes `interrupted` (same as a
+crash — resumable), **not** `cancelled`. Cancelling is a distinct, explicit user action (TUI `[c]`
+/ another terminal, §9/§12) that *does* set `cancelled` (terminal) and, for merge/review, discards
+the resumable plan. So "stop the daemon" never loses in-flight progress; only an explicit cancel
+does.
 
 **CLI** — thin client. `packrat scan D:\…` submits a job and **streams its progress**. Key
 property: **the job runs in the daemon, not the terminal**, so:
@@ -126,15 +192,46 @@ to launch operations. It is also where you **cancel** a running job. Because job
 daemon, the TUI is a *window* onto them — open it anytime, from any terminal, to watch or stop
 work started elsewhere. (TUI appearance & function: §12; milestone: §13 M6.)
 
-**Concurrency — one mutating operation at a time (global).** The single-worker queue is the
-enforcement point: if a mutating job is running, a second submission is **rejected** with a clear
-"busy" message naming the in-flight job (e.g. `scan D:\test started 12:03`). This prevents the
-scan-in-one-terminal + cleanup-in-another hazard by construction — no lockfile, no crash-stale
-lock (a daemon-side worker slot is in-memory and released if a job dies). Read-only queries
-(`status`, `--status`, TUI stats) run anytime, concurrently. **Distinct from** the *persistent*
-per-root review lock: a paused `dedup`/`cleanup` holds a `review_runs` row (DB), **not** a worker
-slot — so the analyze job finishes, the queue frees for other work, and you can review in Explorer
-for as long as you like; only same-root review ops are blocked meanwhile.
+**Concurrency — two independent guarantees.** packrat serializes work at two levels; a mutating
+job must clear **both** to start.
+
+1. **Global: one mutating job runs at a time.** The single-worker queue is the enforcement point:
+   if a mutating job is running, a second submission is **rejected** with a clear "busy" message
+   naming the in-flight job (e.g. `scan D:\test started 12:03`). No lockfile, no crash-stale lock
+   (a daemon-side worker slot is in-memory and released if a job dies). Read-only queries
+   (`status`, `roots`, TUI stats) run anytime, concurrently.
+
+2. **Per-root: one *active* operation owns a root at a time** (running **or** pending). This is the
+   general invariant that the per-operation validations (§8 B Phase 0, §6.2, §8 C Phase 0) and the
+   DB's partial-unique indexes (§4: one pending `review_runs` per root; one open `merge_runs` per
+   dest root) all enforce as special cases. State it once here so no pair is missed (the previous
+   text enumerated dedup/cleanup/merge pairwise and **omitted scan** — the gap this closes):
+
+   > **A root has at most one active operation.** An operation is *active* on the root it **owns**
+   > — the root it targets and stages/plans/mutates against: `scan R` owns `R`; `dedup R`/`cleanup R`
+   > own `R` (running **or** while their `review_runs` stays `pending`); `merge … --into D` owns the
+   > library root containing `D` (running **or** while its `merge_runs` is `planning`/`copying`).
+   > Submitting an op whose owned root already has an active op is **rejected**, naming the holder
+   > (e.g. "root iPhone busy: dedup pending since 12:03 — `--confirm` or `--cancel` it first").
+   > **`scan` is included:** it will not run on a root with a pending review or in-flight merge
+   > (manual `scan <root>` errors; a scheduled / `--all` scan **skips that root and logs it**, so
+   > one under-review root never blocks the sweep).
+
+   **Owned vs. referenced — what is *not* locked.** Exclusivity is on the **owned** root only, not
+   on roots an op merely reads or can reach into: `dedup` compares against **all active assets
+   collection-wide** and may delete an *external* survivor in another root (§8 B cross-folder note);
+   `merge` reads every root's hashes. Locking those "referenced" roots would serialize nearly
+   everything (dedup touches almost all of them), so we don't. Cross-root reach stays safe by a
+   different mechanism — the **lazy-liveness gates**: confirm/apply re-`stat()`s each file by its
+   stored **path** right before acting and spares/promotes if it moved, so a legitimate scan of a
+   *referenced* root that forgets a now-gone asset never harms an in-flight plan (the plan keys off
+   path, tolerates a dangling `asset_id`/`instance_id`, and resolves toward sparing). Per-root
+   exclusivity handles the *owned* root; lazy liveness handles *referenced* reach.
+
+**Why the queue slot and the review lock are distinct.** A paused `dedup`/`cleanup` holds its
+`review_runs` row (guarantee 2, DB, no time limit) but **not** a worker slot (guarantee 1): the
+analyze job finishes, the global queue frees for other work, and you can review in Explorer for as
+long as you like — only operations that would *own the same root* are blocked meanwhile.
 
 **Why a daemon (revised rationale).** The original reason ("keep CLIP/ffmpeg warm") is obsolete —
 CLIP is opt-in and rare, ffmpeg is a per-file subprocess. The daemon now earns its place for
@@ -157,27 +254,53 @@ roots(
   -- (per-root scan interval deferred with scheduled scans → M8; not settable in v1)
 
 assets(
-  id, content_hash /* blake3, unique */, media_type /* photo|video */,
+  id, content_hash /* blake3, unique */, media_type /* photo|video (by extension) */,
   size, width, height, duration_s, captured_at /* from EXIF/ffprobe */,
   status /* active|trashed  -- no 'missing': forgotten assets are deleted */,
+  undecodable /* 0|1, default 0: bytes hashed OK but the decoder rejected the pixels — set by scan;
+                 such an asset has NO phash/vphash/embedding and is excluded from perceptual work.
+                 Orthogonal to status (an undecodable asset is still active/trashed). Distinct from
+                 a merge-created asset that is simply not-yet-fingerprinted (undecodable=0, no phash
+                 yet) — see the "fully fingerprinted" predicate in §8 A2 step 4. */,
+  decode_error /* nullable text: last decoder failure detail, for debugging POC-format wheels (§9.1) */,
   added_at, trashed_at, trash_reason)
 
 file_instances(   -- presence = row existence; a gone file has its row deleted (no 'present' flag)
   id, asset_id, root_id, path, filename, size, mtime, last_seen_at)
+  -- UNIQUE(root_id, path): one row per physical file. Scan's exact-dup "hit" upserts on this key
+  --   (§8 A2 step 6), so re-encountering a known file (--full re-hash, mtime drift, merge-created
+  --   backfill) reuses its row instead of creating a duplicate instance. `path` is stored in the
+  --   canonical long-path-safe form (§8 A1 step 1) so equality is well-defined.
 
-phash(   asset_id, algo /* phash|pdq */, bits /* blob */ )     -- written by scan
-vphash(  asset_id, frame_index, t_offset_s, phash_bits )      -- video frame hashes; by scan
+phash(   asset_id, algo /* always 'pdq' — photo pHash dropped (§5.3); column kept for a stable
+                          shape and to leave room for a future algo without a migration */,
+         bits /* blob, 256-bit PDQ */,
+         quality /* 0-100 PDQ quality */ )                    -- one row per photo asset; by scan
+vphash(  asset_id, frame_index, t_offset_s,
+         pdq_bits /* blob, 256-bit PDQ of the sampled frame — same algo as photos (§5.3), NOT
+                     pHash anymore */,
+         quality /* 0-100 PDQ quality; frames below video.min_frame_quality are excluded from
+                     matching but still stored/flagged (§5.3) */ )   -- one row per sampled frame; by scan
 embeddings( asset_id, model, vector /* float32 blob, e.g. 512d */ )  -- only if scan --embed
 
-similarity_edges(   -- pairwise near-dups (distance ≤ T_match); written by `dedup`, NOT scan
+similarity_edges(   -- pairwise near-dups; written by `dedup`, NOT scan. `distance` = PDQ Hamming
+                    --   for photo (≤ T_match_photo), or the video match score (§5.3); the medium's
+                    --   own cutoff decides the edge — T_match_photo (photo) / T_match_video per-frame
+                    --   + frame_match_fraction vote (video).
   asset_a, asset_b, media_type, distance,
-  algo /* pdq|video */, created_at )   -- unique(asset_a, asset_b)
+  algo /* pdq|video */, created_at )
+  -- CANONICAL ORDERING: always store with asset_a < asset_b (numeric id order). An edge is
+  --   undirected, so this makes each pair have exactly ONE row; UNIQUE(asset_a, asset_b) then
+  --   actually prevents duplicates (without it, {5,8} and {8,5} would both insert). Writers must
+  --   normalize the pair before upsert; readers query both directions by testing asset_a OR asset_b.
 
 review_runs(   -- one stateful review lifecycle (dedup OR perceptual-cleanup) per target root
   id, root_id, run_type /* dedup|cleanup-perceptual */,
   status /* pending|completed|cancelled */, created_at, confirmed_at )
   -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder
-  -- (dedup, perceptual-cleanup, and in-flight merge are mutually exclusive on a root)
+  -- One facet of the §3 per-root exclusivity invariant: dedup, perceptual-cleanup, in-flight
+  --   merge, AND scan are mutually exclusive on a root (scan is blocked by §8 A2 step 1a, not by
+  --   this index, since scan opens no review_runs row).
 
 review_actions(   -- the persisted, crash-safe plan for a review_run
   id, run_id, folder /* will_be_deleted|grouped|perceptually_identified_trash */,
@@ -188,10 +311,53 @@ review_actions(   -- the persisted, crash-safe plan for a review_run
   group_no, member_no, is_external,      -- dedup grouping only
   matched_trashed_asset_id, distance,    -- cleanup-perceptual only (which trashed asset, PDQ dist)
   shortcut_name )
+  -- `path` is the AUTHORITATIVE target: --confirm re-stats it (§8 B Phase 6) and never trusts the
+  --   DB row's liveness. So `asset_id`/`instance_id`/`survivor_instance_id` are recorded for
+  --   reporting/reference and MUST tolerate becoming dangling: a legitimate scan of a *referenced*
+  --   (external) root can forget a now-gone asset mid-review (§3 owned-vs-referenced). These FKs are
+  --   therefore NOT part of any ON DELETE CASCADE — deleting an asset/instance must NOT delete
+  --   review_actions rows (they'd be nulled/left dangling); confirm resolves a dangling ref toward
+  --   sparing via the path stat. (The owned root can't be churned mid-review — per-root exclusivity
+  --   §3 blocks scan on it — so only external references can dangle.)
+
+merge_runs(   -- one merge lifecycle (§8 C); the frozen plan header + cross-op guard
+  id, job_id, source_path, dest_path, dest_root_id,
+  status /* planning|copying|done|cancelled|error */, created_at, finished_at )
+  -- partial UNIQUE(dest_root_id) WHERE status IN ('planning','copying')
+  --   → at most one open merge per dest root; this is the "in-flight merge" marker that
+  --     dedup (§8 B Phase 0) and cleanup (§6.2) check to refuse an overlapping run.
+  -- completed runs are retained (queryable merge history; see §8.1 note / §14 #5).
+
+merge_plan_items(   -- the persisted, crash-safe, FROZEN per-source-file plan for a merge_run
+  id, run_id,
+  source_rel_path,                 -- path relative to source; dest mirrors it (§8 C Phase 3)
+  size, mtime, content_hash,       -- from Phase 1; hash lets resume SKIP re-hashing + verify collisions
+  classification /* dup-in-source|trashed|exact-known|new */,
+  rep_of_hash,                     -- dup-in-source only: the sibling hash whose rep this defers to
+  dest_path,                       -- final dest path incl. any numeric-suffix collision rename; NULL until copied
+  progress /* pending|copied|registered|copied-unindexed|skipped|error */, error )
+  --   copied         = file written+verified, DB register still pending (the crash gap; resume finishes it)
+  --   registered     = terminal: file on disk AND catalogued
+  --   copied-unindexed = terminal: file written to an IGNORED dest path, deliberately NOT registered
+  --                      (would otherwise be forgotten by the next scan's deletion-detection — §8 C Phase 3)
+  -- NOTE: no metadata columns — dimensions/duration/captured_at are probed just-in-time in
+  --   Phase 3 for `new` reps only (classification needs the hash alone), so they never persist.
 
 -- tags(...) omitted for now — tagging/classification schema is TBD (§7)
 
-jobs(    id, type, status, total, done, started_at, finished_at, error, params_json )
+jobs(    id, type,
+         status /* running|done|error|cancelled|interrupted */,
+         total, done, started_at, finished_at, error, params_json )
+  -- `total`/`done` are a PROGRESS-DISPLAY counter only (work units finished / total, drives the
+  --   bar + ETA). They are NOT the resume mechanism: on re-run each op recovers from its own
+  --   authoritative durable state — scan from the fast-path (path+size+mtime skip) + last_seen_at
+  --   (§8 A2), merge from per-item merge_plan_items.progress (§8 C), review from review_actions
+  --   (§8 B). `done` may be stale after a crash (last increment uncommitted) and that's harmless,
+  --   because the authoritative state — not `done` — decides what re-runs.
+  -- `interrupted` = the daemon died while this job was `running` (crash/kill/power loss); set by
+  --   startup reconciliation (§3), NOT by the worker. It means "the process vanished, the durable
+  --   per-op plan is intact, re-run the command to resume." A clean `daemon stop` also lands here
+  --   (interrupted, resumable) — distinct from a user cancel, which is `cancelled` (terminal, §3).
 ```
 
 Notes
@@ -203,11 +369,13 @@ Notes
   fingerprint is the trash memory). Enforce dependent-row cleanup with `ON DELETE CASCADE`.
 - `assets` rows with `status='trashed'` **retain their fingerprints forever** — this is the
   trash memory used to exclude re-appearing junk. The physical file may be long gone.
-- **Unreachable-root / incomplete-listing guard:** deletion-detection (removing gone instances)
-  only runs for roots that were **fully and cleanly enumerated** this pass. If a root is offline
-  (unplugged drive, missing share) *or* any directory listing errored/timed out mid-scan (common
-  on SMB — see §10.1), its instances are left untouched — incomplete data must never be read as
-  "all files deleted," which would wrongly forget a whole root's fingerprints.
+- **Unreachable-root / incomplete-listing guard (per-directory):** deletion-detection (removing
+  gone instances) reconciles an instance only if its **containing directory was fully and cleanly
+  enumerated** this pass. If a directory listing errored/timed out mid-scan (common on SMB — see
+  §10.1), instances under *that subtree* are left untouched; a fully offline root (unplugged drive,
+  missing share) skips everything. Incomplete data must never be read as "files deleted," which
+  would wrongly forget fingerprints — but the scope is the affected subtree, not the whole root, so
+  one flaky folder doesn't stall reconciliation collection-wide (§8 A2 step 11, §10.1).
 - Vector search: start with a memory-mapped numpy matrix (100K × 512 float32 ≈ 200 MB;
   brute-force cosine is milliseconds). Upgrade to `hnswlib`/`sqlite-vec` only if needed.
 - Perceptual candidate search: brute-force Hamming in numpy, or a BK-tree if it gets slow.
@@ -228,8 +396,13 @@ scan's job; every other operation reads them.
 - **Content hash — BLAKE3 of the file bytes.** The identity key: same bytes ⇒ same asset. Cheap,
   exact, format-agnostic (works even on files that won't decode).
 - **Perceptual signature — robust to recompression/resize/re-encode.**
-  - Photo: **PDQ (256-bit, primary)** plus pHash as a corroborating check.
-  - Video: **duration** + a sequence of frame pHashes sampled at fixed fractions of the timeline.
+  - Photo: **PDQ (256-bit)** + its quality score — the single photo signal. (pHash is deliberately
+    *not* stored for photos; see §5.3 for why one signal is both sufficient and higher-recall.)
+    Photo quality is **stored and surfaced as a confidence hint, but never gates** a photo out of
+    matching — see §5.3 (asymmetry with video).
+  - Video: **duration** + a sequence of **per-frame PDQ** hashes (+ quality) sampled at fixed
+    fractions of the timeline (§5.3). Frames use the *same* PDQ as photos — after §7 dropped photo
+    pHash, nothing in packrat uses pHash anymore.
 - **Semantic embedding — CLIP vector.** Computed **only** on an explicit `scan --embed`, stored
   for future semantic search / trash-tagging (§7). **It never participates in any duplicate
   decision** — semantic similarity is not duplicate-ness (two different receipts, or two beach
@@ -259,22 +432,71 @@ A single scope-agnostic matcher, run only by `dedup` and `cleanup --perceptual`.
 perceptual signature alone (never CLIP), over fingerprints already in the DB — pure hash math, no
 file I/O.
 
-- **Photo:** primary signal is **PDQ Hamming distance**; pHash corroborates. PDQ at a sane
-  threshold is precise on the recompress/resize/format-conversion case — essentially the entire
-  iPhone-re-export reality — so one robust signal is both sufficient and higher-recall than
-  gating two signals together.
-- **Video:** durations within a tolerance **and** a majority of sampled frame pHashes match
-  within threshold. Matching **pre-filters by duration** (bucket by length ±tolerance, compare
-  only within a bucket) to avoid the naïve frame-by-frame blowup.
+- **Photo:** the **only** signal is **PDQ Hamming distance**. PDQ at a sane threshold is precise
+  on the recompress/resize/format-conversion case — essentially the entire iPhone-re-export
+  reality — so one robust signal is both sufficient and higher-recall than gating two signals
+  together (which is why pHash is not computed or stored for photos at all — decided in §7 gap
+  review; a single signal, no dead data, no second threshold to tune).
+  - **Photo quality — annotate, never gate (asymmetric with video).** PDQ's 0–100 quality is
+    *stored* per photo but **does not exclude** a photo from matching. This is deliberate and
+    differs from video (`video.min_frame_quality`): a video has ~12 frames, so dropping a bad one
+    still leaves plenty to vote; a photo has **exactly one** PDQ, so gating it out would make the
+    asset **silently invisible to dedup** — a recall loss the user can't see, against the plan's
+    recall-first tenet. Instead quality is used two safe ways:
+    1. **Confidence hint in review.** PDQ on flat/near-black/letterboxed/low-detail images yields
+       hashes that spuriously collide, flooding review with junk pairs. So every staged photo
+       near-dup carries its (and its partner's) quality in the `manifest.csv` / `proposed.json`
+       (§8 B), and a pair where *either* photo is below `review.low_quality_hint` (default **50**,
+       same scale as video) is **flagged low-confidence** — a visual cue to skip it fast, not a
+       removal. Nothing is hidden; noisy matches are just easy to dismiss.
+    2. **Future gate, no re-scan.** Because quality is already stored, a `min_photo_quality` *gate*
+       (if calibration on real data shows the collision flood is worse than the recall cost) can be
+       switched on later **without re-decoding the collection**. Off by default in v1.
+- **Video:** durations within a tolerance **and** at least a configured fraction
+  (`video.frame_match_fraction`, default 0.60 — see table) of sampled frame descriptors match
+  within threshold. **Frame descriptor is PDQ** — the same 256-bit hash used for photos, run on
+  each sampled RGB frame (a decoded frame is just an image; per-frame PDQ is exactly what Meta's
+  TMK+PDQF does — §14 #3). This **unifies photo and video on one algorithm and drops the
+  `imagehash` dependency entirely** (after §7 removed photo pHash, video frames were its only
+  remaining use). Matching **pre-filters by duration** (compare only clips within ±tolerance) to
+  avoid the naïve all-pairs blowup, then compares the two clips **frame-index-aligned** (frame *k*
+  of A vs frame *k* of B), which is valid because both are sampled at the *same relative timeline
+  positions* and the duration pre-filter keeps their lengths close enough to stay aligned.
 
-**Single match threshold `T_match`** (configurable and logged): a pair is a near-dup iff PDQ
-distance ≤ `T_match` (video: duration + majority-frame test). One threshold is enough because
-**every** perceptual match is surfaced for human review — nothing is auto-acted-on — so there is
-no need for a second "auto vs. borderline" cutoff. Set `T_match` high enough to catch what
-PDQ/pHash *structurally* can (recompression, resize, format conversion) plus the harder cases you
-want a look at (crops, rotations, borders/watermarks, heavy re-encodes); every hit lands in the
-review folder either way, so a permissive threshold just means more candidates to eyeball, never a
-silent deletion. The operation (§8 B / §6.2) decides how matches are staged.
+  **Video match parameters (concrete defaults; canonical values live in `config.toml` §9.2, logged
+  with each run).** These were previously unspecified — pinned here so §8 B / §6.2 are
+  implementable:
+
+  | Param | Default | Meaning |
+  |---|---|---|
+  | `video.sample_frames` | **12** | Frames sampled per video, at the **midpoints of N equal segments**: `t_k = duration·(k+0.5)/N`, `k=0..N-1`. Proportional positions ⇒ same-content clips align frame-to-frame. Short clips (e.g. a 3 s Live-Photo `.MOV`) still get all 12. |
+  | `video.duration_tol_s` | **1.0 s** | Absolute floor of the duration pre-filter. |
+  | `video.duration_tol_pct` | **5.0 %** | Relative part. Two videos pass the pre-filter iff `|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min(d₁,d₂))` — so a 3 s clip tolerates ~1 s drift, a 2 h movie ~6 min. |
+  | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoff `T_match_photo`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) |
+  | `video.frame_match_fraction` | **0.60** | The two videos are a near-dup iff **≥ 60 %** of *comparable* frame-pairs (see quality gate) match within `T_match_video`. This vote is video's *second* precision control — the one photos lack — which is exactly why the two cutoffs need not (and should not) be equal. |
+  | `video.min_frame_quality` | **50** | PDQ emits a 0–100 quality per frame; dark/blurry/transition frames score low and hash unreliably. A frame below this is **excluded** from comparison (stored, but flagged). A frame-pair is *comparable* only if **both** frames clear the gate. |
+  | `video.min_comparable_frames` | **5** | If fewer than this many comparable frame-pairs remain after the quality gate, the pair is **not** matched — insufficient evidence beats a coin-flip. |
+
+**Two match-distance thresholds — `T_match_photo` and `T_match_video`** (both configurable and
+logged). Same 0–255 PDQ Hamming scale, but tuned independently because photo and video use the
+distance differently: for a **photo** the single comparison *is* the decision, so its cutoff bears
+all the precision/recall weight; for a **video** the per-frame cutoff only feeds a **majority vote**
+(`video.frame_match_fraction`) that acts as a second precision control, and frames are noisier
+inputs — so `T_match_video` is typically the more permissive of the two. A pair is a near-dup iff:
+- **photo:** PDQ Hamming distance ≤ `T_match_photo`;
+- **video:** the two clips pass the duration pre-filter **and** ≥ `video.frame_match_fraction` of
+  their *comparable* (quality-gated) frame-pairs are each within `T_match_video` **and** at least
+  `video.min_comparable_frames` comparable pairs exist (table above).
+
+No *second, per-medium* "auto vs. borderline" cutoff is needed on top of these, because **every**
+perceptual match is surfaced for human review — nothing is auto-acted-on. (The other `video.*`
+knobs are *structure* parameters — how many frames, how close in length, how many must agree — not
+distance cutoffs.) Set each threshold high enough to catch what PDQ *structurally* can
+(recompression, resize, format conversion) plus the harder cases you want a look at (crops,
+rotations, borders/watermarks, heavy re-encodes); every hit lands in the review folder either way,
+so a permissive threshold just means more candidates to eyeball, never a silent deletion. The
+operation (§8 B / §6.2) decides how matches are staged. **Both thresholds and every `video.*` knob
+need calibration on real data — §14 #1.**
 
 **Comparison set depends on the caller:**
 - **`dedup`** compares a folder's assets against **active assets only** — trashed assets are
@@ -311,9 +533,10 @@ Two distinct ways content leaves the collection — treated very differently:
    manually moves or copies the file into a **registered trash folder** (a root with
    `kind='trash'`). A registered trash folder is a transient **inbox**: the user drops junk in,
    and *refreshing the trash collection* (below) absorbs it into the permanent trashed-hash memory
-   and empties the folder. Trashed fingerprints are kept **forever**, so future merges exclude
+   and empties the folder. Trashed fingerprints are kept **indefinitely**, so future merges exclude
    anything matching them — this is what stops junk that still lives on the iPhone from being
-   re-merged even after you emptied the trash folder.
+   re-merged even after you emptied the trash folder. (Not *irreversibly*: an accidental trash can
+   be undone with **`packrat untrash`** — §6.3 — which forgets a fingerprint from trash memory.)
 
    (Content can also become `trashed` via **dedup** — when the user discards a perceptual
    near-duplicate during a dedup run, that asset is marked `trashed` with the same
@@ -331,7 +554,7 @@ as `packrat trash refresh`). Steps:
 
 1. For **every** registered `kind='trash'` root, enumerate its files (same allowlist/ignore rules
    as scan). For each file:
-   - Compute BLAKE3 + perceptual signature (PDQ/pHash; video frame hashes). **No embedding.**
+   - Compute BLAKE3 + perceptual signature (photo PDQ; video per-frame PDQ). **No embedding.**
    - Resolve against `assets.content_hash`:
      - **New content** → create an asset with `status='trashed'`, `trashed_at`,
        `trash_reason='trash-folder'`, and persist its `phash`/`vphash` (so perceptual trash
@@ -361,7 +584,9 @@ as `packrat trash refresh`). Steps:
 > a file in a trash folder **is** the act of trashing it, so absorbing + emptying it is expected
 > regardless of what the surrounding command does or previews. Do not use a trash folder as
 > scratch space — anything left there when `refresh`/`cleanup`/`merge`/`trash refresh` runs is
-> consumed. (Recoverable from the Recycle Bin if truly needed.)
+> consumed. (Recoverable from the Recycle Bin **only if the trash root is on a local volume**; a
+> trash root on a NAS/SMB share is emptied **permanently** — §10. Since refresh has no confirm
+> gate, treat a network trash folder as one-way: whatever you drop in is gone once it runs.)
 
 **`scan` never touches trash roots** — indexing a trash folder is only ever done here (see §8 A2
 validation). This keeps the "inbox that gets emptied" semantics from colliding with scan's
@@ -382,20 +607,25 @@ Two modes:
   exact and reviewed-perceptual deletions apply together at `--confirm`.
 
 **Shared validation & lock (both modes):** `<folder>` must be a registered **library** root —
-reject a `kind='trash'` root (its files are consumed by refresh, not cleaned). Take the same
-per-root exclusion as dedup: reject if a `pending` dedup run, a `pending` perceptual-cleanup run,
-or an in-flight merge targets this root (they may stage `.lnk`s pointing at files cleanup would
-delete, leaving broken shortcuts / a stale plan); likewise dedup/merge reject a root with a
-cleanup in progress. Recommend a fresh `scan <folder>` first so newly-arrived files are indexed;
-cleanup operates on indexed instances.
+reject a `kind='trash'` root (its files are consumed by refresh, not cleaned). Then apply the
+**§3 per-root exclusivity invariant**: reject if this root already has an active operation — a
+`pending` dedup run, a `pending` perceptual-cleanup run, or an in-flight merge (an open
+`merge_runs` row with `dest_root_id` = this root, §4) — since they may stage `.lnk`s pointing at
+files cleanup would delete, leaving broken shortcuts / a stale plan; conversely, once a
+`--perceptual` cleanup opens its own `pending` `review_runs` row it *owns* the root, so dedup,
+merge, **and scan** (via §8 A2 step 1a) are blocked on it until confirm/cancel. Recommend a fresh
+`scan <folder>` first so newly-arrived files are indexed (run it *before* cleanup, since scan is
+blocked once the pending run opens); cleanup operates on indexed instances.
 
 #### Default mode — `packrat cleanup <folder>`
 1. **Refresh the trash collection** (§6.1), so the trashed set is fully current.
 2. In `<folder>`, find every `file_instances` row whose asset has `status='trashed'`, matched by
    **exact content hash only**.
-3. **Print the count** and require typed confirmation — a sanity check, **no staging folder**.
-4. On confirm, move each matched file to the **Recycle Bin** and delete its `file_instances` row.
-   The asset stays `trashed` (fingerprints retained). Report deleted count.
+3. **Print the count** and require typed confirmation — a sanity check, **no staging folder**. If
+   `<folder>` is on a network/SMB root, warn that deletion is **permanent** (no Recycle Bin — §10).
+4. On confirm, move each matched file to the **Recycle Bin** (permanent on NAS/SMB — §10) and
+   delete its `file_instances` row. The asset stays `trashed` (fingerprints retained). Report
+   deleted count.
 
 #### Perceptual mode — `packrat cleanup <folder> --perceptual` (analyze → `--confirm`)
 Analyze:
@@ -403,12 +633,14 @@ Analyze:
 2. **Exact matches:** find library instances whose asset is `trashed` (exact hash), as in default
    mode — but **do not delete yet**; record them in the plan.
 3. **Perceptual matches:** run the §5 matcher for `<folder>`'s active-asset instances against the
-   **trashed** set (PDQ / video-frame; duration pre-filter). Each library file within `T_match`
-   of a trashed asset is a perceptual-trash candidate.
+   **trashed** set (photo PDQ ≤ `T_match_photo` / video per-frame ≤ `T_match_video` + frame vote;
+   duration pre-filter). Each library file matching a trashed asset per §5.3 is a perceptual-trash
+   candidate.
 4. **Stage for review** at `<root>\_packrat_review\_perceptually_identified_trash\`: one `.lnk`
    per perceptual candidate (stat-before-create, so no broken `.lnk`; §8 B Phase 4 rules), plus a
-   `manifest.csv` (shortcut → target path → matched trashed asset → distance). Write a
-   `proposed.json` audit record (§8.1 style).
+   `manifest.csv` (shortcut → target path → matched trashed asset → distance → `quality` →
+   `low_confidence`, same photo-quality confidence hint as dedup — §5.3). Write a `proposed.json`
+   audit record (§8.1 style).
 5. **Report** the exact-match count (will delete on confirm) and perceptual-candidate count
    (staged for review), print the `--confirm` / `--cancel` commands, and **pause**.
 
@@ -418,7 +650,8 @@ spare** the file (mark it "not trash" for this run). Renames count as removal (s
 
 `packrat cleanup <folder> --confirm`:
 6. Re-verify liveness per file (lazy stat, as §8 B Phase 6). Require typed confirmation of the
-   combined delete set. Then, to the **Recycle Bin**:
+   combined delete set; if `<folder>` is on a network/SMB root, warn that deletion is **permanent**
+   (no Recycle Bin — §10). Then, to the **Recycle Bin** (permanent on NAS/SMB — §10):
    - **Exact matches** → delete the `file_instances` row; asset stays `trashed`.
    - **Perceptual matches still staged** (shortcut present) → delete the file **and mark its own
      asset `status='trashed'`**, `trash_reason='cleanup-perceptual'`, fingerprints retained — so
@@ -435,6 +668,68 @@ no-op variant isn't worth building, and it is non-destructive to your *library* 
 hashes and empties the transient trash inbox — which is what trashing already means). Dry-run's
 guarantee is scoped precisely: **it never deletes from the library folder being cleaned**; it may
 still empty the trash inboxes.
+
+### 6.3 `packrat untrash <path>` — forget content from trash memory
+
+The reversal for an accidental trash (a file dropped in the wrong folder, a `dedup`/`cleanup`
+perceptual discard you regret). Its job is narrow and precise: **remove a fingerprint from the
+permanent trashed-hash set** so the content is no longer excluded from future merges.
+
+**What untrash is NOT — it does not restore bytes.** A trashed asset stores only *fingerprints*
+(hash, PDQ), never pixels — so packrat cannot reconstruct, preview, or recover the file itself.
+Getting the *file* back is the Recycle Bin's job (where one exists — §10), entirely separate. So
+untrash never previews and never writes to disk; it only edits DB rows. This is why identification
+is **by presenting the file**, not by browsing a gallery of ghosts:
+
+```
+packrat untrash "R:\recovered\IMG_4471.jpg"     # one file
+packrat untrash "R:\recovered\2019\"            # every media file under a folder (recursive)
+packrat untrash "…" --dry-run                   # report what would be forgotten; change nothing
+```
+
+**The path is just bytes to hash — it need NOT be a registered root, and untrash does not
+catalog it.** This is the key difference from `scan`/`cleanup` (which operate on the catalog):
+untrash reads arbitrary files off disk *purely to compute their BLAKE3* for a trash-memory lookup.
+The file you're holding (pulled from the Recycle Bin, still on the iPhone, recovered anywhere) *is*
+the identifier — the real thing stands in for a preview packrat can't produce. It's fine — expected,
+even — for `<path>` to point outside every root.
+
+**Procedure:**
+1. Resolve `<path>`: a file, or a folder walked recursively with the **same allowlist/ignore rules
+   as scan** (§8 A1) so non-media is skipped. Error if the path doesn't exist / isn't readable.
+   (No root resolution, no overlap check — the location is irrelevant.)
+2. For each file, compute **BLAKE3** (no metadata, no perceptual — exact-hash match only, chosen in
+   the §10 gap review: false-positive-free, like `cleanup`'s default mode) and look it up in
+   `assets.content_hash`:
+   - **Matches a `trashed` asset** → untrash it (per-asset rule below). Count as `untrashed`.
+   - **Matches an `active` asset** → already not trash; no-op, count as `already-active`.
+   - **No match** → packrat never knew this content (or already forgot it); no-op, count as
+     `unknown`. (Untrash **never creates** an asset — presenting a novel file just does nothing.)
+3. **Per-asset untrash rule** (mirrors §4's forget/keep logic, inverted):
+   - **Trashed asset still has ≥1 live `file_instances` row** (e.g. refresh flipped a library
+     folder to `trashed` but no `cleanup` has deleted the files yet) → flip **`status` back to
+     `active`**, clear `trashed_at`/`trash_reason`, **retain fingerprints** (they're valid). It
+     simply rejoins the collection in place — nothing was lost.
+   - **Trashed asset with zero instances** (the physical copies were emptied/deleted) → **forget it
+     entirely**: delete the asset and its dependent rows (`phash`/`vphash`/`embeddings`/
+     `similarity_edges`, via `ON DELETE CASCADE`). There is nothing to reactivate — the bytes are
+     gone — so we drop the blocklist entry and let the content be treated as **brand-new** if it
+     ever reappears in a future merge/scan (exactly the plain-Explorer-delete "forget" model, §6
+     case 1). This is the case that resolves the gap: the *hash* stops excluding re-imports.
+4. **Report:** `untrashed` (reactivated in place), `forgotten` (zero-instance, blocklist entry
+   dropped), `already-active`, `unknown`. **Nothing on disk changed.**
+
+**Safety & interactions:**
+- **Non-destructive to files by construction** — untrash only reads (to hash) and writes DB rows;
+  it moves/deletes nothing. No typed confirmation needed for the file/dry-run path. *(A future
+  batch mode — `--since`/`--reason` — that forgets many entries without presenting files would want
+  a count-confirm; deferred, §14.)*
+- **Per-root exclusivity (§3):** untrash is a mutating job (takes a global worker slot), but it
+  targets *no* root, so it acquires **no** per-root ownership and is never blocked by / never blocks
+  a pending review or merge. It touches only `assets`/fingerprint rows by hash.
+- **`--dry-run`** reports the same counts without modifying the DB. (Unlike `cleanup`/`merge`,
+  untrash does **not** call refresh, so its dry-run truly changes nothing — §6.1's
+  always-absorb rule doesn't apply here.)
 
 ---
 
@@ -468,7 +763,7 @@ the `tags` table is intentionally omitted from the schema (§4) until then.
 This section specifies three behaviors, step by step, so the logic can be reviewed
 for correctness:
 
-- **A. Add a folder to the collection** — catalog an existing on-disk folder (`register` +
+- **A. Add a folder to the collection** — catalog an existing on-disk folder (`roots register` +
   `scan`). Pure indexing; it never moves, renames, copies, or deletes any file. Only the
   database changes. Scan writes **all per-asset fingerprint data** to the DB.
 - **B. Dedup a single registered folder** — from the DB fingerprints (plus a liveness check),
@@ -512,20 +807,23 @@ All three rely on the **asset / file-instance** split and the identity rules bel
 Adding a folder is deliberately split into two commands so a cheap bookkeeping action is never
 coupled to a multi-hour fingerprinting job:
 
-- **`register`** — record the folder as a root. Metadata-only, instantaneous, touches no files.
+- **`roots register`** — record the folder as a root. Metadata-only, instantaneous, touches no files.
 - **`scan`** — walk a registered root and fingerprint its contents. This is the resumable,
   long-running indexing job. **It does not compute CLIP embeddings unless `--embed` is passed**
   — dedup never needs them, so the default scan stays lean.
 
 Both are non-destructive: files are read-only, the only writes are to the packrat database.
+(`roots register` is grouped under the `roots` command — the noun for root lifecycle/metadata —
+alongside `roots list`; `scan` stays a flat top-level verb because it is a *job run against* a
+root, not root bookkeeping. See §11.)
 
 ---
 
-#### A1. `register` — declare a folder as a root (metadata-only)
+#### A1. `roots register` — declare a folder as a root (metadata-only)
 
 ```
-packrat register "D:\Backup\iPhone"           # default kind: library
-packrat register "D:\Backup\iPhone" --scan    # register, then immediately kick off a scan
+packrat roots register "D:\Backup\iPhone"           # default kind: library
+packrat roots register "D:\Backup\iPhone" --scan    # register, then immediately kick off a scan
 ```
 
 1. Resolve the path to an absolute, long-path-safe form; require it to exist, be a directory,
@@ -577,7 +875,7 @@ qualifies as media at all), while **`--ignore` patterns are gitignore-style path
 only if its extension is in the allowlist AND it matches none of the ignore patterns.
 
 Registering alone leaves the collection unchanged in content terms; it just tells packrat this
-folder exists and how to treat it. Follow with `scan` (or use `register --scan`).
+folder exists and how to treat it. Follow with `scan` (or use `roots register --scan`).
 
 ---
 
@@ -595,10 +893,19 @@ exact byte-identity, which scan must resolve because it decides asset identity. 
 notes exactly what it writes.
 
 **Phase 1 — Enumerate**
-1. Resolve the target to a registered root (error if it isn't one — `register` it first).
+1. Resolve the target to a registered root (error if it isn't one — `roots register` it first).
    **Reject `kind='trash'` roots** — trash folders are transient inboxes indexed only by "refresh
    the trash collection" (§6.1), never by `scan` (whose "index and keep" semantics would fight the
    "index then empty" model). → reads `roots` (match `path`); no write.
+1a. **Per-root exclusivity check (§3 guarantee 2).** If this root has an active operation — a
+   `pending` `review_runs` row (dedup or cleanup) or an open `merge_runs` row
+   (`status IN ('planning','copying')`) with this root as `dest_root_id` — **do not scan it**, so
+   scan's deletion-detection (Phase 3 step 11) can never churn the `file_instances`/assets that an
+   open review plan references. A **manual `scan <root>`** errors, naming the holder and telling
+   the user to `--confirm`/`--cancel` the review (or let the merge finish) first. A **`--all` or
+   scheduled** scan **skips this root and logs the skip** (one under-review root must not stall the
+   whole sweep); the skipped root is listed in the report. → reads `review_runs`/`merge_runs`; no
+   write.
 2. Recursively walk the root, applying the ignore set, to build the candidate worklist.
    → no DB write (in-memory worklist).
 3. Open a job row. → **write** `jobs`: `type='scan'`, `status='running'`, `total`=file count,
@@ -608,9 +915,30 @@ notes exactly what it writes.
 For every candidate file:
 4. **Fast-path skip (tolerant-mtime key).** If a `file_instances` row exists at this exact `path`,
    its `size` matches exactly, its `mtime` matches within a small **tolerance**
-   (`fastpath.mtime_tolerance_s`, default 2 s), and its asset is fully fingerprinted → **write**
-   `file_instances.last_seen_at` (now) only; skip the rest. `--full` ignores the fast-path and
-   re-fingerprints unconditionally.
+   (`fastpath.mtime_tolerance_s`, default 2 s), and its asset is **fully fingerprinted** (defined
+   below) → **write** `file_instances.last_seen_at` (now) only; skip the rest. `--full` ignores the
+   fast-path and re-fingerprints unconditionally.
+   - **"Fully fingerprinted" — the predicate (authoritative; used here, in step 6's backfill
+     exception, and by the undecodable-retry rule).** An asset is fully fingerprinted iff **either**:
+     - **`undecodable=1`** — it is as fingerprinted as it will ever be: hash-only identity, no
+       perceptual data *by design* (§9.1). Treated as complete so a plain scan doesn't re-decode a
+       known-bad file every pass; only **`scan --full`** retries it (§8 A2 step 8 retry note). **Or**
+     - **`undecodable=0` AND its perceptual rows for its `media_type` are present:**
+       - **photo** → the asset's single `phash` (PDQ) row exists. (Written in the *same*
+         transaction as the asset in step 9, so it's all-or-nothing — a partial perceptual write
+         is impossible.)
+       - **video** → a `vphash` row exists for the asset. (Likewise written atomically in step 9,
+         so any frame row present ⇒ the full sampled set is present.)
+     **Embeddings are deliberately NOT part of this predicate** — they are opt-in and decoupled
+     (§5/§7). Requiring them would force every non-`--embed` scan to re-process every asset. The
+     `--embed` pass has its own "no `embeddings` row yet" gate (Phase 3 step 10), independent of
+     the fast-path.
+   - **Consequence for merge-created assets.** A file copied by `merge` gets an `assets` row with
+     `undecodable=0` and **no** `phash`/`vphash` yet (§8 C step 11), so it is **not** fully
+     fingerprinted → the fast-path won't skip it → the next `scan <dest>` hashes it, hits the
+     existing asset (step 6), and takes the **backfill exception** to fill perceptual data
+     in place. This is exactly why the predicate must distinguish "no perceptual rows because
+     not-yet-attempted" (fill it) from "no perceptual rows because undecodable" (leave it).
    - **Why exact `size` but tolerant `mtime`:** size is high-entropy for media (two different
      photos/videos almost never share a byte count), so it is the strong change signal; mtime is
      a *weaker corroborator* whose exact value is unreliable across SMB/exFAT (2 s FAT rounding,
@@ -623,43 +951,86 @@ For every candidate file:
      exists as the backstop. Setting `mtime_tolerance_s=0` restores strict `path+size+mtime`.
 5. **Content hash** — BLAKE3, streamed. → no write yet (value held for step 6).
 6. **Exact-dup resolution.** Look up `assets.content_hash`.
-   - **Hit** → this is another copy of a known asset: **write** a `file_instances` row
-     (`asset_id`=existing, `root_id`, `path`, `filename`, `size`, `mtime`, `last_seen_at`) and
-     **stop** (no metadata/perceptual work). If the hit asset was `trashed`, this is a re-appeared
-     trashed fingerprint — see Phase 4. This is how identical bytes in two folders become one
-     asset with two instances (enforced by the `content_hash` unique index).
+   - **Hit** → this is another copy of a known asset: **upsert** a `file_instances` row
+     **keyed by (`root_id`, `path`)** — insert if no row exists at this path, else update the
+     existing row's `asset_id`/`size`/`mtime`/`last_seen_at` in place — then normally **stop** (no
+     metadata/perceptual work). Upsert-by-path (not blind insert) makes re-encountering a
+     known file idempotent: a `--full` re-hash, an mtime-drift re-hash, or a merge-created file's
+     first backfill scan (case (a) below) all already have a row at this path and must reuse it,
+     never create a second instance of the same physical file. If the hit asset was `trashed`,
+     this is a re-appeared trashed fingerprint — see Phase 4. This is how identical bytes in two
+     *different* paths become one asset with two instances (enforced by the `content_hash` unique
+     index on assets; `file_instances` is unique on (`root_id`,`path`)).
+     - **Backfill exception (a hit that should still (re)compute perceptual data).** After
+       attaching the instance, **continue to steps 7–8** and in step 9 **update the existing asset
+       in place** (write/replace `phash`/`vphash`, refresh metadata, set/clear
+       `undecodable`/`decode_error`) — *not* insert a new asset — when the hit asset is either:
+       - **(a) not-yet-fingerprinted:** `undecodable=0` with **no** perceptual rows — characteristically
+         a merge-created asset (§8 C step 11). Fires on **any** scan (incremental or `--full`): such
+         an asset fails the step-4 predicate, so an unchanged merge-created file reaches step 6 even
+         on a plain incremental scan, and gets filled in here.
+       - **(b) undecodable retry:** `undecodable=1` **and this is `--full`** — re-attempt decode
+         after a decoder/library upgrade; on success clear `undecodable` and write phash, on failure
+         leave `undecodable=1` with a refreshed `decode_error`. (A plain incremental scan does **not**
+         retry undecodables — the step-4 predicate treats them as complete.)
+       Otherwise the hit **stops early** (the normal case): a decodable, perceptually-complete asset
+       has byte-identical content, so there is nothing to redo — true even under `--full`, whose job
+       is to catch byte *changes*, which surface as a hash **miss** (or a hit on a *different* asset),
+       never as a hit on this same asset.
    - **Miss** → continue; create the asset in step 9.
 7. **Metadata** — decode/probe for dimensions, duration, capture time, codec (exiftool /
-   ffprobe). → values held for step 9 (→ `assets.width/height/duration_s/captured_at`,
-   `media_type`, `size`).
-8. **Perceptual signature** — photo: PDQ (primary) + pHash; video: duration + sampled frame
-   pHashes. → values held for step 9 (→ `phash` / `vphash` rows). *No near-dup comparison here.*
+   ffprobe). → values held for step 9 (→ `assets.width/height/duration_s/captured_at`, `size`).
+   (`media_type` is decided by **extension** via the allowlist — §8 A1 — not by decoding, so it is
+   known even for files that won't decode.)
+8. **Perceptual signature** — photo: PDQ + quality; video: duration + PDQ (with quality) of each of
+   the `video.sample_frames` frames sampled at fixed timeline fractions (§5.3). → values held for
+   step 9 (→ `phash` / `vphash` rows). *No near-dup comparison here.*
+   - **Decode failure (graceful, §9.1):** if the pixels/frames won't decode (corrupt file,
+     unsupported codec, missing wheel), **do not crash and do not abort the asset** — the BLAKE3
+     hash (step 5) already gives it identity. Record it in step 9 with **`undecodable=1`**, the
+     `decode_error` detail, and **no `phash`/`vphash` rows**. Metadata (step 7) is best-effort:
+     keep whatever `exiftool`/`ffprobe` returned (they often read headers of files Pillow/PyAV
+     can't fully decode); leave the rest NULL. Log and move on.
 9. **Persist the new asset (single transaction).** → **write**:
    - `assets`: `content_hash`, `media_type`, `size`, `width`, `height`, `duration_s`,
-     `captured_at`, `status='active'`, `added_at`.
+     `captured_at`, `status='active'`, `added_at`, `undecodable` (0 normally, 1 on step-8 decode
+     failure), `decode_error` (NULL unless undecodable).
    - `file_instances`: `asset_id`, `root_id`, `path`, `filename`, `size`, `mtime`,
      `last_seen_at`.
-   - `phash`: one row per algo — (`asset_id`, `algo='pdq'`, `bits`), (`asset_id`,
-     `algo='phash'`, `bits`).
+   - `phash` (photo only): the single PDQ row — (`asset_id`, `algo='pdq'`, `bits`, `quality`).
+     **Omitted entirely if `undecodable=1`.**
    - `vphash` (video only): one row per sampled frame — (`asset_id`, `frame_index`,
-     `t_offset_s`, `phash_bits`).
-   Then **write** `jobs.done += 1` (checkpoint).
+     `t_offset_s`, `pdq_bits`, `quality`). **Omitted entirely if `undecodable=1`.** A video that
+     decodes but yields **zero** usable frames (all failed to decode) is treated as undecodable.
+   Then **write** `jobs.done += 1` (progress-bar counter — see §4; the *durable* record that this
+   file is done is the committed `file_instances`/asset rows above, which the fast-path reads on
+   re-run, not `done`).
+
+   **Retrying undecodables:** an `undecodable=1` asset has no perceptual rows *permanently*, so the
+   fast-path (step 4) treats it as "fully fingerprinted" and won't re-decode it every scan (§8 A2
+   step 4 / gap-#3 predicate). To force a retry after a decoder/library upgrade (e.g. a new
+   `pillow-heif` that now handles a format), run **`scan --full`**, which bypasses the fast-path,
+   re-attempts decode, and **clears `undecodable`/`decode_error` and writes phash rows** if it now
+   succeeds. A plain incremental scan never retries them.
 
 *(Near-dup linking is intentionally absent — it is the `dedup` operation, §B, which writes the
 `similarity_edges` table from this data. Scan never writes similarity edges.)*
 
 **Phase 3 — Embeddings (only if `--embed`)**
 10. **By default skipped entirely — no embeddings computed, no `embeddings` rows written.** With
-    `--embed`, assets with no current `embeddings` row for the active model are queued for a
-    batched CLIP pass → **write** `embeddings`: (`asset_id`, `model`, `vector`). Fully decoupled:
-    skipping or failing this leaves every dedup/merge result identical; backfillable later.
+    `--embed`, assets with no current `embeddings` row for the active model **and `undecodable=0`**
+    are queued for a batched CLIP pass → **write** `embeddings`: (`asset_id`, `model`, `vector`).
+    (Undecodable assets are skipped — CLIP needs a decoded frame, which is exactly what failed.)
+    Fully decoupled: skipping or failing this leaves every dedup/merge result identical;
+    backfillable later.
 11. **Deletion detection (every completed scan of a reachable root — not just `--full`).**
     Reconcile files removed from disk since last scan. This needs **no re-hashing**: enumeration
     (Phase 1 step 2) walks the whole tree on *every* scan, and every present file has its
     `file_instances.last_seen_at` bumped this pass (step 4 fast-path or step 9). So gone files are
     simply the rows this scan never touched:
     - `DELETE FROM file_instances WHERE root_id=? AND last_seen_at < <this scan's start time>`
-      — i.e. any instance under this root not seen this pass → **delete the row**.
+      **AND the instance's parent directory was cleanly enumerated this pass** (see guard) — i.e.
+      any instance under a fully-listed directory not seen this pass → **delete the row**.
     - Then for each affected asset: if it is `active` and now has **zero** instances anywhere →
       **delete the asset** (cascading `phash`/`vphash`/`embeddings`/`similarity_edges`) — it is
       forgotten, not remembered as missing (§6: a plain filesystem delete is not trash). A
@@ -668,9 +1039,14 @@ For every candidate file:
     (`--full` governs re-*hashing* via the fast-path bypass; it does **not** govern deletion
     detection, which keys off enumeration + `last_seen_at` and therefore runs on incremental scans
     too.)
-    **Guard:** run this only if the root was fully and cleanly enumerated this pass; skip entirely
-    for an offline/unreadable root or any directory whose listing errored/timed out (§10.1), so
-    incomplete data is never mistaken for "files deleted."
+    **Guard (per-directory, §10.1):** reconcile an instance only if its **containing directory was
+    fully and cleanly enumerated this pass**. Skip (leave untouched, report) instances under any
+    directory whose listing errored/timed out, and under a fully offline/unreadable root skip
+    everything — so incomplete data is never mistaken for "files deleted," and one flaky folder on a
+    large NAS root no longer disables reconciliation for the whole root (only that subtree). Track
+    the cleanly-enumerated directory set in Phase 1. (Separately, a root under an open review/merge
+    never reaches this step at all — step 1a refuses to scan it — so deletion-detection cannot churn
+    an active plan's referenced rows; that is a distinct reason to skip.)
 12. Close the job → **write** `jobs.status='done'`, `finished_at` (or `status='error'`, `error`).
 
 **Phase 4 — Trashed-fingerprint handling**
@@ -688,8 +1064,12 @@ For every candidate file:
     **Nothing on disk changed.**
 
 **Idempotency & resume:** re-running `scan` on the same root is a no-op except for genuinely
-new/changed files (fast-path skips the rest). An interrupted job resumes from its last
-`jobs.done` checkpoint. Re-running `register` on an existing root is rejected by the overlap check.
+new/changed files — the **fast-path** (step 4) skips the rest, which is what makes an interrupted
+scan effectively resume: already-persisted files are cheap no-ops on the next pass, so the work
+picks up where it stopped without any explicit cursor. (`jobs.done` is only the progress number,
+§4 — not the resume key.) If the daemon died mid-scan, startup reconciliation flips the stale
+`running` row to `interrupted` (§3); the next `scan` (manual or scheduled) then continues via the
+fast-path. Re-running `roots register` on an existing root is rejected by the overlap check.
 
 ---
 
@@ -723,7 +1103,7 @@ spared. The pipeline can only ever act on *fewer* files than the DB preview impl
 packrat dedup "D:\Backup\iPhone"            # analyze → stage shortcuts → pause (status: pending)
 packrat dedup "D:\Backup\iPhone" --confirm  # apply the user's review → delete → status: completed
 packrat dedup "D:\Backup\iPhone" --cancel   # discard staging, delete nothing
-packrat dedup --status                      # show each root's dedup state (pending/completed)
+# (per-root dedup/review state is shown by the general `packrat status`, §11)
 ```
 
 Terminology: **target folder** = the root passed to `dedup`. **External folder** = any *other*
@@ -744,10 +1124,14 @@ registered root. **Survivor** = the one file instance of an asset that dedup kee
 
 **Phase 0 — Validate & lock**
 1. Resolve `<folder>` to a registered root (error if not). → **read** `roots`.
-2. Reject if a `pending` `review_runs` row already exists for this root. Also reject if a merge
-   into this root is mid-flight (an open merge plan targeting it) — both write under this root's
-   `_packrat_review\`, so they must not overlap. Otherwise **write** a `review_runs` row
-   (`root_id`, `status='pending'`, `created_at`) and open a `jobs` row (`type='dedup'`).
+2. **Per-root exclusivity (§3 guarantee 2).** Reject if this root already has an active operation:
+   a `pending` `review_runs` row (another dedup or a cleanup), or an in-flight merge — an open
+   `merge_runs` row (`status IN ('planning','copying')`) with `dest_root_id` = this root (§4).
+   (A concurrent *scan* of this root can't coexist either, but the block is symmetric: scan's own
+   step 1a refuses to start once this dedup's `review_runs` row exists, and the global single-worker
+   queue prevents a scan and this dedup analyze from running at the same instant.) Otherwise
+   **write** a `review_runs` row (`root_id`, `status='pending'`, `created_at`) — which now *owns*
+   the root until confirmed/cancelled — and open a `jobs` row (`type='dedup'`).
 
 **Phase 1 — Build from the DB (no eager stat)** *(edge case 5)*
 Analyze builds the plan directly from existing `file_instances` rows; it does **not** stat files.
@@ -781,9 +1165,19 @@ For each asset with ≥1 live instance **in the target folder**:
    in the collection (**trashed assets excluded** — see §5), and **upsert** the results into
    `similarity_edges` (this is the operation that populates that table — see §4/§8 division of
    labor). Pure DB + fingerprint math, no file I/O: it reads `phash`/`vphash` rows and writes
-   edges. Video matching **pre-filters by duration** (bucket by length ±tolerance; only compare
-   within a bucket) to avoid the naïve frame-by-frame blowup. `--reuse-edges` skips this and uses
-   whatever edges already exist (faster re-runs when nothing changed since the last dedup).
+   edges. Video matching **pre-filters by duration** — compare only pairs whose durations are within
+   tolerance per the §5.3 formula (`|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min)`) — to
+   avoid the naïve all-pairs blowup.
+   - **Edges are always (re)computed for this run, never reused from a stale cache.** `dedup`
+     always recomputes the edges incident to the target's pure-survivors. There is deliberately
+     **no `--reuse-edges` / cache-reuse flag**: `similarity_edges` stores only *matches*, not
+     "compared, no match," so reusing it cannot tell an asset that genuinely has no near-dups from
+     one that was simply never compared (e.g. scanned in — or backfilled — after the cache was
+     built) — reuse would **silently miss** those, a recall loss the user can't see (against the
+     recall-first tenet, cf. §5.3 photo-quality). Since the matcher is pure DB/CPU and runs in
+     seconds–low-minutes (§5.4), always recomputing is cheap and always correct. (The `upsert` into
+     `similarity_edges` still means the table accumulates edges usable by read-only stats like the
+     TUI "duplicates (est)" count — it just is never *trusted as complete input* to a grouping run.)
 9. Build clusters from `similarity_edges` (§5 near-dup relationships) among **pure-survivor
    assets only** — assets with **no** instance planned for deletion in Phase 2. An asset touched
    by exact resolution (i.e. any instance of it is in `_will_be_deleted`) is **excluded from
@@ -842,7 +1236,11 @@ above). Shortcuts (not copies) mean **no extra disk** and live thumbnail preview
     - `_will_be_deleted\manifest.csv`:
       `shortcut, target_path, asset_id, reason /* exact-internal|exact-external */, survivor_path`
     - `_grouped_by_similarity\manifest.csv`:
-      `shortcut, target_path, asset_id, group_no, member_no, is_external, distance`
+      `shortcut, target_path, asset_id, group_no, member_no, is_external, distance, quality,
+      low_confidence` — `quality` is this photo's PDQ quality (0–100); `low_confidence` is `1` when
+      this member (or its matched partner) is below `review.low_quality_hint`, marking a match that
+      may be a flat/near-black spurious PDQ collision to skip quickly (§5.3). Video members carry the
+      min quality across their comparable frames.
     Example (`_will_be_deleted`):
     ```csv
     shortcut,target_path,asset_id,reason,survivor_path
@@ -854,10 +1252,13 @@ above). Shortcuts (not copies) mean **no extra disk** and live thumbnail preview
     also lives in `review_actions`; that redundancy is intentional (visible without the DB).
 13. **Audit trail (capture point 1 — the proposed plan).** Write an immutable
     `proposed.json` into this run's audit directory (see §8.1). It records the full plan *as
-    calculated* — every action with its target path, reason, survivor, group/member, distance, and
-    the counts of skipped-at-staging/spared files — plus the threshold and config in effect.
-    This is the durable "what dedup proposed" record; unlike the in-folder `manifest.csv` (which
-    is deleted at finalize), it lives outside the folder and is never modified.
+    calculated* — every action with its target path, reason, survivor, group/member, distance,
+    per-member PDQ `quality` and the `low_confidence` flag (§5.3) — plus the counts of
+    skipped-at-staging/spared files and the thresholds and config in effect (`T_match_photo`,
+    `T_match_video`, the other `video.*` knobs, `review.low_quality_hint`). This is the durable
+    "what dedup proposed" record;
+    unlike the in-folder `manifest.csv` (which is deleted at finalize), it lives outside the folder
+    and is never modified.
 14. Open both folders in Explorer (or their `_packrat_review\` parent), print the
     `--confirm` / `--cancel` commands, and **pause** (`review_runs.status` stays `pending`). Being
     under `_packrat_review\`, they are already ignored by scan. If staging skipped everything
@@ -910,7 +1311,9 @@ The **authoritative** liveness gate (Phase 4 already stat'd once at staging, but
 changed again in the interim). Done lazily — one target at a time, right before the irreversible
 move — so cold external drives are touched only for files actually being deleted.
 18. Print a summary grouped by target root — **including any external-folder files** a perceptual
-    shortcut removal would delete — and require typed confirmation.
+    shortcut removal would delete — and require typed confirmation. **Flag non-recyclable paths:**
+    the summary must count and call out files on network/SMB roots, which are deleted
+    **permanently** (no Recycle Bin — §10), e.g. "K of N are on network shares → permanent."
 19. For each file in the intended delete set, at the moment of deletion:
     a. **`stat()` the target file.**
        - **Gone already** → nothing to delete. Lazily clean the DB: **delete** the gone
@@ -929,8 +1332,8 @@ move — so cold external drives are touched only for files actually being delet
          — exactly one instance is always kept. (Covers the internal case where the user deleted
          the kept oldest-mtime copy in Explorer after staging, and the external case where the
          external copy vanished.)
-    c. Move the (still-present, still-redundant) file to the **Recycle Bin** (recoverable), then
-       update the DB:
+    c. Move the (still-present, still-redundant) file to the **Recycle Bin** (recoverable on local
+       volumes; **permanent on NAS/SMB** — §10), then update the DB:
        - **Exact deletions** → delete that redundant `file_instances` row. The asset keeps its
          survivor instance, so it **stays `active`** — never trashed (we still have the content).
          No re-appearance concern.
@@ -999,8 +1402,9 @@ Deleting a whole registered folder never erases this history.
   survives DB loss/rebuild and is trivially greppable.
 - **JSON (not CSV):** richer/nested and stable for tooling; the in-folder `manifest.csv` stays
   CSV for Explorer/Excel legibility. Different audiences, different formats.
-- **Retention:** kept indefinitely by default (small text files); a future `packrat config` knob
-  can prune audits older than N days. Flagged in §14.
+- **Retention:** governed by `audit.retention_days` (§9.2); default **0 = keep forever** (small
+  text files). Setting it >0 prunes audits older than N days — the pruning *pass* itself is a
+  deferred nicety (§14 #5), but the knob and its default live in `config.toml` now.
 - These files are **records, not inputs** — `--confirm` never reads them to make decisions (it
   reads shortcut presence + the DB plan); they exist purely for audit/forensics.
 
@@ -1030,34 +1434,55 @@ exact hash, and files matching a **trashed** hash are discarded.
 1. `source` must exist, be readable, and be non-empty. It is treated as a **transient temp
    folder**, not a root — its files are not part of the collection.
 2. `dest` must resolve inside a registered **library root** (create the subfolder if missing),
-   so that copied files automatically become catalogued members of the collection. If `dest`
-   is under no library root → error (offer to `register` it first). Reject if `source` and
-   `dest` overlap.
+   so that copied files become catalogued members of the collection. If `dest` is under no library
+   root → error (offer to `roots register` it first). Reject if `source` and `dest` overlap. **Ignored
+   dest (warn, don't block):** if the resolved `dest` itself falls under the root's ignore rules
+   (allowlist/`--ignore` globs, §8 A1), do **not** hard-error — files still copy, but they will be
+   left *uncatalogued* (Phase 3 step 11) and merge warns per ignored subpath (Phase 4 step 13),
+   because registering under an ignored path would let the next scan silently forget them. A plain
+   note here is enough; the loud warning is at report time once the exact count is known.
+2a. **Per-root exclusivity (§3 guarantee 2), on the dest root.** Reject if the dest library root
+   already has an active operation — a `pending` `review_runs` row (dedup/cleanup) or another open
+   `merge_runs` (its own partial-unique index enforces the latter, §4). A merge stages/copies under
+   this root and its step-4 opportunistic scan would churn it, so it must own the root cleanly
+   before proceeding. (Skip this check for `--dry-run`, which opens no run and writes nothing — but
+   it also then skips step 4's scan, see below.)
 3. **Refresh the trash collection** (§6.1) — absorb any files sitting in the registered trash
    roots into the trashed-hash set and empty those folders. Merge discards incoming files that
    match a trashed hash, so the trashed set must be current first. (Runs for real even under
    `--dry-run` — see below.)
 4. Opportunistically fast-path-scan the `dest` root so the comparison set is current; warn if
-   the collection index is stale.
-5. Open a `jobs` row (`type='merge'`) and a **persisted plan** listing every source file and its
-   classification, so an interrupted copy can resume without re-hashing. This plan is internal
-   crash-safety only — merge does not pause for the user.
+   the collection index is stale. (This runs under merge's ownership from step 2a — no other op can
+   touch the root meanwhile. Skipped under `--dry-run`, which must not mutate the catalog.)
+5. Open a `jobs` row (`type='merge'`) and a **`merge_runs`** header (`status='planning'`,
+   `dest_root_id`). The `merge_runs` row is the durable **cross-op guard**: its
+   partial-unique `(dest_root_id) WHERE status IN ('planning','copying')` is exactly the
+   "in-flight merge plan targeting this root" that dedup (§8 B Phase 0) and cleanup (§6.2) reject
+   against. **Dry-run opens neither `merge_runs` nor `merge_plan_items`** — it must not trip that
+   guard and has no resume need. This plan is internal crash-safety only — merge does not pause
+   for the user.
 
-**Phase 1 — Fingerprint source** (read-only, **no DB writes**)
+**Phase 1 — Fingerprint source** (read-only w.r.t. source; writes only the frozen plan)
 6. Enumerate source media files (same allowlist/ignore rules as scan).
-7. For each: **BLAKE3 + metadata only** — no perceptual signature, no embedding (merge decides by
-   exact hash alone). **Nothing is written to the DB in this phase** — source files are not
-   collection members; their hashes live in the merge *plan* only. DB rows (`assets`,
-   `file_instances`, `phash`/`vphash`) are written solely for files actually copied, in Phase 3.
+7. For each: **BLAKE3 only** — no metadata, no perceptual signature, no embedding (classification
+   in Phase 2 needs the exact hash alone). No `assets`/`file_instances`/`phash` rows are written —
+   source files are not collection members. Persist each file as a `merge_plan_items` row
+   (`source_rel_path`, `size`, `mtime`, `content_hash`, `progress='pending'`) so an interrupted
+   run resumes **without re-hashing the source** (the dominant SMB cost, §10.1). *(Metadata —
+   dimensions/duration/captured_at — is deferred: it's consumed only when a `new` file is
+   registered, so it's probed just-in-time in Phase 3 for `new` reps only, never for skipped
+   files and never persisted in the plan.)*
 
 **Phase 2 — Classify each source file by exact hash**
 8. **Collapse exact-within-source duplicates first.** Group source files by `content_hash`; for
    any hash appearing more than once, keep a single **representative** (tiebreak: **oldest
-   `mtime`**, then stable by path) and mark the rest `dup-in-source` → not copied. This is cheap
-   (the hashes are already computed in Phase 1) and prevents merge from copying two byte-identical
-   files into the destination as redundant instances of one asset.
+   `mtime`**, then stable by path) and mark the rest `dup-in-source` (recording `rep_of_hash`) →
+   not copied. This is cheap (the hashes are already computed in Phase 1) and prevents merge from
+   copying two byte-identical files into the destination as redundant instances of one asset.
 9. Classify each **representative** by exact `content_hash` against the DB — no perceptual
-   comparison:
+   comparison. Write each file's `classification` onto its `merge_plan_items` row, then flip
+   `merge_runs.status='copying'`. **This classification is now frozen:** resume trusts it verbatim
+   and never re-derives it against the live DB (see Safety & resume). Classifications:
 
    | Classification | Condition                                             | Action              |
    |----------------|-------------------------------------------------------|---------------------|
@@ -1083,24 +1508,92 @@ exact hash, and files matching a **trashed** hash are discarded.
       (`name (1).ext`). Because structure is mirrored, same-name files in *different* source
       subfolders no longer collide — they land under their respective subfolders.
     - Write to a temp name → flush → **verify** the written file's BLAKE3 equals the source hash →
-      atomic rename into place. (Guarantees no partial/corrupt files.)
-11. **Register** each copied file → **write** `assets` (`status='active'`, hash + metadata from
-    Phase 1) and `file_instances` (pointing at the copied `dest` path). Perceptual signatures are
-    **not** computed here; a later `scan`/`dedup` of `dest` fills in `phash`/`vphash` (and
-    `scan --embed` the embedding). It is now a collection member, so a future merge recognizes it.
+      atomic rename into place. (Guarantees no partial/corrupt files.) → set the item's
+      `progress='copied'` and store its final `dest_path` (incl. any `(1)` collision rename).
+11. **Register** each copied file — **but first check its final dest path against the dest root's
+    ignore set** (the same allowlist + `--ignore` globs bound to the root, §8 A1), evaluated on the
+    path *relative to the root* (not to `<dest>`), because that is exactly what a later `scan` will
+    test. Two outcomes:
+    - **Dest path is NOT ignored (the normal case)** → **write** `assets` (`status='active'`, hash
+      from Phase 1 + metadata **probed now**, `new` reps only) and `file_instances` (pointing at the
+      copied `dest` path), and set `merge_plan_items.progress='registered'`, all **in one
+      transaction**. Register is idempotent — `assets` keyed by unique `content_hash`,
+      `file_instances` by (`root_id`,`path`) (§4) — so replaying a partially-done file is safe.
+      Perceptual signatures are **not** computed here; a later `scan`/`dedup` of `dest` fills in
+      `phash`/`vphash` (and `scan --embed` the embedding). It is now a collection member, so a future
+      merge recognizes it.
+    - **Dest path IS ignored** → **do NOT register** (write no `assets`/`file_instances` row); set
+      `progress='copied-unindexed'` and record the ignored dest path. **Rationale (this is the fix
+      for the silent-forget bug):** if we registered a file living under an ignored path, the next
+      `scan` would not enumerate it → its `last_seen_at` would never bump → deletion-detection
+      (§8 A2 Phase 3 step 11) would delete its `file_instances` row and **forget the asset while the
+      file still sits on disk** (and a later merge would re-copy it as `new`). By leaving it
+      unregistered, the file is simply untracked — consistent with how scan treats *any* file under
+      an ignore rule, regardless of how it got there. The file is copied (structure mirrored, as
+      promised) but never enters the catalog. This is surfaced loudly in the Phase 4 report.
+    Committing copy-marking (step 10) and the register/unindexed decision (step 11) as separate
+    committed steps closes the **rename-but-not-registered gap**: a crash in between leaves an item
+    at `progress='copied'`, which resume detects and finishes (re-running step 11's branch).
 
 **Phase 4 — Report**
 12. Copied: `new` N. Skipped: `exact-known` X, `trashed` Z, `dup-in-source` W. Collisions renamed
     R. Errors E. **Source unchanged.** Suggest running `scan <dest>` then `dedup <dest>` to
     fingerprint the new files and clean up any recompressed near-dups merge let through.
+13. **Ignored-destination warning (only if any `copied-unindexed` items).** For **each distinct
+    ignored dest subpath**, print a line like `⚠ 12 files copied to an ignored path
+    (<dest>\cache\) — NOT catalogued; packrat won't track them, and a future merge will re-copy
+    them as new.` Explain the consequence
+    plainly: these files are on disk but **not tracked** — a later `scan`/`dedup`/`merge` will
+    ignore them, and a future merge of the same source would re-copy them as `new`. Recommend
+    either moving them to a non-ignored location (then `scan <dest>`) or adjusting the root's
+    ignore rules if the exclusion was unintended. Grouping per subpath (not one line per file)
+    makes the usual cause — a whole excluded subtree like `Screenshots\` or `**/cache/**` — obvious
+    at a glance.
 
 **Safety & resume:**
 - A DB backup is taken before the Phase 3 copy.
-- Crash mid-copy → per-file atomic rename means no partial files; re-running the same `merge`
-  resumes from the persisted plan and copies only the remainder.
-- `--dry-run` runs Phases 1–2 and prints the classification counts / would-copy list without
-  copying or writing asset rows. **But Phase 0's "refresh the trash collection" still runs for
-  real** — trash folders are absorbed and emptied even in dry-run (§6.1); only the copy is skipped.
+- **Resume trusts the frozen plan.** Re-running `merge <source> --into <dest>` while an open
+  (`planning`/`copying`) `merge_runs` row exists for this dest **silently auto-resumes** it
+  instead of starting fresh — but **prints a clear notice** first (e.g. "Resuming interrupted
+  merge from <created_at>: N of M files already copied") so the user knows a prior run is being
+  continued, not restarted. It **skips Phase 1 entirely** (hashes already in `merge_plan_items`) and
+  **does not re-classify** — it replays the stored classification verbatim. Per source-file:
+  - `progress='registered'` or `copied-unindexed` → terminal; skip without even stat-ing the file
+    (matters over SMB).
+  - `progress='copied'` (crashed between rename and DB write) → the dest file already exists and
+    is hash-verified; just re-run step 11's branch (register, or mark `copied-unindexed` if its
+    dest path is ignored) — no re-copy.
+  - `progress='pending'`, classification `new` → copy-verify-rename then step 11 (step 10–11).
+  - `dup-in-source`/`trashed`/`exact-known` → nothing to copy; mark `skipped`.
+  - **Consequence of freezing (accepted):** if the collection gained a matching asset during the
+    crash→resume window (the worker slot frees on crash, and a plain `scan` isn't blocked, §3), a
+    `new` file still copies — producing a redundant *byte-identical* instance, not corruption.
+    `dedup <dest>` collapses it later. This is the deliberate cost of deterministic resume that
+    never re-reads source bytes.
+- **Finalize:** on completion set `merge_runs.status='done'`, `finished_at`; the run and its
+  items are **retained** as queryable merge history (§14 #5).
+- **Interruption (two paths — merge has no interactive pause and no `--cancel` flag):**
+  - **Cooperative cancel** — the *generic* job cancel (§9) via the TUI `[c]` (§12) or another
+    terminal; **not** Ctrl-C (which only detaches the view, §11) and **not** a merge-specific
+    `--cancel` (that's a dedup/cleanup review verb). The worker sees the flag at its next
+    per-file checkpoint, sets `merge_runs.status='cancelled'`, and stops. Already-copied files
+    stay — merge is copy-only, so a partial copy leaves nothing unsafe; those files are now real
+    collection members. Re-running `merge` does **not** auto-resume a `cancelled` run (it's a
+    deliberate stop); it starts a fresh plan.
+  - **Process death or clean `daemon stop`** (crash / reboot / power loss / graceful shutdown) —
+    the run is left open (`planning`/`copying`) and its `jobs` row is reconciled to `interrupted`
+    on next daemon start (§3), **not** `cancelled`; re-running `merge <source> --into <dest>`
+    silently auto-resumes it per above. (This is why a stop/crash differs from a cancel: only the
+    explicit cancel above discards the plan.)
+- `--dry-run` runs Phases 1–2 logic **in memory only** and prints the classification counts /
+  would-copy list — it opens **no** `merge_runs`/`merge_plan_items` rows (so it neither trips the
+  cross-op guard nor leaves a resumable run) and writes no asset rows. It **also computes the
+  would-be-ignored destinations** (test each `new` file's projected dest rel-path against the dest
+  root's ignore set) and prints the same per-subpath ignored-destination warning as Phase 4 step
+  13 — so the user learns about an ignored `--into` target *before* copying, when it is still
+  cheap to fix. **But Phase 0's "refresh the trash collection" still runs for real** — trash
+  folders are absorbed and emptied even in dry-run (§6.1); only the copy and all plan/asset writes
+  are skipped.
 - Merge is copy-only (non-destructive), so it proceeds without a typed confirmation; use
   `--dry-run` first to preview.
 
@@ -1122,7 +1615,7 @@ one half, only the other half is `new` and copies — no special pairing logic i
 | DB                 | SQLite (WAL); SQLAlchemy Core or light SQL layer |
 | Vector search      | numpy brute-force → hnswlib / sqlite-vec if needed |
 | Content hash       | blake3 |
-| Perceptual hash    | imagehash (pHash) + pdqhash |
+| Perceptual hash    | **pdqhash** only — 256-bit PDQ for both photos and video frames (§5.3). No `imagehash`/pHash anywhere. |
 | Image decode       | Pillow + **pillow-heif** (HEIC/AVIF), OpenCV where handy; **rawpy** for the opt-in RAW group |
 | Video              | ffmpeg / **PyAV** (frame sampling), ffprobe (metadata) |
 | Metadata           | exiftool via pyexiftool |
@@ -1142,8 +1635,8 @@ assets. Handle long paths, Unicode, and Explorer "skip duplicates" semantics our
 the pipeline operates on the decode output, not the file format:
 - **Content hash (BLAKE3)** hashes raw bytes → format-agnostic; works on every format above,
   including files we can't decode or don't recognize.
-- **Perceptual hash** — `imagehash`/pHash takes a PIL image; `pdqhash`/PDQ takes an RGB numpy
-  array. Both are format-agnostic *given a decoded image*.
+- **Perceptual hash** — `pdqhash`/PDQ on an RGB numpy array, for **both** photos (the still) and
+  video (each sampled frame). Format-agnostic *given a decoded image*; one algorithm for both.
 - **CLIP embedding** takes a decoded RGB frame; it never sees the container/codec.
 - **Metadata** (`exiftool`) is an independent reader with the widest format support in the stack.
 
@@ -1160,8 +1653,8 @@ format decodes to sampled RGB frames.** Everything downstream then follows autom
 
 **Decode-stage notes:**
 - **Perceptual + embedding both gate on decode.** There is no separate per-format work for
-  hashing or CLIP — if a frame decodes, PDQ/pHash and CLIP just run on the pixel array. This is
-  why the matrix's last three columns mirror the decode column.
+  hashing or CLIP — if a frame decodes, PDQ (photo still / video frame alike) and CLIP just run on
+  the pixel array. This is why the matrix's last three columns mirror the decode column.
 - **AVIF (⚠):** covered either by recent Pillow (native `AvifImagePlugin`, ~11.3+) or by
   `pillow-heif`'s AVIF opener. Both rely on the AV1 decoder being present in the bundled
   libheif/Pillow wheel — confirm on the Windows wheel with a real `.avif` in the smoke test.
@@ -1188,6 +1681,71 @@ them. This is the only check that truly "makes sure" — a doc/version claim can
 given Windows wheel decodes *your* camera's CR3 or *that* AVIF encoder's output. The ⚠ cells
 above are exactly what this test resolves.
 
+### 9.2 Configuration (`config.toml`)
+
+All tunable knobs referenced throughout this plan live in **one** file:
+**`%APPDATA%\packrat\config.toml`** — beside the daemon's existing `token` file (§3). TOML because
+Python 3.11 parses it natively (`tomllib`, no dependency) and it matches the uv/`pyproject.toml`
+world already in the stack (§9).
+
+**Lifecycle:**
+- **Auto-created with commented defaults.** On first daemon start, if the file is absent, the
+  daemon writes it out fully populated — every key below at its default, each with a one-line
+  comment. So the shipped defaults are always visible and editable, never hidden in code.
+- **Hand-edited in v1.** There is **no `packrat config` command in v1** — you edit the TOML in a
+  text editor. A `packrat config get/set` (with validation) is a deferred nicety (§14) and the
+  file format is forward-compatible with it.
+- **Re-read at each job start.** The daemon reloads `config.toml` when a job begins, so an edit
+  applies to the **next** scan/dedup/merge/cleanup with no daemon restart. A job already running
+  keeps the snapshot it started with — which is exactly the config the audit trail records "in
+  effect" for that run (§8.1). A malformed file → the job is rejected with a parse error naming the
+  bad key, and the daemon keeps serving read-only queries with the last-good config.
+- **Missing keys fall back to the built-in default** (the file need not be exhaustive); **unknown
+  keys are ignored with a logged warning** (forward-compat / typo signal).
+
+**Scope — global only.** Every knob here is collection-wide. The one *per-root* setting is the
+`--ignore` glob list, which is bound to each root at `roots register` time and stored on the `roots` row
+(§8 A1), **not** in this file. (The `roots.ignore_globs` column and the deferred per-root scan
+interval, §4, are the only per-root config; everything else is global.)
+
+**The knobs (defaults are the shipped values):**
+
+```toml
+[allowlist]
+# Media extensions that become assets (§8 A1). Photo + video are the fixed default set.
+raw = false            # include the RAW group (dng cr2 cr3 nef arw raf orf rw2 pef srw); needs rawpy
+# photo/video extension lists are editable here too, but default to the §8 A1 closed sets.
+
+[fastpath]
+mtime_tolerance_s = 2  # tolerant-mtime skip window (§8 A2 step 4); 0 = strict path+size+mtime
+
+[match]
+t_match_photo = 32     # photo PDQ Hamming cutoff (§5.3); the single photo decision — tune tight
+t_match_video = 90     # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+
+[video]
+sample_frames        = 12    # frames sampled per video, at segment midpoints (§5.3)
+duration_tol_s       = 1.0   # duration pre-filter: absolute floor (§5.3)
+duration_tol_pct     = 5.0   # duration pre-filter: relative part (percent)
+frame_match_fraction = 0.60  # ≥ this fraction of comparable frame-pairs must match
+min_frame_quality    = 50    # PDQ quality gate; frames below are excluded from the vote
+min_comparable_frames = 5    # fewer comparable pairs than this → no match (insufficient evidence)
+
+[review]
+low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_confidence (§5.3, annotate-only)
+
+[smb]
+scan_workers = 6       # concurrent hashing/decoding streams over SMB (§10.1); 4–8 typical
+
+[audit]
+retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune older (deferred knob, §14 #5)
+```
+
+> **Defaults marked `# e.g.` / tuning-dependent** (`t_match_photo`, `t_match_video`, the `video.*`
+> knobs) are **starting points to be calibrated on real data before the first full scan** (§5.3,
+> §14 #1) — they are not claimed-correct constants. `mtime_tolerance_s`, `allowlist.raw`,
+> `smb.scan_workers`, and `review.low_quality_hint` are ordinary operational settings.
+
 ---
 
 ## 10. Performance & safety
@@ -1207,6 +1765,23 @@ above are exactly what this test resolves.
 - DB is the crown jewel: WAL mode, periodic `VACUUM`/integrity check, and an automatic
   backup of the DB before every merge/trash-commit.
 
+**Deletion target — Recycle Bin where it exists, permanent on NAS/SMB (accepted).** Every
+"move to Recycle Bin" in this plan (dedup, cleanup, trash refresh — §6, §8 B/§6.2) means: attempt
+the Windows Recycle Bin (via `send2trash`/`SHFileOperation`). **Windows provides no Recycle Bin
+for network locations** (UNC / mapped-drive paths), and per §10.1 most roots live on the Synology
+NAS — so for those files the delete is **permanent** (the shell either errors or hard-deletes).
+This is **accepted for v1**, not worked around (no packrat-managed quarantine/`.recycle` folder):
+- **Local roots** (NTFS on a fixed/USB disk) → real Recycle Bin, recoverable as the tenets imply.
+- **NAS/SMB roots** → **permanent deletion.** The typed-confirmation gate (dedup/cleanup) and
+  `--dry-run` are therefore the *real* safety net for network roots, and the tools say so at the
+  confirm prompt: **the summary must warn when any file in the delete set is on a non-recyclable
+  (network) path** — e.g. "N of M files are on a network share and will be deleted PERMANENTLY
+  (no Recycle Bin)." Implementation: detect per-path whether a Recycle Bin is available (network
+  vs. fixed volume) and count/flag network-path deletions in the confirm summary.
+- Merge is unaffected — it is copy-only and never deletes from a root.
+- The DB backup before every destructive op (above) is what makes the *catalog* recoverable
+  regardless; the *files* on a NAS are not.
+
 ---
 
 ## 10.1 SMB / NAS performance (most roots on a Synology NAS)
@@ -1224,7 +1799,7 @@ Mapping this onto packrat's operations:
 
 | Operation | Dominant SMB cost | Verdict |
 |---|---|---|
-| `register` | none | trivial |
+| `roots register` | none | trivial |
 | **First full `scan`** | transferring **every byte** to BLAKE3 + decode | the real cost; hours, bandwidth-bound |
 | Incremental `scan` | directory enumeration (size+mtime) | seconds–minutes *if enumerated, not per-file stat'd* |
 | dedup Phase 4/6 stats | a few hundred/thousand round-trips, deferred + concurrent | sub-second to seconds |
@@ -1250,9 +1825,18 @@ Mapping this onto packrat's operations:
 
 - **Enumeration errors must never be read as deletions.** A NAS blip, timeout, or partial
   listing mid-scan could make files *look* absent → deletion-detection would wrongly forget
-  fingerprints (§4). Rule: **any enumeration error/timeout for a directory aborts
-  deletion-detection for that root** (fail-safe — never delete-and-forget on incomplete data).
-  This extends the §4 unreachable-root guard from "root fully offline" to "any incomplete listing."
+  fingerprints (§4). Rule: **an enumeration error/timeout suppresses deletion-detection only for
+  the affected directory subtree, not the whole root** (fail-safe — never delete-and-forget on
+  incomplete data). Because a `file_instances` row belongs to a specific directory (its path's
+  parent), a gone instance is deleted **only if its containing directory was cleanly enumerated
+  this pass**; instances under any directory that errored/timed out are left untouched. So one
+  flaky folder on a large NAS root no longer disables deletion-detection for the entire root — only
+  that subtree is skipped (and reported), while the cleanly-listed rest reconciles normally. A
+  *fully* offline/unreadable root degenerates to the §4 whole-root guard (every directory failed →
+  nothing reconciled), which this generalizes from "root offline" to "per-directory incomplete
+  listing." **Implementation note:** track the set of cleanly-enumerated directories during Phase 1
+  and scope the Phase-3 step-11 `DELETE … WHERE last_seen_at < start` to instances whose parent dir
+  is in that set.
 - **mtime stability.** The fast-path already tolerates small mtime jitter (§8 A2 step 4). A
   NAS-side reindex or an rsync that rewrites timestamps by more than the tolerance will force
   re-fingerprinting of those files — correct but costly; note it if you run such tools.
@@ -1261,26 +1845,48 @@ Mapping this onto packrat's operations:
 
 ## 11. CLI surface (the core commands)
 
-Adding a folder is two commands (`register` then `scan`); `dedup` de-duplicates one folder via
+Adding a folder is two commands (`roots register` then `scan`); `dedup` de-duplicates one folder via
 Explorer shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot);
-trash is handled by `cleanup` and `trash refresh` (§6).
+trash is handled by `cleanup`, `trash refresh`, and `untrash` (§6).
 
 **Shared client semantics** (all job-submitting commands — `scan`, `dedup`, `merge`, `cleanup`,
-`trash refresh`, `scan --embed`): each **submits a job to the daemon** and streams its progress.
+`trash refresh`, `untrash`, `scan --embed`): each **submits a job to the daemon** and streams its progress.
 - **Ctrl-C detaches the view; the job keeps running in the daemon.** Re-attach or stop it via the
   `packrat` TUI, or from another terminal.
 - **`--detach`** submits the job and returns immediately without streaming.
 - If a mutating job is already running, submission is **rejected** ("busy: `<job>` started `<time>`")
-  — one mutating operation at a time, globally (§3). Read-only commands are never blocked.
+  — one mutating operation at a time, globally (§3 guarantee 1). Read-only commands are never blocked.
+- **Per-root exclusivity (§3 guarantee 2):** a submission is also rejected if the root it would
+  *own* already has an active op — a `pending` dedup/cleanup review or an in-flight merge — naming
+  the holder (e.g. "root iPhone busy: dedup pending — `--confirm`/`--cancel` first"). This includes
+  `scan`: a manual `scan <root>` errors on an under-review root; a `--all`/scheduled scan skips it
+  and logs the skip.
 - `packrat` with **no arguments** opens the TUI (logo, stats, live/recent jobs, operation menu).
 
-### `packrat register`
-Declare an on-disk folder as a root. Metadata-only and instantaneous — walks nothing,
-fingerprints nothing. The root contributes to dedup/merge only after a `scan`. The folder's
-leaf name must be globally unique across roots (case-insensitive); override with `--name`.
+**Root argument resolution — path vs. `--name` handle.** Commands that take a registered root
+(`scan`, `dedup`, `cleanup`, and `merge --into`) accept **either** a filesystem path **or** a
+root's `--name` handle. Resolution is unambiguous and order-independent:
+1. If the argument, canonicalized as a path (§8 A1 step 1), exactly matches a root's stored `path`
+   → that root.
+2. Else, if it case-insensitively matches a root's `name` → that root.
+3. Else → error ("no registered root at path or named `<arg>`"; suggest `packrat roots` to list).
+A path never collides with a handle in practice (a handle is a bare label like `iPhone`, a path
+contains separators/a drive), and path match is tried first so an odd handle can't shadow a real
+path. `untrash <path>` is **excluded** — its argument is arbitrary bytes to hash, never a root
+(§6.3).
+
+### `packrat roots` — manage roots
+The **noun for root lifecycle/metadata.** v1 subcommands: **`register`** (add) and **`list`**
+(read). Removal/rename (`unregister`/`rename`) are deferred (§14 #9). Bare `packrat roots` is an
+alias for `packrat roots list`.
+
+#### `packrat roots register <path>` — declare a folder as a root
+Metadata-only and instantaneous — walks nothing, fingerprints nothing. The root contributes to
+dedup/merge only after a `scan`. The folder's leaf name must be globally unique across roots
+(case-insensitive); override with `--name`.
 
 ```
-packrat register <path> [options]
+packrat roots register <path> [options]
 
 Arguments
   <path>                 Folder to register as a root (absolute or relative).
@@ -1311,6 +1917,14 @@ Exit: prints the new root id/name and that it is registered but not yet scanned 
 scan progress with --scan).
 ```
 
+#### `packrat roots list` — list registered roots (read-only)
+Each root's id, name, path, kind (`library`/`trash`), enabled, asset count, and last-scan recency.
+Read-only, runs anytime (§3). `packrat roots` with no subcommand does the same.
+
+```
+packrat roots [list] [--json]
+```
+
 ### `packrat scan`
 Walk a registered root and fingerprint new/changed files. The resumable indexing job.
 Non-destructive — reads files, writes only the database. **Computes no CLIP embeddings unless
@@ -1333,8 +1947,12 @@ Options
   --json                 Machine-readable report.
 
 Exit: prints the report (new assets, exact-dup instances, skipped non-media, errors,
-matches-trashed, embeddings computed vs deferred). Near-dup clustering is `dedup`'s job, not
-scan's. Resumable if interrupted.
+matches-trashed, embeddings computed vs deferred, plus any roots skipped for being under review).
+Near-dup clustering is `dedup`'s job, not scan's. Resumable if interrupted.
+
+Per-root exclusivity (§3): scan won't run on a root that has a pending dedup/cleanup review or an
+in-flight merge — a manual `scan <root>` errors and names the holder; `--all`/scheduled scans skip
+that root and log it. Confirm/cancel the review (or let the merge finish) to scan it.
 ```
 
 ### `packrat dedup`
@@ -1348,7 +1966,7 @@ trashed excluded). At most one `pending` run per folder.
 packrat dedup <folder>              # analyze → stage shortcuts → pending
 packrat dedup <folder> --confirm    # apply review, delete confirmed dups → completed
 packrat dedup <folder> --cancel     # discard staging, delete nothing → cancelled
-packrat dedup --status              # per-root dedup state (pending/completed/cancelled)
+# (per-root dedup/review state is shown by the general `packrat status`, §11)
 
 Arguments
   <folder>               A registered root to dedup (path or --name handle).
@@ -1357,7 +1975,6 @@ Options
   --confirm              Apply the pending run for <folder>: read which shortcuts remain, delete
                          accordingly (typed confirmation; DB backup first).
   --cancel               Discard the pending run's staging folders; delete nothing.
-  --status               List each root's current dedup state; no analysis.
   --dry-run              Analyze and print the plan (counts, would-stage list) without creating
                          staging folders or shortcuts.
   --json                 Machine-readable plan/report.
@@ -1380,17 +1997,21 @@ Arguments
   <source>               Transient temp folder to merge from (never modified).
 
 Options
-  --into <dest>          Destination folder; must resolve inside a library root. Required.
-  --dry-run              Print classification counts / would-copy list; copy nothing, write no
-                         asset rows. NOTE: still refreshes-and-empties the trash collection
-                         (§6.1) — that step always runs.
+  --into <dest>          Destination folder; must resolve inside a library root. Required. If the
+                         resolved dest path falls under the root's ignore rules, files still copy
+                         there but are NOT catalogued (scan won't track them) — merge warns loudly
+                         per ignored subpath (§8 C Phase 4 step 13).
+  --dry-run              Print classification counts / would-copy list (incl. the ignored-dest
+                         warning); copy nothing, write no asset rows. NOTE: still
+                         refreshes-and-empties the trash collection (§6.1) — that step always runs.
   --json                 Machine-readable report.
 
 Flow: refresh trash collection (§6.1) → classify each source file by exact hash into
 dup-in-source / trashed / exact-known / new → copy the `new` files (verified per file), mirroring
-the source's folder structure under <dest>, and register them as assets. One shot; resumable from
-its plan on crash. Source is left untouched. Follow with `scan <dest>` + `dedup <dest>` to
-fingerprint the new files and clean recompressed near-dups.
+the source's folder structure under <dest>, and register them as assets (files landing on an
+ignored dest path are copied but left uncatalogued — warned). One shot; resumable from its plan on
+crash. Source is left untouched. Follow with `scan <dest>` + `dedup <dest>` to fingerprint the new
+files and clean recompressed near-dups.
 ```
 
 ### `packrat cleanup`
@@ -1450,6 +2071,83 @@ assets to `trashed` → delete the files (Recycle Bin). Reports new trashed fing
 files emptied.
 ```
 
+### `packrat untrash`
+Reverse an accidental trash: **forget content from the permanent trashed-hash set** so it's no
+longer excluded from future merges. You *present the file* (it's the identifier — packrat stores no
+pixels to preview); untrash hashes it and matches by exact content hash. **It does not restore the
+file's bytes** (that's the Recycle Bin, §10) and writes nothing to disk — only DB rows. See §6.3.
+
+```
+packrat untrash <path> [--dry-run] [--json]
+
+Arguments
+  <path>                 A file, or a folder walked recursively (allowlist/ignore rules as scan).
+                         NEED NOT be a registered root — it's just bytes to hash for lookup;
+                         untrash does not catalog it or care where it lives.
+
+Options
+  --dry-run              Report what would be forgotten/reactivated; change nothing. (Truly nothing
+                         — untrash does not call trash-refresh, so §6.1's always-absorb rule doesn't
+                         apply here.)
+  --json                 Machine-readable report.
+```
+
+Per matched `trashed` asset: if it still has live file instances → flip back to `active` (retain
+fingerprints); if zero instances → forget it entirely (delete asset + fingerprints), so the content
+is treated as brand-new if it ever reappears. Non-matches and `active` matches are no-ops (untrash
+never creates an asset). Reports: `untrashed` / `forgotten` / `already-active` / `unknown`. Takes a
+global worker slot but owns no root (never blocked by / blocks a review or merge — §3).
+
+### `packrat status` (read-only)
+Print collection state without touching disk or the job queue — safe anytime, never blocked by a
+running job (§3). The **single status surface** — `dedup`/`cleanup` have no `--status` flag of
+their own; their review state shows up here.
+
+```
+packrat status [<root>] [--json]     # global rollup, or one root's detail
+```
+
+**No arguments — global rollup:** total assets (photo/video split), trashed count, per-root asset
+counts + scan freshness, any `interrupted` jobs (with the command to resume, §3), and the
+currently-running job if any.
+
+**Dedup/cleanup review state — show only what's actionable.** The one state worth surfacing is a
+**`pending` review run** (a paused dedup or cleanup awaiting the user); completed/cancelled runs are
+history and live in the §8.1 audit trail, **not** here. Per root:
+- **Pending run present** → highlight it (`⚠`), with everything needed to act: `run_type`, how long
+  ago it was staged, a count summary, the `_packrat_review\` path to open in Explorer, and the exact
+  `--confirm` / `--cancel` commands. Because a pending run *owns* the root (§3 per-root
+  exclusivity), this line is also the answer to a "busy: root X" rejection — it names what to
+  confirm/cancel to free the root. Count summary is per `run_type` (read from `review_actions`):
+  - **dedup:** `N to delete (exact)` · `G groups / M members (near-dup, default-keep)` —
+    optionally `(K low-confidence)` from the §5.3 photo-quality flag.
+  - **cleanup --perceptual:** `X exact-trash (will delete)` · `P perceptual candidates (staged)`.
+- **No pending run** → a compact **recency** stat only: `deduped <age>` / `cleaned <age>` (from the
+  most recent completed run's `confirmed_at`), or `never deduped`. Mirrors the "last scan"
+  freshness; no run history is listed.
+
+**With a root path/handle (`packrat status <root>`):** that root's detail — its pending run's full
+plan breakdown (+ the review-folder path and confirm/cancel commands), and the most-recent completed
+run's timestamp + one-line outcome (deeper forensics: the audit trail, §8.1).
+
+`--json` gives the machine-readable form of all the above. Related read-only previews on other
+commands: `scan --dry-run` (would-index preview). All read-only queries run concurrently with any
+job.
+
+### `packrat daemon` — manage the background daemon
+The daemon normally **auto-spawns** on first client use (§3), so these are rarely needed — exposed
+for lifecycle control and troubleshooting.
+
+```
+packrat daemon start        # explicitly spawn the detached daemon (no-op if already up)
+packrat daemon stop         # graceful shutdown: signals the running job to checkpoint, then exits.
+                            #   Leaves an in-flight job `interrupted` (resumable), NOT `cancelled` (§3).
+packrat daemon status       # is it running? pid, uptime, bound port, in-flight job — read-only
+```
+
+`stop` is a **resumable interruption, not a cancel** (§3): re-running the interrupted command
+resumes it. To truly abort work, cancel the job (TUI `[c]` / another terminal), which is distinct.
+
 ---
 
 ## 12. TUI (`packrat` with no arguments)
@@ -1504,13 +2202,18 @@ daemon health (auto-spawns it if down).
   an estimated duplicate count (from `similarity_edges`, marked `*` as "since last dedup"), and
   last-scan recency. Refreshes live while jobs run.
 - **Roots** — each registered root with path, asset count, and a freshness dot (scanned recently
-  vs. stale/never); trash roots labelled. This is the read view; **[r] Manage roots** opens
-  add/remove/rename (the `register` operations).
+  vs. stale/never); trash roots labelled. This is the read view; **[r] Manage roots** opens the
+  add flow (`roots register`) and lists roots (`roots list`); remove/rename land with the deferred
+  `roots unregister`/`roots rename` verbs (§14 #9).
 - **Jobs** — the heart of the TUI. Lists the **running** job (live progress bar, counts, ETA) and
   **recent** finished/paused jobs (from the `jobs` / `review_runs` tables). A paused dedup/cleanup
-  shows **"awaiting review"** with a shortcut to open its `_packrat_review\` folder in Explorer and
-  to run `--confirm` / `--cancel`. `[c]` cancels the running job (cooperative stop at its next
-  checkpoint, §3); `[l]` tails its log; `[Enter]` opens a details view.
+  shows **"awaiting review"** with the same count summary `packrat status` gives (§11 — e.g.
+  `240 delete · 18 groups/47 members`), a shortcut to open its `_packrat_review\` folder in
+  Explorer, and buttons to run `--confirm` / `--cancel`. A job left **`interrupted`** by a daemon crash/stop (§3) shows as
+  **"interrupted — re-run to resume"** with the command to continue it (e.g. re-run the same
+  `merge`/`scan`), distinguishing "the daemon died, your progress is safe" from a user `cancelled`.
+  `[c]` cancels the running job (cooperative stop at its next checkpoint, §3); `[l]` tails its log;
+  `[Enter]` opens a details view.
 - **Menu** — single-key actions that launch the operations. Because only one mutating job runs at
   a time, launching while busy shows the "busy" state rather than starting a second (§3). Each
   action collects its target (a folder picker / path prompt) then submits the job and drops you
@@ -1522,8 +2225,9 @@ daemon health (auto-spawns it if down).
   Explorer's job (design tenet §1). For dedup/cleanup review it just *links out* to the staging
   folder in Explorer and waits; the actual keep/delete decisions are made by adding/removing
   shortcuts there, then confirmed from the TUI or CLI.
-- **Live.** Panels poll the daemon (or subscribe to a progress stream) so a scan started in
-  another terminal appears here with a moving bar; cancelling here stops it there.
+- **Live.** The Jobs panel subscribes to the running job's **SSE stream** (§3) so a scan started in
+  another terminal appears here with a moving bar; the stat/roots panels poll read-only snapshots on
+  a light timer. Cancelling here stops the job there.
 - **Keyboard-first**, mouse optional (Textual supports both). All actions reachable by single
   keys shown in brackets.
 - **Read-safe.** Everything the TUI does maps to an existing CLI verb — it issues no privileged
@@ -1535,24 +2239,35 @@ daemon health (auto-spawns it if down).
 
 ## 13. Build milestones (each independently useful)
 
-- **M0 — Skeleton + job runtime + decode smoke test**: repo layout, config, core library,
-  SQLite schema; auto-spawned daemon with the **single-worker job queue** (submit / stream
-  progress / cooperative-cancel / "busy" rejection), CLI client with **Ctrl-C-detaches** and
+**What "v1" means (resolves the scope ambiguity):** **v1 = M0–M6** — the complete
+register/scan/dedup/trash/merge workflow plus the TUI, i.e. everything needed to hoard, dedup, and
+merge a real collection through Explorer. The "**(v1)**" qualifiers elsewhere (non-goals §1, the
+schema's deferred knobs §4) refer to this scope. **M7 (semantic embeddings) and M8 (hardening —
+scheduled scans, hnswlib, watchdog) are post-v1**; embeddings are opt-in infrastructure whose
+tagging behavior is still TBD (§7), and M8 is polish/scale, not core function. (Milestones are
+independently useful and need not ship strictly in order — e.g. M6 depends only on the M0 runtime —
+but v1 is considered done when M0–M6 are.)
+
+- **M0 — Skeleton + job runtime + decode smoke test**: repo layout, **`config.toml` (§9.2 —
+  auto-create-with-defaults + per-job reload)**, core library, SQLite schema; auto-spawned daemon
+  with the **single-worker job queue** (submit / stream
+  progress / cooperative-cancel / "busy" rejection) and **startup reconciliation** (orphaned
+  `running` → `interrupted`; resume-on-re-run, §3), CLI client with **Ctrl-C-detaches** and
   `--detach`, `daemon start/stop/status`. **Plus the §9.1 smoke test** — one real sample of every
   allowlisted extension (and the RAW group) run through decode→hash→perceptual→embed to resolve
   the ⚠ cells (AVIF, RAW/cr3, `pdqhash` Windows wheel) before building on them.
-- **M1 — Register + scan (exact identity)**: `register` (metadata-only root creation), then the
-  `scan` job — walker, fast-path, BLAKE3, metadata, asset/file-instance model, exact byte-identity
-  resolution (attach instances), deletion detection — plus `status`. No embeddings, no perceptual.
-  Now the collection is known by exact hash.
-- **M2 — Perceptual signatures (scan)**: photo PDQ (primary) + pHash + video frame-hash
-  signatures written to `phash`/`vphash` during scan. No pairwise matching yet — just the
-  inputs. No GPU/CLIP.
+- **M1 — Register + scan (exact identity)**: `roots register` (metadata-only root creation) and
+  `roots list`, then the `scan` job — walker, fast-path, BLAKE3, metadata, asset/file-instance
+  model, exact byte-identity resolution (attach instances), deletion detection — plus `status`. No
+  embeddings, no perceptual. Now the collection is known by exact hash.
+- **M2 — Perceptual signatures (scan)**: PDQ for both photos and video frames (+ quality) written
+  to `phash`/`vphash` during scan, with the §5.3 sampling/quality parameters. No pairwise matching
+  yet — just the inputs. No GPU/CLIP. No `imagehash` dependency.
 - **M3 — Dedup operation**: single-folder `dedup` — §5 matching engine over DB fingerprints +
   liveness check, `similarity_edges`/`review_runs`/`review_actions` tables, exact-dup resolution
   (oldest-mtime internal / drop-on-external), perceptual grouping, Windows-shortcut staging
   (`_will_be_deleted\`, `_grouped_by_similarity\`), the pending→confirmed state machine,
-  `--confirm`/`--cancel`/`--status`, and the §8.1 audit trail (`proposed.json` + `applied.json`
+  `--confirm`/`--cancel`, and the §8.1 audit trail (`proposed.json` + `applied.json`
   in APPDATA). Builds the §5 perceptual matching engine (also reused by `cleanup --perceptual`).
 - **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (§6.1 —
   index trash-folder files → record/flip assets to `trashed` → empty the folders), scan's refusal
@@ -1578,22 +2293,56 @@ daemon health (auto-spawns it if down).
 
 ## 14. Open questions / risks
 
-1. **Near-dup threshold** `T_match` needs empirical tuning on your real data (burst shots and
-   edited copies are the hard cases). Plan a small labeled sample to calibrate it.
+1. **Near-dup thresholds** `T_match_photo` and `T_match_video` need empirical tuning on your real
+   data (burst shots and edited copies are the hard photo cases; heavy re-encodes the hard video
+   ones). They are **separate cutoffs** (§5.3): the photo one carries the whole decision, the video
+   one only feeds the `frame_match_fraction` vote and tolerates frame noise, so expect
+   `T_match_video` to land more permissive. Calibrate both — plus the `video.*` structure knobs —
+   on a small labeled sample. **Single-signal risk (accepted, §7 gap review):** photos rely on
+   **PDQ alone** — pHash is not stored. If calibration shows PDQ-only precision/recall is
+   inadequate, adding a second signal (pHash, or an AND/OR gate) means **re-decoding the whole
+   collection** to backfill it (a multi-hour `--full`-style pass over SMB). The bet is that PDQ at
+   sane thresholds is sufficient for the iPhone-re-export reality; validate on the labeled sample
+   *before* the first full scan so a signal change is cheap.
 2. **Live Photos & sidecars** (.AAE edits, paired .MOV): decide grouping rules.
-3. **Video near-dup** is genuinely hard for heavy re-encodes; frame-hash sampling is a
-   pragmatic start — consider TMK+PDQF later if recall is insufficient.
+3. **Video near-dup** is genuinely hard for heavy re-encodes; sampled per-frame **PDQ** +
+   duration-aligned majority voting (§5.3) is a pragmatic start. Because the frame descriptor is
+   already PDQ, the natural upgrade is **TMK+PDQF** (whose per-frame descriptor is a PDQ variant) —
+   consider it if recall proves insufficient. The `video.*` knobs (frame count, fraction, quality
+   gate) plus `T_match_video` all need calibration on real clips (§14 #1).
 4. **Shortcut creation mechanism:** `.lnk` files need creating without a copy — via `pywin32`
    (`win32com` Shell.CreateShortcut) or `winshell`. Confirm thumbnail preview works for `.lnk`
    targets in Explorer (it does for real files; verify in the M3 spike). Fallback if `.lnk`
    previews disappoint: NTFS hardlinks (same volume only) or symlinks (needs privilege).
-5. **Audit-trail retention (§8.1):** `proposed.json`/`applied.json` are kept indefinitely by
-   default (small text files). Confirm whether you want an auto-prune knob (e.g. delete audits
-   older than N days) or truly-forever retention. Also: should `merge` get the same audit trail
-   for symmetry? (Currently only dedup does.)
+5. **Audit-trail retention (§8.1):** the knob now exists — `audit.retention_days` in `config.toml`
+   (§9.2), default `0` = keep forever. What remains deferred is only the **pruning pass** that acts
+   on a `>0` value (nothing deletes old audits yet). **Merge:** its `merge_runs`/`merge_plan_items`
+   rows are now **retained on completion** (§8 C Safety & resume), giving merge a queryable
+   in-DB history (source, dest, per-file classification/disposition). Open sub-question: do we
+   *also* want merge to emit the same on-disk `proposed.json`/`applied.json` under
+   `%APPDATA%\packrat\audit\merge\…` for symmetry with dedup/cleanup, or is the retained DB plan
+   enough? (Leaning: DB plan is sufficient for v1; on-disk audit is a nicety.)
 6. **Recompressed-trash on merge (accepted):** `merge` excludes trashed content by **exact hash
    only** — a *recompressed* copy of trashed content slips through as `new` on ingest. This is the
    accepted cost of keeping merge simple/one-shot; it is caught afterward by
    `cleanup <dest> --perceptual` (§6.2), which stages recompressed-trash matches for review.
    (`dedup` still excludes trashed assets from grouping — §5 — so cleanup is the dedicated path.)
+7. **`packrat config` command (deferred):** v1 config is a hand-edited, auto-created
+   `%APPDATA%\packrat\config.toml` (§9.2) — there is no CLI to read/write keys. A future
+   `packrat config get/set` (with value validation and a `--json` view) is a nicety; the TOML
+   format is chosen to be forward-compatible with it. Not needed for v1, which only requires the
+   file to exist, self-document its defaults, and reload per job.
+8. **Batch / list untrash (deferred):** v1 `untrash` (§6.3) is **by-file only** — you present the
+   file(s) to forget from trash memory, matched by exact hash. Deferred niceties: (a) a
+   **read-only `packrat trash list`** (metadata-only view of trash memory — count, by reason, by
+   date — no preview, since no pixels are stored); (b) a **batch `untrash --since <time>` /
+   `--reason <r>`** to bulk-undo a bad refresh without re-presenting files (uses existing
+   `trashed_at`/`trash_reason`; would need a typed count-confirm since it acts without a file in
+   hand). Not required for v1: presenting recovered files (e.g. from the Recycle Bin) already covers
+   the accidental-trash case.
+9. **Root removal / rename (deferred):** v1's `roots` command has `register` (add, §8 A1) and
+   `list` (§11) — but not `roots unregister` (drop a root: delete its `roots` row + cascade its
+   instances/orphaned assets, with a typed confirm) or `roots rename` (change a root's `name`
+   handle, re-checking global uniqueness). Needed before the TUI's "Manage roots" panel (§12) can
+   do more than add + list; scoped as a small follow-on to the `roots` group, not v1-critical.
 ```
