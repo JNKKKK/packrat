@@ -62,6 +62,39 @@ log = logging.getLogger("packrat.jobs.scan")
 
 
 # ---------------------------------------------------------------------------
+# problem-file collector — the retrievable list behind the undecodable/errors
+# counters (persisted to scan_problem_files so `status <root>` can show paths+
+# reasons, not just counts). Thread-safe; appended from the worker threads.
+# ---------------------------------------------------------------------------
+@dataclass
+class ProblemFile:
+    root_id: int
+    path: str
+    media_type: str | None
+    problem: str            # 'undecodable' | 'read-error'
+    content_hash: str | None
+    detail: str | None
+
+
+class ScanReport:
+    """Accumulates problem files across the scan's worker threads."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._problems: list[ProblemFile] = []
+
+    def add_problem(self, pf: ProblemFile) -> None:
+        with self._lock:
+            self._problems.append(pf)
+
+    def problems(self) -> list[ProblemFile]:
+        with self._lock:
+            return list(self._problems)
+
+
+# ---------------------------------------------------------------------------
 # enumeration (Phase 1)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -282,14 +315,22 @@ def _attach_instance(db, asset_id: int, root_id: int, cand: Candidate, seen_at: 
 # per-file resolution + persist (shared by the video path and the photo pipeline)
 # ---------------------------------------------------------------------------
 def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at,
-                         medium, profiler) -> str:
+                         medium, profiler, report) -> str:
     """Given a file's ``content_hash``, resolve it against the catalog and persist.
 
     ``decode`` is a **lazy** ``() -> Fingerprint`` callable that decodes + PDQs the
     file; it is only invoked on a miss or a backfill (never on a plain dup hit), so
     an exact-dup instance never pays decode cost. Returns a report-counter outcome.
+    A decode that yields ``undecodable`` is recorded to ``report`` (path + reason).
     """
     db = ctx.db
+
+    def _note_undecodable(fp) -> None:
+        report.add_problem(ProblemFile(
+            root_id=root_id, path=cand.path, media_type=fp.media_type,
+            problem="undecodable", content_hash=content_hash, detail=fp.decode_error,
+        ))
+
     asset = db.query_one(
         "SELECT id, media_type, status, undecodable, "
         "EXISTS(SELECT 1 FROM phash p WHERE p.asset_id=assets.id) has_phash, "
@@ -303,6 +344,8 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
         with profiler.timer("shared", "db"):
             created = _persist_new(db, root_id, cand, fp, seen_at)
         profiler.file_done(medium)
+        if fp.undecodable:
+            _note_undecodable(fp)
         if not created:
             return "exact_dup"
         return "undecodable" if fp.undecodable else "new"
@@ -317,6 +360,8 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
         with profiler.timer("shared", "db"):
             _persist_backfill(db, asset_id, root_id, cand, fp, seen_at)
         profiler.file_done(medium)
+        if fp.undecodable:
+            _note_undecodable(fp)
         return "undecodable" if fp.undecodable else "backfilled"
 
     # Plain exact-dup hit — attach the instance and stop (§8 A2 step 6 / Phase 4).
@@ -326,12 +371,21 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
     return "matches_trashed" if asset["status"] == "trashed" else "exact_dup"
 
 
-def _process_video(ctx, root_id, cand, full, seen_at, profiler) -> str:
+def _note_read_error(report, root_id, cand, medium, exc) -> None:
+    """Record an unreadable-bytes file (no hash, no asset) — the 'read-error' problem."""
+    log.warning("unreadable %s: %s", cand.path, exc)
+    report.add_problem(ProblemFile(
+        root_id=root_id, path=cand.path, media_type=medium,
+        problem="read-error", content_hash=None, detail=f"{type(exc).__name__}: {exc}"[:500],
+    ))
+
+
+def _process_video(ctx, root_id, cand, full, seen_at, profiler, report) -> str:
     """Video path: hash-from-path (streamed), decode via seek-sampling from path."""
     try:
         content_hash = media.hash_file(cand.path, medium="video", profiler=profiler)
     except OSError as exc:
-        log.warning("unreadable %s: %s", cand.path, exc)
+        _note_read_error(report, root_id, cand, "video", exc)
         return "errors"
 
     def decode():
@@ -339,10 +393,10 @@ def _process_video(ctx, root_id, cand, full, seen_at, profiler) -> str:
         return media.fill_perceptual(fp, cand.path, ctx.config, profiler=profiler)
 
     return _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at,
-                                "video", profiler)
+                                "video", profiler, report)
 
 
-def _process_photo_bytes(ctx, root_id, cand, data, full, seen_at, profiler) -> str:
+def _process_photo_bytes(ctx, root_id, cand, data, full, seen_at, profiler, report) -> str:
     """Photo pipeline consumer: hash + decode + PDQ from the producer's buffer (pure CPU)."""
     content_hash = media.hash_bytes(data, medium="photo", profiler=profiler)
 
@@ -352,15 +406,15 @@ def _process_photo_bytes(ctx, root_id, cand, data, full, seen_at, profiler) -> s
         return media.fill_perceptual(fp, cand.path, ctx.config, data=data, profiler=profiler)
 
     return _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at,
-                                "photo", profiler)
+                                "photo", profiler, report)
 
 
-def _process_photo_path(ctx, root_id, cand, full, seen_at, profiler) -> str:
+def _process_photo_path(ctx, root_id, cand, full, seen_at, profiler, report) -> str:
     """Photo fallback (oversized file): hash + decode from path (streamed, re-reads)."""
     try:
         content_hash = media.hash_file(cand.path, medium="photo", profiler=profiler)
     except OSError as exc:
-        log.warning("unreadable %s: %s", cand.path, exc)
+        _note_read_error(report, root_id, cand, "photo", exc)
         return "errors"
 
     def decode():
@@ -368,14 +422,15 @@ def _process_photo_path(ctx, root_id, cand, full, seen_at, profiler) -> str:
         return media.fill_perceptual(fp, cand.path, ctx.config, profiler=profiler)
 
     return _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at,
-                                "photo", profiler)
+                                "photo", profiler, report)
 
 
 # ---------------------------------------------------------------------------
 # per-root scan routine
 # ---------------------------------------------------------------------------
 def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: bool,
-                   dry_run: bool, seen_at: str, done: int, profiler=NULL_PROFILER) -> tuple[dict, int]:
+                   dry_run: bool, seen_at: str, done: int, profiler=NULL_PROFILER,
+                   collector=None) -> tuple[dict, int]:
     """Scan a single already-validated library root against a prior enumeration.
 
     ``done`` is the absolute progress counter carried across roots; returns the
@@ -465,8 +520,8 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
         if ctx.cancelled:
             raise CancelledError()
 
-    _run_photo_pipeline(ctx, root_id, photos, full, seen_at, profiler, _record)
-    _run_streamed(ctx, root_id, others, full, seen_at, profiler, _record)
+    _run_photo_pipeline(ctx, root_id, photos, full, seen_at, profiler, _record, collector)
+    _run_streamed(ctx, root_id, others, full, seen_at, profiler, _record, collector)
 
     # Phase 3 — deletion detection (guarded per-subtree, §8 A2 step 11, §10.1).
     if not en.root_offline:
@@ -475,7 +530,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     return report, done
 
 
-def _run_streamed(ctx, root_id, cands, full, seen_at, profiler, record) -> None:
+def _run_streamed(ctx, root_id, cands, full, seen_at, profiler, record, collector) -> None:
     """Videos + oversized photos: one bounded pool, per-file hash+decode from path."""
     if not cands:
         return
@@ -484,7 +539,7 @@ def _run_streamed(ctx, root_id, cands, full, seen_at, profiler, record) -> None:
         futs = {}
         for c in cands:
             fn = _process_video if media.media_type_of(c.path) == "video" else _process_photo_path
-            futs[pool.submit(fn, ctx, root_id, c, full, seen_at, profiler)] = c
+            futs[pool.submit(fn, ctx, root_id, c, full, seen_at, profiler, collector)] = c
         try:
             for fut in as_completed(futs):
                 record(fut.result(), futs[fut])
@@ -493,7 +548,7 @@ def _run_streamed(ctx, root_id, cands, full, seen_at, profiler, record) -> None:
             raise
 
 
-def _run_photo_pipeline(ctx, root_id, cands, full, seen_at, profiler, record) -> None:
+def _run_photo_pipeline(ctx, root_id, cands, full, seen_at, profiler, record, collector) -> None:
     """Producer/consumer photo pipeline (§ decouple I/O from CPU concurrency).
 
     ``io_workers`` producer threads read whole photo files into a **bounded** queue
@@ -559,7 +614,7 @@ def _run_photo_pipeline(ctx, root_id, cands, full, seen_at, profiler, record) ->
                     profiler.add("photo", "io", time.perf_counter() - t)
                     profiler.add_bytes("photo", len(data))
                 except Exception as exc:  # noqa: BLE001 - I/O or anything else
-                    log.warning("unreadable %s: %s", cand.path, exc)
+                    _note_read_error(collector, root_id, cand, "photo", exc)
                     result_q.put(("errors", cand))
                     continue
                 # Byte-budget backpressure: block here when consumers lag → the
@@ -593,7 +648,7 @@ def _run_photo_pipeline(ctx, root_id, cands, full, seen_at, profiler, record) ->
             cand, data, nbytes = item
             try:
                 outcome = "errors" if cancel.is_set() else _process_photo_bytes(
-                    ctx, root_id, cand, data, full, seen_at, profiler
+                    ctx, root_id, cand, data, full, seen_at, profiler, collector
                 )
             except Exception:  # noqa: BLE001 - never let a worker die silently
                 log.exception("photo worker failed on %s", cand.path)
@@ -663,6 +718,7 @@ def _run_scan(ctx: JobContext) -> None:
     dry_run = bool(params.get("dry_run"))
     is_all = bool(params.get("all"))
     profiler = ScanProfiler() if params.get("profile") else NULL_PROFILER
+    collector = ScanReport()  # always-on problem-file capture (persisted per §scan-results)
     db = ctx.db
     seen_at = now_iso()
 
@@ -713,18 +769,75 @@ def _run_scan(ctx: JobContext) -> None:
         ctx.check_cancelled()
         ctx.log(f"scanning {root_row['name']} ({root_row['path']})")
         rep, done = _scan_one_root(ctx, root_row, en, full=full, dry_run=dry_run,
-                                   seen_at=seen_at, done=done, profiler=profiler)
+                                   seen_at=seen_at, done=done, profiler=profiler,
+                                   collector=collector)
         if not dry_run and full:
             db.execute("UPDATE roots SET last_full_scan_at=? WHERE id=?", (seen_at, root_row["id"]))
         reports.append(rep)
 
-    _emit_summary(ctx, reports, skipped_roots, dry_run=dry_run, full=full, embed=embed)
+    # Persist the scan result (per (job, root)) + problem files so `status <root>`
+    # and the M6 TUI can re-render this scan. Dry-run writes nothing.
+    if not dry_run:
+        _persist_scan_result(ctx, reports, full=full, embed=embed, profiler=profiler,
+                             collector=collector, created_at=seen_at)
+
+    _emit_summary(ctx, reports, skipped_roots, collector, dry_run=dry_run, full=full, embed=embed)
     if profiler.enabled:
         for line in profiler.report_lines():
             ctx.log(line)
 
 
-def _emit_summary(ctx, reports, skipped_roots, *, dry_run, full, embed) -> None:
+def _persist_scan_result(ctx, reports, *, full, embed, profiler, collector, created_at) -> None:
+    """Write one scan_results row per root + all problem files, in one transaction.
+
+    Keyed to this job (``ctx.job_id``); cascades away if the jobs row is deleted
+    (e.g. dev clear-db). profile_json is stored only when profiling was on.
+
+    This runs after the scan work has all committed, so it is a *reporting* write,
+    not scan progress. If the daemon is shutting down and the connection is already
+    closed, we swallow it (same contract as the queue's worker writes) rather than
+    flip a successful scan to ``error`` — the report is a nicety, the catalog writes
+    that matter already committed per-file.
+    """
+    import json
+    import sqlite3
+
+    profile_json = json.dumps(profiler.snapshot_json()) if profiler.enabled else None
+    problems = collector.problems()
+    try:
+        with ctx.db.transaction() as conn:
+            for rep in reports:
+                conn.execute(
+                    "INSERT INTO scan_results("
+                    "job_id, root_id, root_name, full, embed, profiled, candidates, new, "
+                    "exact_dup, backfilled, matches_trashed, skipped_fastpath, undecodable, "
+                    "errors, deleted_instances, forgotten_assets, root_offline, profile_json, "
+                    "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ctx.job_id, rep["root_id"], rep["name"], 1 if full else 0,
+                     1 if embed else 0, 1 if profiler.enabled else 0,
+                     rep.get("candidates", 0), rep.get("new", 0), rep.get("exact_dup", 0),
+                     rep.get("backfilled", 0), rep.get("matches_trashed", 0),
+                     rep.get("skipped_fastpath", 0), rep.get("undecodable", 0),
+                     rep.get("errors", 0), rep.get("deleted_instances", 0),
+                     rep.get("forgotten_assets", 0), 1 if rep.get("root_offline") else 0,
+                     profile_json, created_at),
+                )
+            for pf in problems:
+                conn.execute(
+                    "INSERT INTO scan_problem_files("
+                    "job_id, root_id, path, media_type, problem, content_hash, detail) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (ctx.job_id, pf.root_id, pf.path, pf.media_type, pf.problem,
+                     pf.content_hash, pf.detail),
+                )
+    except sqlite3.ProgrammingError as exc:
+        if "closed database" in str(exc).lower():
+            log.debug("db closed during shutdown; dropping scan-result persist")
+            return
+        raise
+
+
+def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embed) -> None:
     agg = {k: 0 for k in ("new", "exact_dup", "matches_trashed", "backfilled",
                           "undecodable", "errors", "skipped_fastpath",
                           "deleted_instances", "forgotten_assets", "candidates")}
@@ -737,15 +850,20 @@ def _emit_summary(ctx, reports, skipped_roots, *, dry_run, full, embed) -> None:
     else:
         ctx.log(
             f"scan done: {agg['new']} new · {agg['exact_dup']} exact-dup instances · "
-            f"{agg['backfilled']} backfilled · {agg['matches_trashed']} matches-trashed · "
+            f"{agg['backfilled']} filled in missing fingerprints · {agg['matches_trashed']} identified trash · "
             f"{agg['skipped_fastpath']} skipped (fast-path) · {agg['undecodable']} undecodable · "
             f"{agg['errors']} errors · {agg['deleted_instances']} instances gone "
             f"({agg['forgotten_assets']} assets forgotten)."
         )
+        n_problem = len(collector.problems())
+        if n_problem:
+            ctx.log(
+                f"{n_problem} problem file(s) recorded — `packrat status <root>` lists paths + reasons."
+            )
     for sk in skipped_roots:
         ctx.log(f"skipped root {sk['name']}: {sk['reason']}")
-    # (Per-file outcomes are surfaced via these log lines + the status snapshot;
-    # the jobs row's done/total is progress-only — §4.)
+    # (Per-file outcomes are surfaced via these log lines + the persisted
+    # scan_results/scan_problem_files, which `status <root>` re-renders — §4.)
 
 
 register_job(

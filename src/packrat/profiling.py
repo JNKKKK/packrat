@@ -107,6 +107,16 @@ class ScanProfiler:
                 "producer_block_s": self._producer_block_s,
             }
 
+    def snapshot_json(self) -> dict:
+        """JSON-safe snapshot for persistence (scan_results.profile_json).
+
+        Same data as :meth:`snapshot` but with the tuple-keyed ``secs`` flattened
+        to ``"medium.bucket"`` string keys so it survives ``json.dumps``.
+        """
+        snap = self.snapshot()
+        snap["secs"] = {f"{m}.{b}": v for (m, b), v in snap["secs"].items()}
+        return snap
+
     def report_lines(self) -> list[str]:
         snap = self.snapshot()
         wall = snap["wall_s"] or 1e-9

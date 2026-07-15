@@ -129,12 +129,31 @@ def root_detail(root_arg: str) -> dict | None:
             "SELECT id, run_type, created_at FROM review_runs WHERE root_id=? AND status='pending'",
             (rid,),
         ).fetchone()
+        # Most-recent persisted scan result for this root + its problem files, so
+        # `status <root>` can re-render the last scan's banner + undecodable/error
+        # paths (the §scan-results read path). Newest by job_id.
+        last_scan = conn.execute(
+            "SELECT * FROM scan_results WHERE root_id=? ORDER BY job_id DESC LIMIT 1",
+            (rid,),
+        ).fetchone()
+        problem_files = []
+        if last_scan is not None:
+            problem_files = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT path, media_type, problem, detail FROM scan_problem_files "
+                    "WHERE job_id=? AND root_id=? ORDER BY problem, path",
+                    (last_scan["job_id"], rid),
+                ).fetchall()
+            ]
         return {
             "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
             "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
             "pending_review": dict(pending) if pending else None,
+            "last_scan": dict(last_scan) if last_scan is not None else None,
+            "problem_files": problem_files,
         }
     finally:
         conn.close()

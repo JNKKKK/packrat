@@ -19,8 +19,10 @@ the plan:
 
 from __future__ import annotations
 
-#: Bumped when the DDL changes in a way requiring migration. M0 ships v1.
-SCHEMA_VERSION = 1
+#: Bumped when the DDL changes. M0 ships v1; v2 adds scan_results +
+#: scan_problem_files (new tables only — created via CREATE IF NOT EXISTS, so an
+#: existing v1 DB gains them on next init_db with no migration runner needed).
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -218,6 +220,47 @@ CREATE TABLE IF NOT EXISTS jobs (
     params_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status);
+
+-- ---------------------------------------------------------------------------
+-- scan_results: one row per (scan job, root) — the persisted scan report so a
+-- later `status <root>` (and the M6 TUI) can re-render a past scan. One scan of
+-- N roots (--all) writes N rows. Keyed to the jobs row; cascades when it's gone.
+-- Counters mirror the scan-done banner; profile_json holds the --profile snapshot.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS scan_results (
+    job_id            INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    root_id           INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+    root_name         TEXT,
+    full              INTEGER NOT NULL DEFAULT 0,
+    embed             INTEGER NOT NULL DEFAULT 0,
+    profiled          INTEGER NOT NULL DEFAULT 0,
+    candidates        INTEGER, new INTEGER, exact_dup INTEGER, backfilled INTEGER,
+    matches_trashed   INTEGER, skipped_fastpath INTEGER, undecodable INTEGER,
+    errors            INTEGER, deleted_instances INTEGER, forgotten_assets INTEGER,
+    root_offline      INTEGER NOT NULL DEFAULT 0,
+    profile_json      TEXT,     -- ScanProfiler.snapshot_json(), NULL unless --profile
+    created_at        TEXT,
+    PRIMARY KEY (job_id, root_id)
+);
+CREATE INDEX IF NOT EXISTS ix_scan_results_root ON scan_results(root_id);
+
+-- ---------------------------------------------------------------------------
+-- scan_problem_files: one row per undecodable / unreadable file in a scan, so
+-- the exact paths + reasons are retrievable (not just counted). content_hash is
+-- NULL for a read-error (bytes never read). Cascades with its jobs/roots rows.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS scan_problem_files (
+    id            INTEGER PRIMARY KEY,
+    job_id        INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    root_id       INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL,
+    media_type    TEXT,
+    problem       TEXT NOT NULL,   -- 'undecodable' | 'read-error'
+    content_hash  TEXT,            -- NULL for read-error
+    detail        TEXT             -- decode_error text or OSError message
+);
+CREATE INDEX IF NOT EXISTS ix_scan_problem_files_job  ON scan_problem_files(job_id);
+CREATE INDEX IF NOT EXISTS ix_scan_problem_files_root ON scan_problem_files(root_id);
 
 -- ---------------------------------------------------------------------------
 -- meta: schema version + small daemon-owned key/values.

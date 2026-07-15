@@ -178,6 +178,7 @@ def status(
         if d.get("pending_review"):
             pr = d["pending_review"]
             typer.echo(f"  ⚠ {pr['run_type']} pending since {pr['created_at']} — --confirm/--cancel to free the root.")
+        _print_last_scan(d)
         return
     snap = client.status()
     if json_out:
@@ -477,6 +478,27 @@ def _short_ts(ts: str | None) -> str:
     if not ts:
         return "never"
     return ts[:16].replace("T", " ")
+
+
+def _print_last_scan(d: dict) -> None:
+    """Render the root's most-recent persisted scan result + problem files (§scan-results)."""
+    ls = d.get("last_scan")
+    if not ls:
+        return
+    flags = "".join(f" --{k}" for k in ("full", "embed") if ls.get(k))
+    typer.echo(
+        f"  last scan result ({_short_ts(ls.get('created_at'))}{flags}): "
+        f"{ls.get('new', 0)} new · {ls.get('exact_dup', 0)} exact-dup · "
+        f"{ls.get('backfilled', 0)} filled-in · {ls.get('matches_trashed', 0)} identified-trash · "
+        f"{ls.get('undecodable', 0)} undecodable · {ls.get('errors', 0)} errors"
+    )
+    problems = d.get("problem_files", [])
+    if problems:
+        typer.echo(f"  problem files ({len(problems)}):")
+        for pf in problems:
+            typer.echo(f"    [{pf['problem']}] {pf['path']}")
+            if pf.get("detail"):
+                typer.echo(f"        {pf['detail']}")
 
 
 def _print_busy(exc: BusyResponse) -> None:
