@@ -107,6 +107,29 @@ def test_status_root_detail_surfaces_problem_files(queue_and_db, tmp_path):
     assert all(pf["problem"] == "undecodable" for pf in det["problem_files"])
 
 
+def test_report_survives_resume_rerun(queue_and_db, tmp_path):
+    """A re-run (the interrupted-scan resume path) fast-path-skips the undecodable
+    file, but the report must still list it — it's re-derived from the catalog,
+    not from what this pass touched (§ interrupted-scan review)."""
+    q, database = queue_and_db
+    lib = _lib_with_bad(tmp_path)  # good.png + 2 undecodables
+    root = register(database, str(lib))
+
+    _run_scan(q, database, root["id"])              # first scan: finds 2 undecodables
+    det1 = queries.root_detail(root["name"])
+    assert det1["last_scan"]["undecodable"] == 2 and len(det1["problem_files"]) == 2
+
+    _run_scan(q, database, root["id"])              # re-run: undecodables fast-path-skipped
+    det2 = queries.root_detail(root["name"])
+    # Still reported — the report describes the root, not the pass.
+    assert det2["last_scan"]["undecodable"] == 2
+    assert len([p for p in det2["problem_files"] if p["problem"] == "undecodable"]) == 2
+
+    _run_scan(q, database, root["id"], full=True)   # --full re-scan too
+    det3 = queries.root_detail(root["name"])
+    assert det3["last_scan"]["undecodable"] == 2
+
+
 def test_dry_run_writes_no_result(queue_and_db, tmp_path):
     q, database = queue_and_db
     lib = _lib_with_bad(tmp_path)

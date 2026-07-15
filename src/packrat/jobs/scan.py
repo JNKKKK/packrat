@@ -788,47 +788,75 @@ def _run_scan(ctx: JobContext) -> None:
 
 
 def _persist_scan_result(ctx, reports, *, full, embed, profiler, collector, created_at) -> None:
-    """Write one scan_results row per root + all problem files, in one transaction.
+    """Write one scan_results row per root + its problem files, in one transaction.
 
     Keyed to this job (``ctx.job_id``); cascades away if the jobs row is deleted
     (e.g. dev clear-db). profile_json is stored only when profiling was on.
 
-    This runs after the scan work has all committed, so it is a *reporting* write,
-    not scan progress. If the daemon is shutting down and the connection is already
-    closed, we swallow it (same contract as the queue's worker writes) rather than
-    flip a successful scan to ``error`` — the report is a nicety, the catalog writes
-    that matter already committed per-file.
+    **Resume-proof problem set (§ interrupted-scan review).** The report must
+    describe the *root's current state*, not just what this pass touched — because
+    resuming an interrupted scan is "re-run the same command", and the fast-path
+    then skips already-fingerprinted files (undecodables included, §8 A2 step 4).
+    So a per-pass problem list would empty out on every re-run. Instead:
+    - **undecodable** problem files + count are **re-derived from the catalog**
+      (``assets.undecodable=1`` with a live instance in the root) — cumulative and
+      identical across re-runs. This overrides the per-pass ``undecodable`` counter.
+    - **read-error** files stay per-pass (an unreadable file has no asset to query,
+      and leaves no row to fast-path-skip, so it is re-detected on every pass).
+
+    Runs after all scan work has committed, so it is a *reporting* write. If the
+    daemon is shutting down and the connection is already closed, swallow it (same
+    contract as the queue's worker writes) rather than flip a successful scan to
+    ``error`` — the catalog writes that matter already committed per-file.
     """
     import json
     import sqlite3
 
     profile_json = json.dumps(profiler.snapshot_json()) if profiler.enabled else None
-    problems = collector.problems()
+    read_errors = [p for p in collector.problems() if p.problem == "read-error"]
+    db = ctx.db
     try:
-        with ctx.db.transaction() as conn:
+        with db.transaction() as conn:
             for rep in reports:
+                root_id = rep["root_id"]
+                # Re-derive the root's current undecodable files from the catalog.
+                undec_rows = conn.execute(
+                    "SELECT DISTINCT fi.path, a.media_type, a.content_hash, a.decode_error "
+                    "FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
+                    "WHERE fi.root_id=? AND a.undecodable=1 ORDER BY fi.path",
+                    (root_id,),
+                ).fetchall()
+                undecodable_count = len(undec_rows)
                 conn.execute(
                     "INSERT INTO scan_results("
                     "job_id, root_id, root_name, full, embed, profiled, candidates, new, "
                     "exact_dup, backfilled, matches_trashed, skipped_fastpath, undecodable, "
                     "errors, deleted_instances, forgotten_assets, root_offline, profile_json, "
                     "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (ctx.job_id, rep["root_id"], rep["name"], 1 if full else 0,
+                    (ctx.job_id, root_id, rep["name"], 1 if full else 0,
                      1 if embed else 0, 1 if profiler.enabled else 0,
                      rep.get("candidates", 0), rep.get("new", 0), rep.get("exact_dup", 0),
                      rep.get("backfilled", 0), rep.get("matches_trashed", 0),
-                     rep.get("skipped_fastpath", 0), rep.get("undecodable", 0),
+                     rep.get("skipped_fastpath", 0), undecodable_count,
                      rep.get("errors", 0), rep.get("deleted_instances", 0),
                      rep.get("forgotten_assets", 0), 1 if rep.get("root_offline") else 0,
                      profile_json, created_at),
                 )
-            for pf in problems:
+                for r in undec_rows:
+                    conn.execute(
+                        "INSERT INTO scan_problem_files("
+                        "job_id, root_id, path, media_type, problem, content_hash, detail) "
+                        "VALUES (?,?,?,?, 'undecodable', ?, ?)",
+                        (ctx.job_id, root_id, r["path"], r["media_type"],
+                         r["content_hash"], r["decode_error"]),
+                    )
+            # read-errors are per-pass (no catalog row to re-derive).
+            for pf in read_errors:
                 conn.execute(
                     "INSERT INTO scan_problem_files("
                     "job_id, root_id, path, media_type, problem, content_hash, detail) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (ctx.job_id, pf.root_id, pf.path, pf.media_type, pf.problem,
-                     pf.content_hash, pf.detail),
+                    "VALUES (?,?,?,?, 'read-error', ?, ?)",
+                    (ctx.job_id, pf.root_id, pf.path, pf.media_type, pf.content_hash, pf.detail),
                 )
     except sqlite3.ProgrammingError as exc:
         if "closed database" in str(exc).lower():
@@ -855,10 +883,14 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
             f"{agg['errors']} errors · {agg['deleted_instances']} instances gone "
             f"({agg['forgotten_assets']} assets forgotten)."
         )
-        n_problem = len(collector.problems())
-        if n_problem:
+        # The persisted report lists the root's *current* undecodables (re-derived
+        # from the catalog, so a resume/re-run stays accurate) plus this pass's
+        # read-errors — `status <root>` shows the full set with paths + reasons.
+        n_read_err = sum(1 for p in collector.problems() if p.problem == "read-error")
+        if agg["undecodable"] or n_read_err:
+            extra = f" · {n_read_err} unreadable this pass" if n_read_err else ""
             ctx.log(
-                f"{n_problem} problem file(s) recorded — `packrat status <root>` lists paths + reasons."
+                f"problem files recorded{extra} — `packrat status <root>` lists paths + reasons."
             )
     for sk in skipped_roots:
         ctx.log(f"skipped root {sk['name']}: {sk['reason']}")
