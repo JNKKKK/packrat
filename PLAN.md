@@ -358,6 +358,34 @@ jobs(    id, type,
   --   startup reconciliation (§3), NOT by the worker. It means "the process vanished, the durable
   --   per-op plan is intact, re-run the command to resume." A clean `daemon stop` also lands here
   --   (interrupted, resumable) — distinct from a user cancel, which is `cancelled` (terminal, §3).
+
+scan_results(   -- persisted scan report; one row per (completed scan job, root) so `status <root>`
+                --   (and the M6 TUI) can re-render a past scan (§8 A2 Phase 5, §11).
+  job_id, root_id, root_name,
+  full, embed, profiled,                 -- the flags that produced this scan
+  candidates, new, exact_dup, backfilled, matches_trashed, skipped_fastpath,
+  undecodable, errors, deleted_instances, forgotten_assets, root_offline,   -- the §8 A2 banner counts
+  profile_json /* ScanProfiler snapshot, NULL unless --profile */, created_at )
+  -- PRIMARY KEY (job_id, root_id). A `--all` scan writes one row PER library root under a single
+  --   job_id; re-scanning a root APPENDS a new row (new job_id) — the table is a growing per-root
+  --   HISTORY, kept indefinitely (retention deferred — §14 #10). `status <root>` reads the newest
+  --   (job_id DESC). ONLY a *completed* scan writes rows — dry-run/cancel/interrupt/error write none
+  --   (persist runs after the per-root loop); resuming an interrupted scan re-runs and writes then.
+  -- CRUCIAL: `undecodable` (and the scan_problem_files below) are RE-DERIVED FROM THE CATALOG at
+  --   scan end (assets.undecodable=1 with a live instance in the root), NOT counted per-pass — because
+  --   a resume/incremental re-run FAST-PATH-SKIPS undecodables (they're "fully fingerprinted", §8 A2
+  --   step 4), so a per-pass count would wrongly empty out on re-run. So this row describes the ROOT's
+  --   current state, not just what this pass touched. (The other counts ARE per-pass activity.)
+
+scan_problem_files(   -- the undecodable / unreadable files behind scan_results' counts, so the exact
+                      --   paths + reasons are retrievable (not just counted). Keyed to the scan job.
+  id, job_id, root_id, path, media_type,
+  problem /* undecodable|read-error */,
+  content_hash /* NULL for read-error — bytes never read */, detail /* decode_error or OSError text */ )
+  -- `undecodable` rows are re-derived from the catalog each scan (see scan_results) → the same set
+  --   re-appears on every scan of the root (grows per-scan, not per-distinct-problem — §14 #10).
+  -- `read-error` rows are per-pass: an unreadable file has no asset to re-derive, and leaves no row
+  --   to fast-path-skip, so it is re-detected on every pass anyway.
 ```
 
 Notes
@@ -1061,7 +1089,19 @@ For every candidate file:
 14. Summarize: new assets, files that were exact-dups of a known asset (new instance only),
     non-media skipped, undecodable/corrupt errors, `matches-trashed` count, embeddings computed
     (`--embed`) or deferred. **No near-dup clustering here** — that is reported by `dedup`.
-    **Nothing on disk changed.**
+    **Nothing on disk changed.** (The user-facing banner phrases these as `N new`, `N exact-dup
+    instances`, `N filled in missing fingerprints`, `N identified trash`, `N undecodable`, etc.)
+15. **Persist the report (§4 `scan_results` / `scan_problem_files`).** After the per-root loop (so
+    a *completed* scan only — dry-run/cancel/interrupt/error persist nothing), write one
+    `scan_results` row per root scanned: the banner counts + flags + (if `--profile`) the profiler
+    snapshot, plus a `scan_problem_files` row per problematic file (path + reason). This lets
+    `status <root>` and the M6 TUI re-render the scan later. **The undecodable set is re-derived
+    from the catalog here, not taken from this pass's activity** (§4 scan_results note): a resume /
+    incremental re-run fast-path-skips undecodables (step 4), so a per-pass count would wrongly read
+    as zero on re-run — reading committed `assets.undecodable=1` (with a live instance in the root)
+    instead makes the report describe the root's *current* state, stable across resumes. `read-error`
+    files (unreadable bytes, no asset) stay per-pass. Persist tolerates a closed DB on shutdown (like
+    the worker progress writes) so a stop at the finish line can't flip a `done` scan to `error`.
 
 **Idempotency & resume:** re-running `scan` on the same root is a no-op except for genuinely
 new/changed files — the **fast-path** (step 4) skips the rest, which is what makes an interrupted
@@ -2128,7 +2168,14 @@ history and live in the §8.1 audit trail, **not** here. Per root:
 
 **With a root path/handle (`packrat status <root>`):** that root's detail — its pending run's full
 plan breakdown (+ the review-folder path and confirm/cancel commands), and the most-recent completed
-run's timestamp + one-line outcome (deeper forensics: the audit trail, §8.1).
+run's timestamp + one-line outcome (deeper forensics: the audit trail, §8.1). **Plus the root's
+most-recent completed scan result** (§4 `scan_results`, read newest-first): the scan banner counts +
+flags, and — the actionable part — the list of **problem files** with paths + reasons
+(`scan_problem_files`: undecodable / read-error). The undecodable set reflects the root's *current*
+catalog state (re-derived, stable across resume/incremental — §8 A2 Phase 5), so it answers "what in
+this folder won't decode, and why." Problem-file detail is shown **only** here (per-root), not in the
+global rollup. Historical scans are retained in `scan_results` for the M6 TUI to page through; the
+CLI shows only the latest.
 
 `--json` gives the machine-readable form of all the above. Related read-only previews on other
 commands: `scan --dry-run` (would-index preview). All read-only queries run concurrently with any
@@ -2345,4 +2392,16 @@ but v1 is considered done when M0–M6 are.)
    instances/orphaned assets, with a typed confirm) or `roots rename` (change a root's `name`
    handle, re-checking global uniqueness). Needed before the TUI's "Manage roots" panel (§12) can
    do more than add + list; scoped as a small follow-on to the `roots` group, not v1-critical.
+10. **Scan-result retention (deferred; accepted growth):** every completed scan persists a
+   `scan_results` row per root + a `scan_problem_files` row per current problem file (§4, §8 A2
+   Phase 5), kept **indefinitely** so the M6 TUI can navigate scan history. Two accumulation facts,
+   accepted for now: (a) re-scanning a root **appends** a new `scan_results` row (never replaces),
+   so a frequently-scanned root grows one row per scan; (b) because the undecodable problem set is
+   re-derived from the catalog each scan, `scan_problem_files` re-inserts a row for *every* current
+   undecodable on *every* scan — it grows **per-scan, not per-distinct-problem** (a root with 50
+   permanent undecodables scanned 200× → ~10K rows, mostly duplicates). Rows are tiny so this is
+   fine at v1 scale, but unbounded. Deferred fix: a retention knob (mirroring `audit.retention_days`
+   §8.1) — e.g. keep the last N `scan_results` per root or prune older than N days, cascading their
+   problem files — plus possibly deduping the current-undecodable list against the previous scan's.
+   `status <root>` reads only the newest row, so this is purely storage hygiene, not correctness.
 ```
