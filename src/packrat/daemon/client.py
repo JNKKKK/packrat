@@ -69,6 +69,11 @@ class DaemonClient:
     def shutdown(self) -> dict:
         return self._post("/shutdown", {})
 
+    def clear_db(self) -> dict:
+        """Empty the catalog (dev-only). Raises :class:`DaemonError` if the route
+        is absent (release build → 404) or a job is running (409)."""
+        return self._post("/dev/clear-db", {})
+
     # -- jobs ------------------------------------------------------------
     def submit(self, job_type: str, params: dict | None = None) -> int:
         r = self._raw_post("/jobs", {"type": job_type, "params": params or {}})
@@ -102,8 +107,58 @@ class DaemonClient:
                     continue
                 yield json.loads(payload)
 
+    # -- roots + scan ----------------------------------------------------
+    def register_root(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        kind: str = "library",
+        ignore_globs: list[str] | None = None,
+        scan: bool = False,
+        full: bool = False,
+        embed: bool = False,
+    ) -> dict:
+        """Register a root (§8 A1). Returns ``{root, job_id, scan_busy?}``.
+
+        A ``RootError`` from the daemon comes back as HTTP 400 → :class:`DaemonError`
+        carrying the validation message.
+        """
+        return self._post(
+            "/roots",
+            {
+                "path": path, "name": name, "kind": kind,
+                "ignore_globs": ignore_globs or [],
+                "scan": scan, "full": full, "embed": embed,
+            },
+        )
+
+    def submit_scan(
+        self,
+        root: str | None = None,
+        *,
+        all_roots: bool = False,
+        full: bool = False,
+        embed: bool = False,
+        dry_run: bool = False,
+        profile: bool = False,
+    ) -> int:
+        """Submit a scan job (§8 A2); returns the job id. Raises :class:`BusyResponse`."""
+        r = self._raw_post(
+            "/scan",
+            {"root": root, "all": all_roots, "full": full, "embed": embed,
+             "dry_run": dry_run, "profile": profile},
+        )
+        if r.status_code == 409:
+            raise BusyResponse(r.json())
+        if r.status_code >= 400:
+            raise DaemonError(f"{r.status_code}: {r.text}")
+        return int(r.json()["job_id"])
+
     # -- snapshots -------------------------------------------------------
     def status(self, root: str | None = None) -> dict:
+        if root:
+            return self._get(f"/status?root={root}")
         return self._get("/status")
 
     def roots(self) -> list[dict]:

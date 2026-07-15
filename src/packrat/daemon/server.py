@@ -10,6 +10,8 @@ Endpoints (all under token auth except ``/health``):
 - ``POST /jobs/{id}/cancel``  — cooperative cancel (§3).
 - ``GET  /status``            — global rollup snapshot (§11).
 - ``GET  /roots``             — registered roots snapshot (§11).
+- ``POST /roots``             — register a root; optional ``--scan`` (§8 A1).
+- ``POST /scan``              — resolve a root arg + submit a scan job (§8 A2).
 - ``POST /shutdown``          — graceful stop (§11 ``daemon stop``).
 
 The app is built by :func:`build_app`, which wires the DB, config, queue, and runs
@@ -24,7 +26,7 @@ import asyncio
 import json
 import logging
 
-from .. import __version__, config as config_mod, db as db_mod, paths, queries
+from .. import __version__, build as build_mod, config as config_mod, db as db_mod, paths, queries
 from ..jobs import BusyError, JobQueue
 from ..jobs.reconcile import reconcile_on_startup
 from ..util import now_iso
@@ -34,8 +36,9 @@ from .state import DEFAULT_PORT, HOST, current_state, clear_state
 log = logging.getLogger("packrat.daemon")
 
 # Import job type modules for their register_job() side effects.
-from ..jobs import demo as _demo  # noqa: E402,F401
+from ..jobs import scan as _scan  # noqa: E402,F401
 
+from .. import roots as roots_mod  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 
@@ -47,6 +50,19 @@ class SubmitJobRequest(BaseModel):
 
     type: str
     params: dict = {}
+
+
+class RegisterRootRequest(BaseModel):
+    """Body for ``POST /roots`` (``roots register``, §8 A1). Module-scoped for the
+    same FastAPI type-resolution reason as :class:`SubmitJobRequest`."""
+
+    path: str
+    name: str | None = None
+    kind: str = "library"
+    ignore_globs: list[str] = []
+    scan: bool = False
+    full: bool = False
+    embed: bool = False
 
 
 def build_app(token: str, *, db_file=None, config_path=None):
@@ -165,12 +181,97 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     # -- read-only snapshots -----------------------------------------
     @app.get("/status", dependencies=[Depends(require_token)])
-    def status():
+    def status(root: str | None = None):
+        if root:
+            detail = queries.root_detail(root)
+            if detail is None:
+                raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
+            return {"root_detail": detail}
         return queries.status_snapshot()
 
     @app.get("/roots", dependencies=[Depends(require_token)])
     def roots():
         return {"roots": queries.roots_snapshot()}
+
+    @app.post("/roots", dependencies=[Depends(require_token)])
+    def register_root(body: RegisterRootRequest):
+        """Register a folder as a root (§8 A1); optionally kick off a scan (--scan)."""
+        try:
+            row = roots_mod.register(
+                database, body.path, name=body.name, kind=body.kind,
+                ignore_globs=body.ignore_globs or None,
+            )
+        except roots_mod.RootError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        job_id = None
+        if body.scan and row["kind"] == "library":
+            try:
+                job_id = queue.submit(
+                    "scan",
+                    {"root_id": row["id"], "full": body.full, "embed": body.embed},
+                )
+            except BusyError as exc:
+                return JSONResponse(
+                    status_code=200,
+                    content={"root": row, "job_id": None, "scan_busy": str(exc)},
+                )
+        return {"root": row, "job_id": job_id}
+
+    @app.post("/scan", dependencies=[Depends(require_token)])
+    def submit_scan(body: dict):
+        """Resolve a root arg (path/--name, §11) and submit a scan job (§8 A2).
+
+        ``--all`` submits with no ``root_id`` (owns no root; iterates + skips busy
+        roots). A manual scan resolves the arg here so the CLI stays a thin client.
+        """
+        is_all = bool(body.get("all"))
+        params = {
+            "all": is_all,
+            "full": bool(body.get("full")),
+            "embed": bool(body.get("embed")),
+            "dry_run": bool(body.get("dry_run")),
+            "profile": bool(body.get("profile")),
+        }
+        if not is_all:
+            arg = body.get("root")
+            if not arg:
+                raise HTTPException(status_code=400, detail="scan needs a <root> or --all")
+            try:
+                row = roots_mod.resolve_root(database, arg)
+            except roots_mod.RootError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
+            if row["kind"] == "trash":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{row['name']!r} is a trash root; scan never indexes trash folders",
+                )
+            params["root_id"] = row["id"]
+        try:
+            job_id = queue.submit("scan", params)
+        except BusyError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
+            )
+        return {"job_id": job_id}
+
+    # -- dev-only helpers (registered only in a dev build) -----------
+    if build_mod.is_dev_build():
+
+        @app.post("/dev/clear-db", dependencies=[Depends(require_token)])
+        def dev_clear_db():
+            """Empty every catalog table (dev-only). Refuses while a job runs.
+
+            Registered only when :func:`packrat.build.is_dev_build` is true, so a
+            release build never exposes this route at all.
+            """
+            if queue.running_job_id() is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a job is running; stop/cancel it before clearing the DB",
+                )
+            counts = database.clear_catalog()
+            return {"cleared": counts, "total_rows": sum(counts.values())}
 
     # -- shutdown ----------------------------------------------------
     @app.post("/shutdown", dependencies=[Depends(require_token)])
@@ -211,7 +312,13 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
 
     app = build_app(token, db_file=db_file, config_path=config_path)
 
-    config = uvicorn.Config(app, host=HOST, port=port, log_level="info", loop="asyncio")
+    # log_config=None: don't let uvicorn install its own handlers. Its loggers
+    # then propagate to the root logger, whose date-rotating handler
+    # (packrat.daemon.__main__._setup_logging) owns daemon.log — so access/error
+    # lines land in the same midnight-rotated file as packrat's own logs.
+    config = uvicorn.Config(
+        app, host=HOST, port=port, log_level="info", loop="asyncio", log_config=None
+    )
     server = uvicorn.Server(config)
     app.state._uvicorn_server = server
 

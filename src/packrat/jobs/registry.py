@@ -6,7 +6,7 @@ Each job type declares:
   Read-only jobs don't exist yet (status/roots are plain HTTP), so all M0 jobs mutate.
 - ``owned_root``: ``(params) -> root_id | None`` — the root this job *owns* for
   per-root exclusivity (§3 guarantee 2). ``None`` means it owns no root
-  (e.g. ``untrash``, or the M0 ``demo`` job).
+  (e.g. ``untrash``, or ``scan --all`` which iterates roots rather than owning one).
 """
 
 from __future__ import annotations

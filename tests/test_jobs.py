@@ -8,9 +8,10 @@ import pytest
 
 from packrat import db
 from packrat.jobs import BusyError, JobQueue
-from packrat.jobs import demo  # noqa: F401 - registers 'demo'
 from packrat.jobs.reconcile import reconcile_on_startup
 from packrat.util import now_iso
+
+# The test-only 'sleeper' job is registered in conftest.py.
 
 
 @pytest.fixture()
@@ -41,7 +42,7 @@ def _wait_terminal(database, job_id, timeout=10.0):
 
 def test_submit_runs_and_reports_progress(queue_and_db):
     q, database = queue_and_db
-    sub_id = q.submit("demo", {"steps": 4, "delay_s": 0.01})
+    sub_id = q.submit("sleeper", {"steps": 4, "delay_s": 0.01})
     sub = q.subscribe(sub_id)
     progress = 0
     while True:
@@ -58,15 +59,15 @@ def test_submit_runs_and_reports_progress(queue_and_db):
 
 def test_busy_rejection(queue_and_db):
     q, _ = queue_and_db
-    q.submit("demo", {"steps": 50, "delay_s": 0.05})
+    q.submit("sleeper", {"steps": 50, "delay_s": 0.05})
     with pytest.raises(BusyError) as ei:
-        q.submit("demo", {"steps": 2})
+        q.submit("sleeper", {"steps": 2})
     assert ei.value.kind == "global"
 
 
 def test_cooperative_cancel(queue_and_db):
     q, database = queue_and_db
-    jid = q.submit("demo", {"steps": 200, "delay_s": 0.02})
+    jid = q.submit("sleeper", {"steps": 200, "delay_s": 0.02})
     time.sleep(0.1)
     assert q.cancel(jid) is True
     assert _wait_terminal(database, jid) == "cancelled"

@@ -58,16 +58,84 @@ def status_snapshot() -> dict:
 
 
 def roots_snapshot() -> list[dict]:
-    """Per-root list (§11): id, name, path, kind, enabled, asset count, scan recency."""
+    """Per-root list (§11): id, name, path, kind, enabled, asset count, scan recency.
+
+    ``instance_count`` counts physical files; ``asset_count`` distinct content in
+    the root. ``last_full_scan_at`` is stamped only by ``scan --full`` (§8 A2 step
+    11); a plain incremental scan does not move it. ``last_scan_at`` is the general
+    scan recency — ``MAX(file_instances.last_seen_at)``, bumped by *every* scan
+    (incremental or full) on every present file (§8 A2 step 4/9), so it answers
+    "when was this root last scanned" without a schema column.
+    """
     conn = _ro()
     try:
         rows = conn.execute(
             "SELECT r.id, r.name, r.path, r.kind, r.enabled, r.last_full_scan_at, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
-            "   WHERE fi.root_id = r.id) AS asset_count "
+            "   WHERE fi.root_id = r.id) AS asset_count, "
+            "  (SELECT COUNT(*) FROM file_instances fi WHERE fi.root_id = r.id) "
+            "   AS instance_count, "
+            "  (SELECT MAX(fi.last_seen_at) FROM file_instances fi "
+            "   WHERE fi.root_id = r.id) AS last_scan_at "
             "FROM roots r ORDER BY r.id"
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def root_detail(root_arg: str) -> dict | None:
+    """One root's detail for ``packrat status <root>`` (§11).
+
+    Resolves ``root_arg`` as path-then-name (§11) via a read-only connection, then
+    reports its counts + scan recency + any pending review run.
+    """
+    from . import fsutil
+
+    conn = _ro()
+    try:
+        rows = conn.execute("SELECT * FROM roots").fetchall()
+        canon = fsutil.canonicalize(root_arg)
+        match = None
+        for r in rows:
+            if fsutil.paths_equal(canon, r["path"]):
+                match = r
+                break
+        if match is None:
+            for r in rows:
+                if r["name"].lower() == root_arg.lower():
+                    match = r
+                    break
+        if match is None:
+            return None
+        rid = match["id"]
+        photos = conn.execute(
+            "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
+            "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='photo'",
+            (rid,),
+        ).fetchone()["c"]
+        videos = conn.execute(
+            "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
+            "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='video'",
+            (rid,),
+        ).fetchone()["c"]
+        row = conn.execute(
+            "SELECT COUNT(*) c, MAX(last_seen_at) last_scan_at "
+            "FROM file_instances WHERE root_id=?",
+            (rid,),
+        ).fetchone()
+        instances, last_scan_at = row["c"], row["last_scan_at"]
+        pending = conn.execute(
+            "SELECT id, run_type, created_at FROM review_runs WHERE root_id=? AND status='pending'",
+            (rid,),
+        ).fetchone()
+        return {
+            "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
+            "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
+            "last_scan_at": last_scan_at,
+            "photos": photos, "videos": videos, "instances": instances,
+            "pending_review": dict(pending) if pending else None,
+        }
     finally:
         conn.close()
 

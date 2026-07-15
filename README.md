@@ -44,6 +44,7 @@ to start it by hand. The lifecycle commands are there for control and troublesho
 uv run packrat daemon start    # explicitly spawn the detached daemon (no-op if up)
 uv run packrat daemon status   # is it running? pid, port, in-flight job
 uv run packrat daemon stop     # graceful shutdown (an in-flight job is left resumable)
+uv run packrat daemon restart  # stop + start (pick up a new packrat build)
 ```
 
 Check collection state anytime (read-only, never blocked by a running job):
@@ -52,18 +53,22 @@ Check collection state anytime (read-only, never blocked by a running job):
 uv run packrat status          # collection rollup + any running/interrupted job
 ```
 
-### Dev-only commands (M0 scaffolding)
+### Add and scan a folder (M1/M2)
 
-These aren't part of the planned CLI surface — they exist to exercise the job
-runtime before the real operations (`scan`/`dedup`/`merge`) land in M1+:
+Register a folder as a root, then scan it to fingerprint its contents (BLAKE3 +
+perceptual PDQ). `--scan` does both in one step:
 
 ```sh
-uv run packrat demo            # submit + stream a throwaway demo job
-uv run packrat jobs            # list recent job runs (the TUI will own this later)
+uv run packrat roots register "D:\Backup\iPhone" --scan   # register + fingerprint
+uv run packrat roots list                                 # id, name, path, counts, scan recency
+uv run packrat scan "D:\Backup\iPhone"                    # re-scan (fast-path skips unchanged)
+uv run packrat scan --all                                 # scan every enabled root
+uv run packrat jobs                                       # list recent job runs
 ```
 
-`demo` streams its progress live; Ctrl-C detaches the view but the job keeps
-running in the daemon, exactly like a real job will.
+A scan streams its progress live; Ctrl-C detaches the view but the job keeps
+running in the daemon (`packrat cancel` stops it). Re-running a scan is cheap —
+the fast-path skips files whose path+size+mtime are unchanged.
 
 ## Development
 

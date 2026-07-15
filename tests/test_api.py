@@ -38,7 +38,7 @@ def test_auth_required(client):
 
 
 def test_submit_and_status(client):
-    r = client.post("/jobs", json={"type": "demo", "params": {"steps": 3, "delay_s": 0.01}}, headers=_h())
+    r = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 3, "delay_s": 0.01}}, headers=_h())
     assert r.status_code == 200
     jid = r.json()["job_id"]
     # wait for completion
@@ -53,8 +53,8 @@ def test_submit_and_status(client):
 
 
 def test_busy_returns_409(client):
-    client.post("/jobs", json={"type": "demo", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h())
-    r = client.post("/jobs", json={"type": "demo", "params": {"steps": 2}}, headers=_h())
+    client.post("/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h())
+    r = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h())
     assert r.status_code == 409
     body = r.json()
     assert body["error"] == "busy" and body["kind"] == "global"
@@ -65,7 +65,7 @@ def test_roots_snapshot_empty(client):
 
 
 def test_late_attach_stream_closes(client):
-    r = client.post("/jobs", json={"type": "demo", "params": {"steps": 2, "delay_s": 0.01}}, headers=_h())
+    r = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2, "delay_s": 0.01}}, headers=_h())
     jid = r.json()["job_id"]
     for _ in range(200):
         if client.get(f"/jobs/{jid}", headers=_h()).json()["status"] != "running":

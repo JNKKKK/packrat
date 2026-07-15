@@ -12,7 +12,9 @@ On Windows the child is spawned **windowless**: with ``pythonw.exe`` (the
 GUI-subsystem interpreter, which cannot own a console) when available, plus
 ``CREATE_NO_WINDOW`` | ``CREATE_NEW_PROCESS_GROUP`` so it runs fully in the
 background and outlives the launching terminal (§3, §11: "killing the terminal …
-none touch the running job"). Its stdout/stderr go to ``daemon.log``.
+none touch the running job"). Its raw stdout/stderr go to ``daemon-bootstrap.log``
+(pre-logging / hard-crash output only); normal logging goes to the date-rotating
+``daemon.log`` owned by the handler in :mod:`packrat.daemon.__main__`.
 """
 
 from __future__ import annotations
@@ -51,7 +53,10 @@ def _windowless_executable() -> str:
 
 def spawn_daemon() -> None:
     """Launch the background daemon process (does not wait for it to bind)."""
-    log_file = paths.daemon_log_path()
+    # Redirect the child's raw fds to a *bootstrap* log, not daemon.log — the
+    # latter is owned exclusively by the child's rotating handler so its midnight
+    # rename can't fail on a pinned inherited handle (§ date-split logging).
+    log_file = paths.daemon_bootstrap_log_path()
     logf = open(log_file, "a", encoding="utf-8")  # noqa: SIM115 - handed to child
     kwargs: dict = {
         "stdout": logf,
@@ -91,7 +96,10 @@ def ensure_daemon(*, timeout_s: float = 20.0, port: int = DEFAULT_PORT) -> Daemo
             return _with_token(probe, port)
         time.sleep(0.25)
 
-    raise TimeoutError(f"daemon did not come up within {timeout_s}s (see {paths.daemon_log_path()})")
+    raise TimeoutError(
+        f"daemon did not come up within {timeout_s}s "
+        f"(see {paths.daemon_log_path()} and {paths.daemon_bootstrap_log_path()})"
+    )
 
 
 def _with_token(client: DaemonClient, port: int) -> DaemonClient:

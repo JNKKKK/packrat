@@ -63,9 +63,34 @@ def daemon_lock_path() -> Path:
     return home_dir() / "daemon.lock"
 
 
+def logs_dir() -> Path:
+    """The daemon log directory (``logs/``), holding the rolling + bootstrap logs."""
+    d = home_dir() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def daemon_log_path() -> Path:
-    """Where the detached daemon process redirects stdout/stderr."""
-    return home_dir() / "daemon.log"
+    """The daemon's rolling log — the *active* file for today (``logs/daemon.log``).
+
+    Owned exclusively by a ``TimedRotatingFileHandler`` (see
+    :func:`packrat.daemon.__main__._setup_logging`) that rotates at local midnight
+    into dated backups (``logs/daemon.log.YYYY-MM-DD``). Not an fd-redirect target —
+    see :func:`daemon_bootstrap_log_path` for that.
+    """
+    return logs_dir() / "daemon.log"
+
+
+def daemon_bootstrap_log_path() -> Path:
+    """Where the detached daemon's raw stdout/stderr fds are redirected.
+
+    ``logs/daemon-bootstrap.log``. Kept separate from :func:`daemon_log_path` so
+    the rotating handler can own ``daemon.log`` exclusively (a Windows midnight
+    rename fails if another handle pins the file). Captures only pre-logging /
+    hard-crash output — startup tracebacks, C-level faults — that never went
+    through Python ``logging``.
+    """
+    return logs_dir() / "daemon-bootstrap.log"
 
 
 def audit_dir() -> Path:

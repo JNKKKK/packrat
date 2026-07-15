@@ -97,6 +97,55 @@ class Database:
             else:
                 self._conn.commit()
 
+    def clear_catalog(self) -> dict[str, int]:
+        """DELETE every catalog row, preserving the schema (dev-only — §clear-db).
+
+        Empties all data tables (assets/file_instances/phash/…/jobs/roots) inside a
+        single transaction under the write lock, so it is safe against the API +
+        worker threads. **Preserves** ``meta`` (the ``schema_version`` row) and the
+        table structure — this resets *content*, not the schema, so the daemon's
+        open connection keeps working with no re-init. ``sqlite_sequence`` is reset
+        so ids restart at 1. Returns ``{table: rows_deleted}`` (only tables that
+        had rows).
+
+        Counts are taken for **all** tables up front, *before* any DELETE — with
+        FKs on (the connection default), ``DELETE FROM assets`` cascade-deletes
+        ``file_instances``/``phash``/… so a count-then-delete-per-table loop would
+        misattribute the cascaded rows to zero. We don't disable FKs: ``PRAGMA
+        foreign_keys`` is a no-op inside a transaction anyway, and cascades only
+        help here since every referencing table is being cleared too.
+
+        Not called anywhere in normal operation; exposed only via the dev-gated
+        ``/dev/clear-db`` endpoint (:func:`packrat.build.is_dev_build`).
+        """
+        with self._lock:
+            tables = [
+                r["name"]
+                for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' AND name != 'meta'"
+                ).fetchall()
+            ]
+            counts = {
+                t: self._conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+                for t in tables
+            }
+            self._conn.execute("BEGIN")
+            try:
+                for t in tables:
+                    self._conn.execute(f"DELETE FROM {t}")
+                # Reset AUTOINCREMENT rowids if the bookkeeping table exists.
+                if self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+                ).fetchone():
+                    self._conn.execute("DELETE FROM sqlite_sequence")
+            except Exception:
+                self._conn.rollback()
+                raise
+            else:
+                self._conn.commit()
+        return {t: n for t, n in counts.items() if n}
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

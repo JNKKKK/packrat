@@ -4,9 +4,9 @@ Enforces both concurrency guarantees:
 1. **Global: one mutating job at a time.** A second submission while one runs is
    *rejected* with :class:`BusyError` naming the in-flight job — no backlog queue.
 2. **Per-root: one active op per owned root.** Submitting a job whose owned root
-   already has an active op is rejected. (In M0 the demo job owns no root; the
-   real per-root holders — pending review_runs / open merge_runs — are checked
-   here so M1+ ops slot in without changing this layer.)
+   already has an active op is rejected. (A job may own no root — e.g. ``scan
+   --all`` or ``untrash`` — and is then only bound by guarantee 1; the real
+   per-root holders are pending review_runs / open merge_runs, checked here.)
 
 The worker slot is **in-memory** (a live daemon has at most one running job, in
 this process). That is what makes startup reconciliation correct: any ``running``

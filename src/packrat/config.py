@@ -67,6 +67,10 @@ class MatchConfig:
     t_match_photo: int = 32
     #: per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision.
     t_match_video: int = 90
+    #: downscale each decoded image/frame to this longest edge before PDQ. PDQ on a
+    #: full 12MP photo is ~7x slower than on a 512px copy while the hash barely moves
+    #: (drift ~7/256, well inside t_match_photo). 0 = no downscale (hash full-res).
+    pdq_max_edge: int = 512
 
 
 @dataclass(frozen=True)
@@ -87,8 +91,46 @@ class ReviewConfig:
 
 @dataclass(frozen=True)
 class SmbConfig:
-    #: concurrent hashing/decoding streams over SMB (§10.1); 4–8 typical.
+    #: concurrent hashing/decoding streams over SMB (§10.1); 4–8 typical. Used for
+    #: the video path (per-file) and as a fallback; the photo pipeline uses the
+    #: separate io/cpu worker knobs below.
     scan_workers: int = 6
+    #: PHOTO pipeline — decouple I/O from CPU concurrency (§producer-consumer).
+    #: io_workers read whole photo files off disk/NAS into a bounded queue (want
+    #: high, to saturate the link); cpu_workers hash+decode+PDQ from RAM (want ≈
+    #: cores). 0 = auto (io: 2×cores capped at 16; cpu: max(2, cores−2)).
+    io_workers: int = 0
+    cpu_workers: int = 0
+    #: Memory budget for in-flight photo buffers (bytes). Producers block once the
+    #: sum of queued+in-flight buffer sizes reaches this, so RAM is bounded by
+    #: *bytes* not file count — a burst of large HEIC/RAW can't balloon the queue.
+    photo_buffer_budget_bytes: int = 1024 * 1024 * 1024
+    #: Photos larger than this are NOT buffered whole — fall back to the path
+    #: decode (streamed) so a single pathological file can't exceed the budget. Bytes.
+    photo_buffer_max_bytes: int = 128 * 1024 * 1024
+
+    def resolved_io_workers(self) -> int:
+        """io_workers, resolving 0 → auto.
+
+        Aims for the §10.1 SMB sweet spot of ~4–8 concurrent read streams: enough
+        outstanding requests to hide latency and saturate the link, but not so many
+        that parallel reads thrash a single NAS volume with seek contention. A
+        single sequential reader can't fill the bandwidth-delay product (it would
+        starve the CPU consumers), so this is never 1; it's also bounded by cores.
+        """
+        if self.io_workers > 0:
+            return self.io_workers
+        import os
+
+        return min(8, max(4, os.cpu_count() or 4))
+
+    def resolved_cpu_workers(self) -> int:
+        """cpu_workers, resolving 0 → auto (cores−2, at least 2)."""
+        if self.cpu_workers > 0:
+            return self.cpu_workers
+        import os
+
+        return max(2, (os.cpu_count() or 4) - 2)
 
 
 @dataclass(frozen=True)
@@ -129,6 +171,7 @@ mtime_tolerance_s = 2  # tolerant-mtime skip window (§8 A2 step 4); 0 = strict 
 [match]
 t_match_photo = 32     # photo PDQ Hamming cutoff (§5.3); the single photo decision — tune tight
 t_match_video = 90     # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+pdq_max_edge  = 512    # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
 
 [video]
 sample_frames        = 12    # frames sampled per video, at segment midpoints (§5.3)
@@ -142,7 +185,11 @@ min_comparable_frames = 5    # fewer comparable pairs than this -> no match (ins
 low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_confidence (§5.3, annotate-only)
 
 [smb]
-scan_workers = 6       # concurrent hashing/decoding streams over SMB (§10.1); 4-8 typical
+scan_workers = 6       # video-path + fallback concurrency (§10.1); 4-8 typical
+io_workers   = 0        # PHOTO pipeline: file-reader threads (0 = auto 4-8, SMB sweet spot §10.1)
+cpu_workers  = 0        # PHOTO pipeline: hash+decode+pdq threads (0 = auto cores-2)
+photo_buffer_budget_bytes = 1073741824  # RAM budget for in-flight photo buffers (1 GB)
+photo_buffer_max_bytes    = 134217728   # photos above this bypass buffering (stream, 128 MB)
 
 [audit]
 retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune older (deferred knob, §14 #5)
