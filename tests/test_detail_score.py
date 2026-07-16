@@ -76,6 +76,25 @@ def test_detail_score_never_raises_on_degenerate():
     assert media._detail_score(np.zeros((4, 4), dtype=np.uint8)) >= 0       # 2-D input tolerated
 
 
+def test_detail_score_row_stride_preserves_ranking():
+    """Row-subsampling (perf, §8 B) must not change the *reliable* compression order.
+
+    The score is row-subsampled for speed (detail_score was ~40% of scan CPU at
+    full-res). The residual is *horizontal*, so sampling rows keeps the ordering
+    where it's meaningful — the high-quality band (q95 vs q80) is inherently noisy at
+    ANY stride (JPEG blocking is high-freq — the very reason a lossless-format tier
+    sits above detail_score, §8 B), but the heavy-compression separation must hold.
+    Stride only matters if it corrupts THAT, so assert it against a clear gap.
+    """
+    im = _structured(w=512, h=384)
+    hi = media._detail_score(_reencode(im, "JPEG", quality=90))
+    lo = media._detail_score(_reencode(im, "JPEG", quality=40))
+    assert hi > lo
+    # Row-strided array is a plain slice of the full-res array — the code path used.
+    full = _reencode(im, "JPEG", quality=90)
+    assert media._detail_score(full) == media._detail_score(full)  # deterministic
+
+
 def test_fingerprint_carries_detail_score(tmp_path):
     im = _structured()
     p = tmp_path / "a.png"

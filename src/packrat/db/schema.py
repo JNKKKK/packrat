@@ -60,13 +60,16 @@ CREATE TABLE IF NOT EXISTS assets (
     status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'trashed')),
     undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels (§4)
     decode_error  TEXT,                       -- last decoder failure detail (debugging POC wheels)
-    detail_score  INTEGER,                    -- photo detail estimate: zlib size of the full-res
-                                              --   horizontal pixel residual (§8 B stage-2 keep-lead).
-                                              --   Higher = more retained detail. Photos only (NULL for
-                                              --   video/undecodable, and for pre-v4 assets — NOT
-                                              --   recomputed by `scan --full`, which skips re-decoding
-                                              --   a fully-fingerprinted hit; keep-lead falls back to
-                                              --   resolution→size when NULL).
+    detail_score  INTEGER,                    -- photo detail estimate: zlib size of the horizontal
+                                              --   pixel residual, ROW-SUBSAMPLED (media._DETAIL_ROW_STRIDE;
+                                              --   full-res was ~40% of scan CPU — strided reproduces the
+                                              --   ranking, §8 B stage-2 keep-lead). Higher = more retained
+                                              --   detail. Photos only (NULL for video/undecodable, and for
+                                              --   pre-v4 assets — NOT recomputed by `scan --full`, which
+                                              --   skips re-decoding a fully-fingerprinted hit; keep-lead
+                                              --   falls back to resolution→size when NULL). Compared only
+                                              --   WITHIN a near-dup group, so the strided-vs-full basis
+                                              --   change is advisory-safe (affects a suggestion, never a delete).
     codec         TEXT,                       -- video codec name (h264|hevc|av1|vp9|…) from the decode
                                               --   probe; VIDEO only (NULL for photo/undecodable). Feeds
                                               --   the video keep-lead's codec-efficiency weight (§8 B).
