@@ -415,8 +415,16 @@ def test_dedup_stage2_marks_lossless_original_as_lead(queue_and_db, tmp_path):
     assert not acts["export.jpg"]["shortcut_name"].endswith("_suggested.lnk")
     grp = _stage_dir(lib, 2)
     assert os.path.exists(os.path.join(grp, lead["shortcut_name"]))
-    manifest = open(os.path.join(grp, "manifest.csv"), encoding="utf-8").read()
-    assert "suggested_lead" in manifest and "size" in manifest
+    # The manifest carries the per-row lead reason: filled for the lead, blank otherwise.
+    import csv as _csv
+
+    with open(os.path.join(grp, "manifest.csv"), encoding="utf-8", newline="") as f:
+        rows = {os.path.basename(r["target_path"]): r for r in _csv.DictReader(f)}
+    assert "suggested_reason" in rows["master.png"]
+    assert rows["master.png"]["suggested_lead"] == "1"
+    assert rows["master.png"]["suggested_reason"] == "resolution + format"  # PNG vs JPEG @ equal res
+    assert rows["export.jpg"]["suggested_lead"] == "0"
+    assert rows["export.jpg"]["suggested_reason"] == ""  # non-lead → blank
 
 
 @win_only

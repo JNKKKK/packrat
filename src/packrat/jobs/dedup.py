@@ -419,10 +419,11 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
         group_no += 1
         # Members with a live representative instance, in stable order.
         members = [(aid, insts[aid]) for aid in comp if insts.get(aid) is not None]
+        lead_level = None
         if suggest_lead:
-            lead_id, level = _group_lead_and_level(members, rank, ctx.config)
-            if level is not None:
-                lead_levels[level] = lead_levels.get(level, 0) + 1
+            lead_id, lead_level = _group_lead_and_level(members, rank, ctx.config)
+            if lead_level is not None:
+                lead_levels[lead_level] = lead_levels.get(lead_level, 0) + 1
         else:
             lead_id = None
         member_no = 0
@@ -446,6 +447,9 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
                 "group_no": group_no, "member_no": member_no,
                 "is_external": inst["root_id"] != root_id, "distance": near_d,
                 "quality": my_q, "low_confidence": low_conf, "is_lead": is_lead,
+                # Why this member was chosen lead (the ranking-key decision level);
+                # only the lead carries it, others get "" in the manifest (§8 B).
+                "lead_reason": lead_level if is_lead else None,
                 "media_type": r.get("media_type"), "width": r.get("width"), "height": r.get("height"),
                 "size": r.get("size"),
                 "duration_s": r.get("duration_s"), "codec": r.get("codec"),
@@ -775,12 +779,13 @@ def _write_manifest(stage, stage_dir, staged) -> None:
         with open(os.path.join(stage_dir, "manifest.csv"), "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["shortcut", "target_path", "asset_id", "group_no", "member_no",
-                        "suggested_lead", "media_type", "width", "height",
+                        "suggested_lead", "suggested_reason", "media_type", "width", "height",
                         "size", "duration_s", "codec", "bitrate",
                         "is_external", "distance", "quality", "low_confidence"])
             for a in staged:
                 w.writerow([a["shortcut_name"], a["path"], a["asset_id"], a["group_no"],
                             a["member_no"], 1 if a.get("is_lead") else 0,
+                            a.get("lead_reason") or "",
                             a.get("media_type") or "",
                             a.get("width") if a.get("width") is not None else "",
                             a.get("height") if a.get("height") is not None else "",
@@ -1051,8 +1056,8 @@ def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
             {k: a.get(k) for k in ("folder", "kind", "reason", "default_action", "asset_id",
                                    "instance_id", "path", "survivor_instance_id", "survivor_path",
                                    "group_no", "member_no", "is_external", "distance", "quality",
-                                   "low_confidence", "is_lead", "media_type", "width", "height",
-                                   "size", "duration_s", "codec", "shortcut_name")}
+                                   "low_confidence", "is_lead", "lead_reason", "media_type",
+                                   "width", "height", "size", "duration_s", "codec", "shortcut_name")}
             for a in plan["actions"]
         ],
     }

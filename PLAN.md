@@ -1335,8 +1335,9 @@ blowup.
      **This is a hint by default:** the stage stays default-**KEEP** (you still delete a member by
      removing its shortcut); the marker itself never deletes anything and never changes a default.
      **Stage 3 (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want
-     to keep. → `is_lead` recorded in the plan; surfaced in `manifest.csv` (`suggested_lead`,
-     `media_type`, `width`, `height`, `size`, `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
+     to keep. → `is_lead` + `lead_reason` (the decision level, below) recorded in the plan; surfaced in
+     `manifest.csv` (`suggested_lead`, `suggested_reason`, `media_type`, `width`, `height`, `size`,
+     `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
      - **Keep-lead pick stats (reported at staging).** When stage 2 is staged, the report logs *how*
        each group's lead was decided — a tally over the ranking key's decision levels
        (photo: `resolution` / `resolution + format` / `resolution + format + size`; video: the
@@ -1375,9 +1376,11 @@ next stage after applying the current one (Phase 6). Per staged action:
     **not** the manifest). Columns:
     - `_exact_dup_to_delete\manifest.csv`: `shortcut, target_path, asset_id, reason, survivor_path`
     - `_suspect_recompression\` / `_with_minor_edits\manifest.csv`:
-      `shortcut, target_path, asset_id, group_no, member_no, suggested_lead, media_type, width,
-      height, size, duration_s, codec, bitrate, is_external, distance, quality,
-      low_confidence` — `suggested_lead`=`1` on the keep-hint member (stage 2 only, step 9); the
+      `shortcut, target_path, asset_id, group_no, member_no, suggested_lead, suggested_reason,
+      media_type, width, height, size, duration_s, codec, bitrate, is_external, distance, quality,
+      low_confidence` — `suggested_lead`=`1` on the keep-hint member (stage 2 only, step 9), and
+      `suggested_reason` names *why that member won* (the ranking-key decision level — e.g.
+      `resolution + format` — filled only on the lead row, blank otherwise); the
       `media_type`/`width`/`height`/`size`/`duration_s`/`codec`/`bitrate` columns are
       the ranking inputs (so a surprising lead is explainable at a glance — e.g. a HEIC-vs-JPEG or
       HEVC-vs-H.264 call); `quality` is the member's PDQ quality (0–100; video: min across comparable frames);
