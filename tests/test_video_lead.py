@@ -166,6 +166,34 @@ def test_photo_lead_lossless_tier_above_detail_band():
     assert dedup._pick_lead(m, rank, cfg) == 1  # PNG master wins on the lossless tier
 
 
+def test_photo_lead_heic_master_beats_jpeg_export():
+    """A HEIC master outranks its JPEG export even though the JPEG scores HIGHER detail (§8 B).
+
+    Measured: at matched quality a JPEG's 8×8 blocking inflates detail_score ABOVE the
+    HEIC master's, so detail-first ranking would wrongly pick the JPEG. The format rank
+    (efficient-lossy HEIC > other-lossy JPEG) sits above detail and fixes it.
+    """
+    cfg = Config()
+    m = [(1, {"fid": 1, "root_id": 1, "path": "C:\\lib\\master.heic"}),
+         (2, {"fid": 2, "root_id": 1, "path": "C:\\lib\\export.jpg"})]
+    # JPEG has HIGHER detail_score (the trap) AND could even be a larger file — the
+    # format rank must still pick the HEIC master.
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 1_400_000, "detail_score": 774_000},
+           "2": {"width": 4000, "height": 3000, "size": 1_900_000, "detail_score": 801_000}},
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # HEIC master, not the higher-detail JPEG
+
+
+def test_photo_format_rank_ordering():
+    assert dedup._photo_format_rank("a.png") == 2      # lossless
+    assert dedup._photo_format_rank("a.dng") == 2      # RAW → lossless tier
+    assert dedup._photo_format_rank("a.heic") == 1     # efficient lossy
+    assert dedup._photo_format_rank("a.avif") == 1
+    assert dedup._photo_format_rank("a.jpg") == 0      # other lossy
+    assert dedup._photo_format_rank("a.webp") == 0
+
+
 def test_photo_lead_resolution_dominates():
     cfg = Config()
     m = _photo_members(1, 2)

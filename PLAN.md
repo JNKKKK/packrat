@@ -1313,17 +1313,24 @@ blowup.
      combined with `_external` if applicable). A group is homogeneous (a photo never matches a video),
      so the group's medium picks the ranking key; both lead with **resolution** (`width·height`) — a
      downscaled re-export loses outright:
-     - **Photo:** resolution → **lossless-format tier** (a `png`/`tif`/`tiff`/`bmp`/RAW original
-       outranks a lossy `jpg`/`heic`/`webp`/`avif` sibling) → **`detail_score` band** (step 8) → file
-       `size` → stable path. *Why the lossless tier sits above `detail_score`:* JPEG blocking
-       artifacts are high-frequency, so a mildly-recompressed JPEG can score a *higher* `detail_score`
-       than a pristine lossless master — `detail_score` is trusted only *within* a lossy/lossless tier.
-       *Why `detail_score` is banded (`detail_tie_pct`, default 15%) with `size` breaking the tie:*
-       within a lossy tier the residual-entropy measure is **noisy in the high-quality band** — a
-       slightly-more-compressed copy can score marginally higher — so near-equal `detail_score`s tie
-       and file `size` (the clean monotonic quality proxy at fixed resolution+format) decides; heavy
+     - **Photo:** resolution → **format rank** → **`detail_score` band** (step 8) → file `size` →
+       stable path. **Format rank** is a 3-level ordinal (best first): lossless/original
+       (`png`/`tif`/`tiff`/`bmp`/RAW) > **efficient-lossy** (`heic`/`heif`/`avif`) > other-lossy
+       (`jpg`/`webp`/`gif`/…). *Why format rank sits ABOVE `detail_score`:* `detail_score` is a
+       residual-entropy measure that JPEG's 8×8 blocking **inflates**, so it is biased toward JPEG
+       *across formats* — a HEIC master scores a *lower* `detail_score` than its JPEG export
+       (measured), and the file-size tiebreak can't be trusted cross-format either (a high-quality
+       JPEG export can out-size a HEIC master). Ranking format first means `detail_score` only ever
+       discriminates *within one format*, where it is reliable, and the cross-format call (the
+       HEIC-master-vs-JPEG-export trap, and the lossless-master trap) is made by codec efficiency.
+       *Why `detail_score` is then banded (`detail_tie_pct`, default 15%) with `size` breaking the
+       tie:* within a format the measure is **noisy in the high-quality band** — a slightly-more-
+       compressed copy can score marginally higher — so near-equal `detail_score`s tie and file
+       `size` (the clean monotonic quality proxy at fixed resolution+format) decides; heavy
        compression still spans bands, so `detail_score` separates it. Symmetric with the video
-       effective-bitrate band below.
+       effective-bitrate band + codec weight below. *Accepted cost:* a genuinely low-quality HEIC now
+       outranks a high-quality JPEG of the same scene, and a JPEG re-wrapped as HEIC beats its source
+       — rare (HEIC is the original on iPhone), advisory-only (never deletes; overridable in review).
      - **Video:** resolution → **effective-bitrate band** → **codec-efficiency weight** → stable path.
        Effective bitrate = `size / duration_s × codec_weight` (`match.codec_weights`, §9.2): a
        more-efficient codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
@@ -2094,7 +2101,7 @@ Conventions differ by stage: `_exact_dup_to_delete\` is default-DELETE (remove a
 `_suspect_recompression\` and `_with_minor_edits\` are default-KEEP (remove a shortcut to DELETE).
 Stage 1 keeps oldest-mtime internally / drops all when an external copy exists; stages 2–3 stage
 near-dup members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2,
-packrat marks the least-compressed photo member `_suggested` (resolution → lossless → detail_score
+packrat marks the least-compressed photo member `_suggested` (resolution → format rank → detail_score
 band → size) as a keep-hint — advisory only; default still KEEP.
 ```
 

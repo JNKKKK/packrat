@@ -41,12 +41,35 @@ from .registry import JobSpec, register_job
 
 log = logging.getLogger("packrat.jobs.dedup")
 
-#: Photo extensions that are lossless / an original master — ranked ABOVE lossy
-#: siblings when picking a stage-2 keep-lead (§8 B). JPEG blocking artifacts can
-#: inflate detail_score above a pristine master, so a lossless-format tier sits
-#: above detail_score in the ranking key; detail_score only discriminates within a
-#: tier. webp/avif/heic are usually lossy in practice → treated as lossy here.
+#: Photo extensions that are lossless / an original master (§8 B keep-lead).
 _LOSSLESS_PHOTO_EXTS = frozenset({"png", "tif", "tiff", "bmp"}) | RAW_EXTS
+
+#: Modern *lossy* codecs that are more efficient than JPEG — a HEIC/AVIF file packs
+#: more real detail into a byte than a same-size JPEG. On iPhone these are the
+#: originals; the JPEG is the export.
+_EFFICIENT_LOSSY_PHOTO_EXTS = frozenset({"heic", "heif", "avif"})
+
+
+def _photo_format_rank(path: str) -> int:
+    """Ordinal photo-format preference for the keep-lead (§8 B), best first.
+
+    ``2`` lossless/original (png/tif/bmp/RAW) · ``1`` efficient-lossy (heic/heif/avif)
+    · ``0`` other lossy (jpg/webp/gif/…). Sits ABOVE ``detail_score`` in the ranking
+    key **on purpose**: ``detail_score`` is a residual-entropy measure that JPEG's 8×8
+    blocking *inflates*, so it is biased toward JPEG **across formats** — a HEIC master
+    scores *lower* detail than its JPEG export (measured). Ranking format first means
+    ``detail_score`` only ever discriminates *within* one format, where it is reliable;
+    the cross-format call (the HEIC-master-vs-JPEG-export trap) is made here by codec
+    efficiency instead. Accepted cost: a genuinely low-quality HEIC now outranks a
+    high-quality JPEG of the same scene, and a JPEG re-wrapped as HEIC beats its own
+    source — rare (HEIC is the original on iPhone), and advisory-only (never deletes).
+    """
+    ext = ext_of(path)
+    if ext in _LOSSLESS_PHOTO_EXTS:
+        return 2
+    if ext in _EFFICIENT_LOSSY_PHOTO_EXTS:
+        return 1
+    return 0
 
 # Stage identifiers (also the review_runs.stage / review_actions.stage values).
 STAGE_EXACT = 1
@@ -414,16 +437,18 @@ def _pick_lead(members, rank, config):
     so the group's media type picks the ranking key. Both keys lead with **resolution**
     (a downscaled re-export loses outright); a member with no rank row sorts last.
 
-    - **Photo** (best first, all DESC): pixels → lossless-format tier → `detail_score`
-      BAND → file size. The lossless tier sits ABOVE `detail_score` because JPEG
-      blocking artifacts can inflate `detail_score` above a pristine master, so
-      `detail_score` is trusted only WITHIN a lossy/lossless tier. Within that tier
-      `detail_score` is *banded* (`detail_tie_pct`): the residual-entropy measure is
-      noisy in the high-quality band (a slightly-more-compressed copy can score
-      higher), so near-equal scores tie and **file size** — the clean monotonic
+    - **Photo** (best first, all DESC): pixels → **format rank** → `detail_score` BAND
+      → file size. **Format rank** (lossless > efficient-lossy HEIC/AVIF > other lossy
+      JPEG/WebP) sits ABOVE `detail_score` because `detail_score` is a residual-entropy
+      measure that JPEG's 8×8 blocking *inflates* — so it is biased toward JPEG *across
+      formats* (a HEIC master scores lower detail than its JPEG export, measured). By
+      ranking format first, `detail_score` only ever discriminates *within* one format,
+      where it is reliable. Within a format it is *banded* (`detail_tie_pct`): the
+      measure is noisy in the high-quality band (a slightly-more-compressed copy can
+      score higher), so near-equal scores tie and **file size** — the clean monotonic
       quality proxy at fixed resolution+format — breaks the tie. Heavy compression
       still spans bands, so `detail_score` separates it. (Symmetric with video's
-      bitrate band below.)
+      bitrate band + codec weight below.)
     - **Video** (best first, all DESC): pixels → effective-bitrate BAND → codec weight.
       Effective bitrate = `size/duration_s × codec_weight` (§8 B): a more-efficient
       codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
@@ -437,11 +462,11 @@ def _pick_lead(members, rank, config):
         aid, inst = item
         r = rank.get(aid, {})
         pixels = (r.get("width") or 0) * (r.get("height") or 0)
-        lossless = 1 if ext_of(inst["path"]) in _LOSSLESS_PHOTO_EXTS else 0
+        fmt = _photo_format_rank(inst["path"])
         detail = r.get("detail_score") or 0
         band = _log_band(detail, config.match.detail_tie_pct)
         size = r.get("size") or 0
-        return (pixels, lossless, band, size)
+        return (pixels, fmt, band, size)
 
     def video_key(item):
         aid, _inst = item
