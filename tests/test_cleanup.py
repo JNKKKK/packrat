@@ -497,6 +497,34 @@ def test_cleanup_undecodable_apply_deletes_and_trashes(queue_and_db, tmp_path):
     assert database.query_one("SELECT COUNT(*) c FROM file_instances WHERE asset_id=?", (aid,))["c"] == 0
 
 
+@win_only
+def test_status_drops_undecodable_after_cleanup(queue_and_db, tmp_path):
+    """`status <root>` re-derives undecodables live, so a cleaned file leaves the list."""
+    q, database = queue_and_db
+    from packrat import queries
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    _make_undecodable(database, root["id"], lib, "bad.jpg")
+    _photo(lib / "good.png", 1)
+    _run(q, database, "scan", root_id=root["id"])  # persists a scan_problem_files snapshot
+
+    # Before cleanup: status lists the undecodable file.
+    d = queries.root_detail(str(lib))
+    assert d["undecodable_current"] == 1
+    assert any(pf["problem"] == "undecodable" and pf["path"].endswith("bad.jpg")
+               for pf in d["problem_files"])
+
+    _run(q, database, "cleanup", root_id=root["id"], mode="undecodable", apply=True)
+
+    # After cleanup: the frozen scan_problem_files row still exists, but status
+    # re-derives live from the catalog, so the deleted file is gone from the list + count.
+    d2 = queries.root_detail(str(lib))
+    assert d2["undecodable_current"] == 0
+    assert not any(pf["problem"] == "undecodable" for pf in d2["problem_files"])
+
+
 def test_cleanup_undecodable_does_not_refresh_trash(queue_and_db, tmp_path):
     """--undecodable targets the folder's own bad files — it must NOT run trash refresh (§9.1)."""
     q, database = queue_and_db

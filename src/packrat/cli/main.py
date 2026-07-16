@@ -756,11 +756,15 @@ def _print_last_scan(d: dict) -> None:
     if not ls:
         return
     flags = "".join(f" --{k}" for k in ("full", "embed") if ls.get(k))
+    # Prefer the live current undecodable count (re-derived from the catalog) over the
+    # frozen last-scan number, so it agrees with the (also-live) problem-files list after
+    # a `cleanup --undecodable` or a decoder-upgrade rescan.
+    undec = d.get("undecodable_current", ls.get("undecodable", 0))
     typer.echo(
         f"  last scan result ({_short_ts(ls.get('created_at'))}{flags}): "
         f"{ls.get('new', 0)} new · {ls.get('exact_dup', 0)} exact-dup · "
         f"{ls.get('backfilled', 0)} filled-in · {ls.get('matches_trashed', 0)} identified-trash · "
-        f"{ls.get('undecodable', 0)} undecodable · {ls.get('errors', 0)} errors"
+        f"{undec} undecodable (now) · {ls.get('errors', 0)} errors"
     )
     problems = d.get("problem_files", [])
     if problems:

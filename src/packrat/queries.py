@@ -148,13 +148,30 @@ def root_detail(root_arg: str) -> dict | None:
             "SELECT * FROM scan_results WHERE root_id=? ORDER BY job_id DESC LIMIT 1",
             (rid,),
         ).fetchone()
-        problem_files = []
+        # Undecodable problem files are re-derived LIVE from the catalog (current state),
+        # NOT read from the frozen last-scan snapshot — a `cleanup --undecodable` or a
+        # decoder-upgrade rescan changes the set without necessarily writing a fresh
+        # snapshot, so the frozen rows go stale (they'd keep listing files just deleted).
+        # This mirrors what scan itself persists (§8 A2 Phase 5 re-derives the same way),
+        # only computed at read time so `status` always reflects the root as it is now.
+        undec_rows = conn.execute(
+            "SELECT DISTINCT fi.path, a.media_type, a.decode_error detail "
+            "FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
+            "WHERE fi.root_id=? AND a.undecodable=1 ORDER BY fi.path",
+            (rid,),
+        ).fetchall()
+        problem_files = [
+            {"path": r["path"], "media_type": r["media_type"],
+             "problem": "undecodable", "detail": r["detail"]}
+            for r in undec_rows
+        ]
+        # Read-errors have no asset to re-derive, so they stay per-pass (from the last scan).
         if last_scan is not None:
-            problem_files = [
+            problem_files += [
                 dict(r)
                 for r in conn.execute(
                     "SELECT path, media_type, problem, detail FROM scan_problem_files "
-                    "WHERE job_id=? AND root_id=? ORDER BY problem, path",
+                    "WHERE job_id=? AND root_id=? AND problem='read-error' ORDER BY path",
                     (last_scan["job_id"], rid),
                 ).fetchall()
             ]
@@ -165,6 +182,9 @@ def root_detail(root_arg: str) -> dict | None:
             "photos": photos, "videos": videos, "instances": instances,
             "pending_review": pending_dict,
             "last_scan": dict(last_scan) if last_scan is not None else None,
+            # Live current undecodable count (see problem_files above) — the banner shows
+            # this, not the stale last-scan number, so count + list agree post-cleanup.
+            "undecodable_current": len(undec_rows),
             "problem_files": problem_files,
         }
     finally:
