@@ -339,6 +339,49 @@ def scan(
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
 
 
+# ---------------------------------------------------------------------------
+# dedup — analyze/stage/confirm one registered folder (§8 B)
+# ---------------------------------------------------------------------------
+@app.command("dedup")
+def dedup(
+    folder: str = typer.Argument(..., help="A registered library root (path or --name)."),
+    confirm: bool = typer.Option(False, "--confirm", help="Apply the current stage, then advance to the next."),
+    cancel: bool = typer.Option(False, "--cancel", help="Discard the whole run's staging; delete nothing."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Compute all 3 stages + print the plan; stage nothing."),
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Dedup one folder as a 3-stage sequence: analyze → --confirm (auto-advances) (§8 B).
+
+    Stages, one at a time under `<root>\\_packrat_review\\`: 1 `_exact_dup_to_delete\\`
+    (default DELETE — remove a shortcut to SPARE), 2 `_suspect_recompression\\` and
+    3 `_with_minor_edits\\` (default KEEP — remove a shortcut to DELETE). `--confirm`
+    applies the current stage and advances to the next non-empty one; `--cancel`
+    discards the whole run.
+    """
+    if confirm and cancel:
+        typer.echo("give --confirm or --cancel, not both.", err=True)
+        raise typer.Exit(2)
+    client = _client_or_spawn()
+    label = "dedup --confirm" if confirm else "dedup --cancel" if cancel else "dedup"
+    try:
+        job_id = client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run)
+    except BusyResponse as exc:
+        _print_busy(exc)
+        raise typer.Exit(1)
+    except DaemonError as exc:
+        typer.echo(f"cannot dedup: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if detach:
+        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
+        return
+    final = stream_job(client, job_id, label=label)
+    typer.echo(f"{label} {final}")
+    if json_out:
+        import json
+        typer.echo(json.dumps(client.get_job(job_id), indent=2))
+
+
 @app.command("cancel")
 def cancel(
     job_id: Optional[int] = typer.Argument(None, help="Job id (optional; defaults to the running job)."),

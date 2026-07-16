@@ -20,9 +20,14 @@ the plan:
 from __future__ import annotations
 
 #: Bumped when the DDL changes. M0 ships v1; v2 adds scan_results +
-#: scan_problem_files (new tables only — created via CREATE IF NOT EXISTS, so an
-#: existing v1 DB gains them on next init_db with no migration runner needed).
-SCHEMA_VERSION = 2
+#: scan_problem_files (new tables only). v3 adds the M3 3-stage dedup columns
+#: (review_runs.stage/stage_phase, review_actions.stage). v4 adds assets.detail_score
+#: (the photo detail estimate for dedup stage-2 keep-lead, §8 B). v5 adds assets.codec
+#: (video codec, for the video keep-lead's codec-efficiency weight, §8 B). All of v3/v4/v5
+#: add columns to EXISTING tables, so — unlike v2's new tables — they need an idempotent
+#: ADD COLUMN pass in init_db (CREATE IF NOT EXISTS can't alter a table). See
+#: connection._migrate_columns.
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -55,6 +60,16 @@ CREATE TABLE IF NOT EXISTS assets (
     status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'trashed')),
     undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels (§4)
     decode_error  TEXT,                       -- last decoder failure detail (debugging POC wheels)
+    detail_score  INTEGER,                    -- photo detail estimate: zlib size of the full-res
+                                              --   horizontal pixel residual (§8 B stage-2 keep-lead).
+                                              --   Higher = more retained detail. Photos only (NULL for
+                                              --   video/undecodable, and for pre-v4 assets — NOT
+                                              --   recomputed by `scan --full`, which skips re-decoding
+                                              --   a fully-fingerprinted hit; keep-lead falls back to
+                                              --   resolution→size when NULL).
+    codec         TEXT,                       -- video codec name (h264|hevc|av1|vp9|…) from the decode
+                                              --   probe; VIDEO only (NULL for photo/undecodable). Feeds
+                                              --   the video keep-lead's codec-efficiency weight (§8 B).
     added_at      TEXT,
     trashed_at    TEXT,
     trash_reason  TEXT
@@ -128,14 +143,19 @@ CREATE TABLE IF NOT EXISTS similarity_edges (
 CREATE INDEX IF NOT EXISTS ix_sim_b ON similarity_edges(asset_b);
 
 -- ---------------------------------------------------------------------------
--- review_runs: one stateful review lifecycle per target root (§4).
--- partial UNIQUE(root_id) WHERE status='pending' → at most one open run per folder.
+-- review_runs: one stateful review lifecycle per target root (§4). For dedup a
+-- SINGLE row spans the whole 3-stage sequence; `stage` (1=exact, 2=recompression,
+-- 3=minor-edit) is the cursor within it and `stage_phase` (staged|applied) marks
+-- the apply-then-advance crash window (§8 B Phase 7). status stays 'pending' until
+-- the last non-empty stage applies. partial UNIQUE(root_id) WHERE status='pending'.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS review_runs (
     id            INTEGER PRIMARY KEY,
     root_id       INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
     run_type      TEXT NOT NULL CHECK (run_type IN ('dedup', 'cleanup-perceptual')),
     status        TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
+    stage         INTEGER NOT NULL DEFAULT 1,  -- dedup stage cursor 1..3 (cleanup: 1)
+    stage_phase   TEXT,                        -- staged | applied (§8 B Phase 7)
     created_at    TEXT,
     confirmed_at  TEXT
 );
@@ -146,11 +166,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_runs_pending_root
 -- review_actions: the persisted, crash-safe plan for a review_run (§4).
 -- path is the AUTHORITATIVE target; asset_id/instance_id/survivor_instance_id
 -- are reference-only and MUST tolerate becoming dangling (NOT cascade-linked).
+-- `stage` tags which dedup stage the action belongs to (--confirm applies
+-- WHERE stage=cursor); NULL for single-stage cleanup.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS review_actions (
     id                       INTEGER PRIMARY KEY,
     run_id                   INTEGER NOT NULL REFERENCES review_runs(id) ON DELETE CASCADE,
-    folder                   TEXT NOT NULL,   -- will_be_deleted|grouped|perceptually_identified_trash
+    stage                    INTEGER,         -- dedup 1|2|3 (NULL for cleanup)
+    folder                   TEXT NOT NULL,   -- exact_dup_to_delete|suspect_recompression|with_minor_edits|perceptually_identified_trash
     kind                     TEXT,            -- exact|perceptual
     reason                   TEXT,            -- exact-internal|exact-external|perceptual|cleanup-perceptual
     default_action           TEXT,            -- delete|keep

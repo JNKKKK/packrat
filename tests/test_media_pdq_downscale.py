@@ -54,7 +54,7 @@ def test_downscaled_hash_within_threshold_of_full_res(tmp_path):
     fp_full = media.fingerprint(str(p), p.stat().st_size, cfg_full)
     dist = _hamming(fp512.phash_bits, fp_full.phash_bits)
     # Drift must be comfortably inside the photo match cutoff (default 32).
-    assert dist < cfg512.match.t_match_photo, f"drift {dist} too large"
+    assert dist < cfg512.match.t_photo_edit, f"drift {dist} too large"
 
 
 def test_max_edge_zero_disables_downscale(tmp_path, monkeypatch):

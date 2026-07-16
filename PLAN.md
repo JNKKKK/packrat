@@ -263,6 +263,16 @@ assets(
                  a merge-created asset that is simply not-yet-fingerprinted (undecodable=0, no phash
                  yet) — see the "fully fingerprinted" predicate in §8 A2 step 4. */,
   decode_error /* nullable text: last decoder failure detail, for debugging POC-format wheels (§9.1) */,
+  detail_score /* nullable int, PHOTOS only: a retained-detail estimate = zlib size of the full-res
+                  horizontal pixel residual, computed by scan from the decode it already does (§8 A2
+                  step 8). Higher = more detail. dedup's stage-2 keep-lead ranks by it (§8 B); NULL for
+                  video/undecodable and for assets scanned before this column existed. NOT recomputed
+                  by `scan --full` (which skips re-decoding a byte-unchanged, fully-fingerprinted hit —
+                  §8 A2 step 6), so a pre-existing NULL persists; keep-lead falls back to
+                  resolution→size for those. Advisory only — never gates or deletes. */,
+  codec /* nullable text, VIDEO only: codec name (h264|hevc|av1|vp9|…) from the decode probe (§8 A2
+           step 8). Feeds the video stage-2 keep-lead's codec-efficiency weight (§8 B match.codec_weights).
+           NULL for photo/undecodable. Same not-recomputed-by-`--full` caveat as detail_score. */,
   added_at, trashed_at, trash_reason)
 
 file_instances(   -- presence = row existence; a gone file has its row deleted (no 'present' flag)
@@ -284,9 +294,10 @@ vphash(  asset_id, frame_index, t_offset_s,
 embeddings( asset_id, model, vector /* float32 blob, e.g. 512d */ )  -- only if scan --embed
 
 similarity_edges(   -- pairwise near-dups; written by `dedup`, NOT scan. `distance` = PDQ Hamming
-                    --   for photo (≤ T_match_photo), or the video match score (§5.3); the medium's
-                    --   own cutoff decides the edge — T_match_photo (photo) / T_match_video per-frame
-                    --   + frame_match_fraction vote (video).
+                    --   for photo (≤ t_photo_edit), or the video match score (§5.3); the medium's
+                    --   own cutoff decides the edge — t_photo_edit (photo) / T_match_video per-frame
+                    --   + frame_match_fraction vote (video). dedup bands the photo distance into its
+                    --   review stages via t_photo_recompress (§8 B); the edge itself is unbanded.
   asset_a, asset_b, media_type, distance,
   algo /* pdq|video */, created_at )
   -- CANONICAL ORDERING: always store with asset_a < asset_b (numeric id order). An edge is
@@ -296,19 +307,28 @@ similarity_edges(   -- pairwise near-dups; written by `dedup`, NOT scan. `distan
 
 review_runs(   -- one stateful review lifecycle (dedup OR perceptual-cleanup) per target root
   id, root_id, run_type /* dedup|cleanup-perceptual */,
-  status /* pending|completed|cancelled */, created_at, confirmed_at )
-  -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder
+  status /* pending|completed|cancelled */,
+  stage /* dedup: 1=exact, 2=recompression, 3=minor-edit; the cursor within the run. cleanup: 1 */,
+  stage_phase /* staged (shortcuts written, awaiting user) | applied (this stage's deletions done,
+                 next stage not yet staged) — the apply-then-advance crash marker (§8 B Phase 7) */,
+  created_at, confirmed_at )
+  -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder.
+  --   ONE row spans dedup's whole 3-stage sequence; `stage`/`stage_phase` track progress within it,
+  --   `status` stays 'pending' until the LAST non-empty stage applies (§8 B).
   -- One facet of the §3 per-root exclusivity invariant: dedup, perceptual-cleanup, in-flight
   --   merge, AND scan are mutually exclusive on a root (scan is blocked by §8 A2 step 1a, not by
   --   this index, since scan opens no review_runs row).
 
 review_actions(   -- the persisted, crash-safe plan for a review_run
-  id, run_id, folder /* will_be_deleted|grouped|perceptually_identified_trash */,
+  id, run_id,
+  stage /* dedup 1|2|3 — which stage this action belongs to (--confirm applies WHERE stage=cursor);
+            NULL for cleanup, which is single-stage */,
+  folder /* exact_dup_to_delete|suspect_recompression|with_minor_edits|perceptually_identified_trash */,
   kind /* exact|perceptual */, reason /* exact-internal|exact-external|perceptual|cleanup-perceptual */,
   default_action /* delete|keep */,
   asset_id, instance_id, path,           -- the file this action targets
-  survivor_instance_id,                  -- the copy being kept (exact); NULL otherwise
-  group_no, member_no, is_external,      -- dedup grouping only
+  survivor_instance_id,                  -- the copy being kept (stage-1 exact); NULL otherwise
+  group_no, member_no, is_external,      -- perceptual grouping only (stages 2/3, cleanup)
   matched_trashed_asset_id, distance,    -- cleanup-perceptual only (which trashed asset, PDQ dist)
   shortcut_name )
   -- `path` is the AUTHORITATIVE target: --confirm re-stats it (§8 B Phase 6) and never trusts the
@@ -464,7 +484,13 @@ file I/O.
   on the recompress/resize/format-conversion case — essentially the entire iPhone-re-export
   reality — so one robust signal is both sufficient and higher-recall than gating two signals
   together (which is why pHash is not computed or stored for photos at all — decided in §7 gap
-  review; a single signal, no dead data, no second threshold to tune).
+  review; a single signal, no dead data). The matcher itself reports the raw PDQ distance for a
+  matched pair; **`dedup` bands that distance into two review stages** with two cutoffs
+  `t_photo_recompress < t_photo_edit` (§8 B / §9.2): `d ≤ t_photo_recompress` = a recompression
+  (stage 2, near-certain), `t_photo_recompress < d ≤ t_photo_edit` = a minor edit/crop (stage 3,
+  scrutinize). The engine's own match cutoff is the wider `t_photo_edit`; the tighter cutoff only
+  splits already-matched pairs into stages, so it is a review-ergonomics band, not a second recall
+  gate. (`cleanup --perceptual` uses the single wider cutoff, no banding — §6.2.)
   - **Photo quality — annotate, never gate (asymmetric with video).** PDQ's 0–100 quality is
     *stored* per photo but **does not exclude** a photo from matching. This is deliberate and
     differs from video (`video.min_frame_quality`): a video has ~12 frames, so dropping a bad one
@@ -500,18 +526,21 @@ file I/O.
   | `video.sample_frames` | **12** | Frames sampled per video, at the **midpoints of N equal segments**: `t_k = duration·(k+0.5)/N`, `k=0..N-1`. Proportional positions ⇒ same-content clips align frame-to-frame. Short clips (e.g. a 3 s Live-Photo `.MOV`) still get all 12. |
   | `video.duration_tol_s` | **1.0 s** | Absolute floor of the duration pre-filter. |
   | `video.duration_tol_pct` | **5.0 %** | Relative part. Two videos pass the pre-filter iff `|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min(d₁,d₂))` — so a 3 s clip tolerates ~1 s drift, a 2 h movie ~6 min. |
-  | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoff `T_match_photo`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) |
+  | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoffs `t_photo_recompress`/`t_photo_edit`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) A video near-dup is a single frame-vote match — it is **not** banded into recompress/edit stages; all video matches go to dedup stage 2 (§8 B). |
   | `video.frame_match_fraction` | **0.60** | The two videos are a near-dup iff **≥ 60 %** of *comparable* frame-pairs (see quality gate) match within `T_match_video`. This vote is video's *second* precision control — the one photos lack — which is exactly why the two cutoffs need not (and should not) be equal. |
   | `video.min_frame_quality` | **50** | PDQ emits a 0–100 quality per frame; dark/blurry/transition frames score low and hash unreliably. A frame below this is **excluded** from comparison (stored, but flagged). A frame-pair is *comparable* only if **both** frames clear the gate. |
   | `video.min_comparable_frames` | **5** | If fewer than this many comparable frame-pairs remain after the quality gate, the pair is **not** matched — insufficient evidence beats a coin-flip. |
 
-**Two match-distance thresholds — `T_match_photo` and `T_match_video`** (both configurable and
-logged). Same 0–255 PDQ Hamming scale, but tuned independently because photo and video use the
-distance differently: for a **photo** the single comparison *is* the decision, so its cutoff bears
-all the precision/recall weight; for a **video** the per-frame cutoff only feeds a **majority vote**
-(`video.frame_match_fraction`) that acts as a second precision control, and frames are noisier
-inputs — so `T_match_video` is typically the more permissive of the two. A pair is a near-dup iff:
-- **photo:** PDQ Hamming distance ≤ `T_match_photo`;
+**Match-distance thresholds — `t_photo_recompress` / `t_photo_edit` (photo) and `T_match_video`
+(video)** (all configurable and logged). Same 0–255 PDQ Hamming scale, tuned independently. For a
+**photo** the single comparison *is* the decision: `t_photo_edit` is the engine's match cutoff (a
+pair with `d ≤ t_photo_edit` is a near-dup), and `t_photo_recompress` (the tighter value) *bands*
+matched pairs into dedup's two review stages (§8 B) — it is not a separate recall gate. For a
+**video** the per-frame cutoff only feeds a **majority vote** (`video.frame_match_fraction`), a
+second precision control, and frames are noisier — so `T_match_video` is typically the most
+permissive. A pair is a near-dup iff:
+- **photo:** PDQ Hamming distance ≤ `t_photo_edit` (then banded: `≤ t_photo_recompress` → recompress,
+  else → minor-edit);
 - **video:** the two clips pass the duration pre-filter **and** ≥ `video.frame_match_fraction` of
   their *comparable* (quality-gated) frame-pairs are each within `T_match_video` **and** at least
   `video.min_comparable_frames` comparable pairs exist (table above).
@@ -523,8 +552,9 @@ distance cutoffs.) Set each threshold high enough to catch what PDQ *structurall
 (recompression, resize, format conversion) plus the harder cases you want a look at (crops,
 rotations, borders/watermarks, heavy re-encodes); every hit lands in the review folder either way,
 so a permissive threshold just means more candidates to eyeball, never a silent deletion. The
-operation (§8 B / §6.2) decides how matches are staged. **Both thresholds and every `video.*` knob
-need calibration on real data — §14 #1.**
+operation (§8 B / §6.2) decides how matches are staged. **All three cutoffs
+(`t_photo_recompress`, `t_photo_edit`, `T_match_video`) and every `video.*` knob need calibration
+on real data — §14 #1.**
 
 **Comparison set depends on the caller:**
 - **`dedup`** compares a folder's assets against **active assets only** — trashed assets are
@@ -661,9 +691,10 @@ Analyze:
 2. **Exact matches:** find library instances whose asset is `trashed` (exact hash), as in default
    mode — but **do not delete yet**; record them in the plan.
 3. **Perceptual matches:** run the §5 matcher for `<folder>`'s active-asset instances against the
-   **trashed** set (photo PDQ ≤ `T_match_photo` / video per-frame ≤ `T_match_video` + frame vote;
-   duration pre-filter). Each library file matching a trashed asset per §5.3 is a perceptual-trash
-   candidate.
+   **trashed** set (photo PDQ ≤ `t_photo_edit` / video per-frame ≤ `T_match_video` + frame vote;
+   duration pre-filter). Cleanup uses the single wider photo cutoff — **no recompress/edit banding**
+   (that stage split is dedup's review ergonomics, §8 B; here every trash match is one folder). Each
+   library file matching a trashed asset per §5.3 is a perceptual-trash candidate.
 4. **Stage for review** at `<root>\_packrat_review\_perceptually_identified_trash\`: one `.lnk`
    per perceptual candidate (stat-before-create, so no broken `.lnk`; §8 B Phase 4 rules), plus a
    `manifest.csv` (shortcut → target path → matched trashed asset → distance → `quality` →
@@ -672,9 +703,10 @@ Analyze:
 5. **Report** the exact-match count (will delete on confirm) and perceptual-candidate count
    (staged for review), print the `--confirm` / `--cancel` commands, and **pause**.
 
-Review convention (**delete-default**, like `_will_be_deleted` — *opposite* of dedup's grouping
-folder): a staged file is treated as trash and **will be deleted**; **remove its shortcut to
-spare** the file (mark it "not trash" for this run). Renames count as removal (strict, per §8 B).
+Review convention (**delete-default**, like dedup's `_exact_dup_to_delete\` — *opposite* of dedup's
+perceptual keep-default stages): a staged file is treated as trash and **will be deleted**; **remove
+its shortcut to spare** the file (mark it "not trash" for this run). Renames count as removal (strict,
+per §8 B).
 
 `packrat cleanup <folder> --confirm`:
 6. Re-verify liveness per file (lazy stat, as §8 B Phase 6). Require typed confirmation of the
@@ -877,8 +909,9 @@ packrat roots register "D:\Backup\iPhone" --scan    # register, then immediately
 which files a later `scan` will even *look at* — matched files are skipped entirely (never
 hashed, fingerprinted, or turned into assets). It has two parts:
 - **Junk/system exclusions** — `Thumbs.db`, `desktop.ini`, `.DS_Store`, hidden/system-attribute
-  files, zero-byte files, and packrat's own staging area `_packrat_review\` (which contains
-  dedup's `_will_be_deleted\` / `_grouped_by_similarity\`) plus `.lnk` shortcuts.
+  files, zero-byte files, and packrat's own staging area `_packrat_review\` (which contains dedup's
+  per-stage folders `_exact_dup_to_delete\` / `_suspect_recompression\` / `_with_minor_edits\` and
+  cleanup's `_perceptually_identified_trash\`) plus `.lnk` shortcuts.
 - **Media extension allowlist** — only these become assets. The **default** is a fixed, closed
   set (case-insensitive), defined once here and reused everywhere:
   - **Photo:** `jpg jpeg jfif png gif bmp tif tiff webp avif heic heif`
@@ -1013,6 +1046,19 @@ For every candidate file:
 8. **Perceptual signature** — photo: PDQ + quality; video: duration + PDQ (with quality) of each of
    the `video.sample_frames` frames sampled at fixed timeline fractions (§5.3). → values held for
    step 9 (→ `phash` / `vphash` rows). *No near-dup comparison here.*
+   - **Photo `detail_score` (§8 B stage-2 keep-lead), same decode pass.** For a **photo** that
+     decodes, also compute `detail_score` = the zlib byte-count of the **full-res** horizontal pixel
+     residual (each pixel minus its left neighbour). This reuses the RGB array already decoded for
+     PDQ — measured on the full-res array *before* the PDQ downscale (detail lives in the high
+     frequencies the downscale removes) — so it adds only a cheap residual+zlib, no extra decode/read.
+     It's a retained-detail estimate (higher = less compressed) that dedup uses to suggest which copy
+     to keep among a stage-2 recompression group. → value held for step 9. **Video and undecodable →
+     NULL.** Advisory only; never gates matching or deletion. (`--profile` times this in its own
+     photo **`detail`** CPU bucket, separate from `pdq`, so its cost is visible — §10.1 profiler.)
+   - **Video `codec` (§8 B stage-2 keep-lead), same decode pass.** For a **video** that decodes,
+     capture the video stream's `codec` name (`h264`/`hevc`/`av1`/…) from the already-open decoder —
+     free, no extra work. → value held for step 9 (→ `assets.codec`). Feeds the video keep-lead's
+     codec-efficiency weight (§8 B). **Photo and undecodable → NULL.**
    - **Decode failure (graceful, §9.1):** if the pixels/frames won't decode (corrupt file,
      unsupported codec, missing wheel), **do not crash and do not abort the asset** — the BLAKE3
      hash (step 5) already gives it identity. Record it in step 9 with **`undecodable=1`**, the
@@ -1022,7 +1068,8 @@ For every candidate file:
 9. **Persist the new asset (single transaction).** → **write**:
    - `assets`: `content_hash`, `media_type`, `size`, `width`, `height`, `duration_s`,
      `captured_at`, `status='active'`, `added_at`, `undecodable` (0 normally, 1 on step-8 decode
-     failure), `decode_error` (NULL unless undecodable).
+     failure), `decode_error` (NULL unless undecodable), `detail_score` (photo detail estimate from
+     step 8; NULL for video/undecodable).
    - `file_instances`: `asset_id`, `root_id`, `path`, `filename`, `size`, `mtime`,
      `last_seen_at`.
    - `phash` (photo only): the single PDQ row — (`asset_id`, `algo='pdq'`, `bits`, `quality`).
@@ -1116,306 +1163,308 @@ fast-path. Re-running `roots register` on an existing root is rejected by the ov
 ### B. Dedup a single registered folder
 
 `dedup` **targets one registered folder** (root) at a time and stages its removable duplicates
-as **Windows shortcuts** inside that folder, for the user to review in Explorer and then
-confirm. It works from the fingerprints scan already stored in the DB (hashes, `phash`/`vphash`).
-Comparison spans all **active** assets across the whole collection: an asset in the target folder
-is judged against active copies in *external* registered folders too. **Trashed assets are
-excluded** — dedup only collapses copies of things you're keeping; trash exclusion is `merge`/
-`cleanup`'s job (§6).
+as **Windows shortcuts** inside that folder, for the user to review in Explorer and then confirm.
+It works from the fingerprints scan already stored in the DB (hashes, `phash`/`vphash`). Comparison
+spans all **active** assets across the whole collection: an asset in the target folder is judged
+against active copies in *external* registered folders too. **Trashed assets are excluded** — dedup
+only collapses copies of things you're keeping; trash exclusion is `merge`/`cleanup`'s job (§6).
 
-**Liveness is verified lazily, not eagerly.** Stale DB rows (a file moved/deleted in Explorer
-since the last scan) are rare, and `stat()`-ing every candidate up front — especially external
-copies on a cold/sleeping drive — is mostly wasted work. So there is **no eager stat at the
-start**; instead liveness is checked at exactly two points, each stat'ing only the files it is
-about to act on:
-- **At shortcut creation (Phase 4):** stat each planned target right before writing its `.lnk`,
-  so **no broken shortcut is ever created** — a target that has since vanished is skipped and its
-  DB row lazily cleaned. This keeps the Explorer review clean (every `.lnk` resolves + previews).
-- **At delete (Phase 6, on `--confirm`):** re-stat immediately before the irreversible move, the
-  authoritative gate (a file the user then deletes may have changed again since staging).
+**A dedup run is a fixed three-stage sequence, presented one stage at a time** so review stays
+focused and each folder means one thing. Each stage stages its own kind of duplicate into its own
+folder, you review it in Explorer, and `--confirm` applies *that stage* and then automatically
+advances to the next non-empty stage. The stages, in order:
 
-This is safe because any divergence resolves toward **sparing**: a file that is already gone is
-simply not staged / not deleted; if an external survivor turns out gone, the internal copies are
-spared. The pipeline can only ever act on *fewer* files than the DB preview implied, never more.
-*(edge case 5)*
+| # | Stage folder (`_packrat_review\…`) | What it stages | Default if you do nothing | To change a file's fate | Media |
+|---|---|---|---|---|---|
+| 1 | `_exact_dup_to_delete\` | byte-identical copies (an asset's redundant instances; a survivor is always kept) | **DELETE** | **remove** the shortcut to **spare** | photo + video |
+| 2 | `_suspect_recompression\` | near-dups within the tight band — recompressed / resized / re-encoded copies (`d ≤ t_photo_recompress`; video: a matched frame-vote). packrat marks the least-compressed member `_suggested` as a keep-hint (photo *and* video, step 9) | **KEEP** | **remove** the shortcut to **delete** | photo + video |
+| 3 | `_with_minor_edits\` | near-dups in the wider band — minor edits/crops/borders (`t_photo_recompress < d ≤ t_photo_edit`) | **KEEP** | **remove** the shortcut to **delete** | **photo only** |
+
+The **naming carries the safety signal**: only the default-DELETE folder is named `…_to_delete`;
+the two default-KEEP folders are content-named. Rationale: exact dups are objectively redundant
+(default-delete, veto to keep); near-dups need human judgment (default-keep, remove to delete). Two
+distance cutoffs (`t_photo_recompress < t_photo_edit`, §5.3/§9.2) split photo near-dups into the
+two review bands so you can blaze through the near-certain recompressions in stage 2 and scrutinize
+the genuine edits in stage 3. **Video near-dups are a single frame-vote match** (a match score, not
+a recompress-vs-edit split), so they all land in **stage 2** and there is no stage-3 video.
+
+**Why sequential stages (not the old two-folder-at-once design).** Presenting exact + perceptual
+folders simultaneously forced a hard rule — an asset with a planned exact deletion was **excluded
+from perceptual grouping** and its near-dup **deferred to a later `dedup` run** (so no asset could
+appear in two opposite-convention folders at once). Sequencing dissolves that: stage 1 resolves
+exact dups first (deleting only *redundant instances*, never removing an *asset*), so by stages 2–3
+every asset still exists and can be matched perceptually **in the same run** — the deferral and its
+edge-case-6 exclusion are gone. It also means **survivors exist only in stage 1**: stages 2–3 stage
+*distinct assets* with no survivor concept (deleting a near-dup member never threatens another
+asset's last copy), which is what makes their apply path simple.
+
+**Liveness is verified lazily, not eagerly.** Stale DB rows (a file moved/deleted in Explorer since
+the last scan) are rare, and `stat()`-ing every candidate up front — especially external copies on a
+cold/sleeping drive — is mostly wasted work. So there is **no eager stat**; liveness is checked only
+where a stage acts, stat'ing only the files it is about to touch:
+- **At shortcut creation (per stage):** stat each planned target right before writing its `.lnk`, so
+  **no broken shortcut is ever created** — a vanished target is skipped and its DB row lazily cleaned.
+- **At delete (per stage `--confirm`):** re-stat immediately before the irreversible move — the
+  authoritative gate (a file may have changed again since staging).
+
+Any divergence resolves toward **sparing**: a gone file is not staged / not deleted; if an exact
+survivor turns out gone, its redundant copies are spared (and one is promoted). The pipeline only
+ever acts on *fewer* files than the DB preview implied, never more. *(edge case 5)*
 
 ```
-packrat dedup "D:\Backup\iPhone"            # analyze → stage shortcuts → pause (status: pending)
-packrat dedup "D:\Backup\iPhone" --confirm  # apply the user's review → delete → status: completed
-packrat dedup "D:\Backup\iPhone" --cancel   # discard staging, delete nothing
-# (per-root dedup/review state is shown by the general `packrat status`, §11)
+packrat dedup "D:\Backup\iPhone"            # analyze → stage 1 → pause (pending, stage 1)
+packrat dedup "D:\Backup\iPhone" --confirm  # apply the current stage, auto-advance to the next
+                                            #   non-empty stage (pending); after stage 3 → completed
+packrat dedup "D:\Backup\iPhone" --cancel   # discard the whole run's staging, delete nothing
+packrat dedup "D:\Backup\iPhone" --dry-run  # compute all 3 stages read-only; stage/write nothing
+# (per-root dedup/review state — including the current stage — is shown by `packrat status`, §11)
 ```
 
 Terminology: **target folder** = the root passed to `dedup`. **External folder** = any *other*
-registered root. **Survivor** = the one file instance of an asset that dedup keeps.
+registered root. **Survivor** = the one file instance of an asset that stage 1 keeps.
 
-#### Dedup state machine (one run per folder)
-- A `review_runs` row tracks state per root: `pending` (staged, awaiting the user) →
-  `completed` (confirmed & applied) or `cancelled`. A **partial unique index enforces at most
-  one `pending` run per `root_id`** — you cannot start a second dedup on a folder that already
-  has one open. `dedup <folder>` on a folder with a pending run errors and tells you to
-  `--confirm` or `--cancel` it first.
-- The full plan is persisted to `review_actions` at analyze time, so `--confirm` is deterministic
-  and crash-safe (it never re-decides; it only reads which shortcuts the user kept/removed).
+#### Dedup state machine (one run per folder, a stage cursor within it)
+- **A single `review_runs` row spans the whole 3-stage sequence.** It carries `status`
+  (`pending` → `completed`/`cancelled`), a **`stage`** cursor (1→3) and a **`stage_phase`**
+  (`staged` = shortcuts written, awaiting the user; `applied` = this stage's deletions done, next
+  stage not yet staged) — the two new columns (§4). It stays `pending` across all three stages; only
+  applying the **last non-empty** stage flips it to `completed`. The **partial unique index still
+  enforces at most one `pending` run per `root_id`**, so a second `dedup <folder>` while a run is
+  open errors and tells you to `--confirm` through it or `--cancel` it.
+- Each stage's plan is persisted to `review_actions` (tagged with its `stage`) **when that stage is
+  staged**, so every `--confirm` is deterministic and crash-safe: it re-reads which shortcuts you
+  kept/removed and never re-decides. Because the asset set is stable after stage 1, later stages are
+  computed **lazily at the moment they're staged** (right after the prior stage applies), not all up
+  front — except `--dry-run`, which computes all three read-only for the preview.
 
 ---
 
-#### B1. `packrat dedup <folder>` — analyze & stage (produces `pending`)
+#### B1. `packrat dedup <folder>` — analyze & stage the first stage (produces `pending`)
 
 **Phase 0 — Validate & lock**
-1. Resolve `<folder>` to a registered root (error if not). → **read** `roots`.
+1. Resolve `<folder>` to a registered root; it must be a **library** root (error otherwise). → **read** `roots`.
 2. **Per-root exclusivity (§3 guarantee 2).** Reject if this root already has an active operation:
    a `pending` `review_runs` row (another dedup or a cleanup), or an in-flight merge — an open
    `merge_runs` row (`status IN ('planning','copying')`) with `dest_root_id` = this root (§4).
-   (A concurrent *scan* of this root can't coexist either, but the block is symmetric: scan's own
-   step 1a refuses to start once this dedup's `review_runs` row exists, and the global single-worker
-   queue prevents a scan and this dedup analyze from running at the same instant.) Otherwise
-   **write** a `review_runs` row (`root_id`, `status='pending'`, `created_at`) — which now *owns*
-   the root until confirmed/cancelled — and open a `jobs` row (`type='dedup'`).
+   (A concurrent *scan* can't coexist either: scan's step 1a refuses to start once this run's
+   `review_runs` row exists, and the global single-worker queue blocks a scan and this analyze at
+   the same instant.) Then compute stage 1 (Phase 2). If the whole run would be empty (no stage has
+   any candidate) it **auto-completes "already clean"** without leaving a `pending` row dangling.
+   Otherwise **write** a `review_runs` row (`root_id`, `status='pending'`, `stage=1`,
+   `stage_phase='staged'`, `created_at`) — which now *owns* the root until confirmed/cancelled — and
+   open a `jobs` row (`type='dedup'`).
 
 **Phase 1 — Build from the DB (no eager stat)** *(edge case 5)*
-Analyze builds the plan directly from existing `file_instances` rows; it does **not** stat files.
-Two cheap, non-`stat` guards keep the preview honest without walking cold drives:
-3. **Recommend a fresh `scan <folder>` first.** Scan already walks and stats the target folder as
-   part of indexing, so running it beforehand makes internal liveness current for free. Dedup
-   prints a note if the root's `last_full_scan_at` is old, but does not force it.
-4. **Trust the DB for external instances.** External copies are not stat'd at analyze time; the
-   plan assumes their `file_instances` rows are live. If an external survivor is actually gone,
-   the shortcut-creation and confirm-time checks catch it and spare the internal copies — the
-   worst case is a preview that offers to delete slightly more than confirm ultimately will.
-   → No writes and no stats in this phase; liveness-driven DB cleanup happens lazily in Phase 4
-   (at shortcut creation) and Phase 6 (at delete), as broken targets are actually encountered.
+Analyze builds the plan directly from existing `file_instances`/`phash`/`vphash` rows; it does
+**not** stat files. It recommends a fresh `scan <folder>` first if `last_full_scan_at` is old (scan
+already stats the folder, making internal liveness current for free) but does not force it. External
+copies are trusted as live; if one turns out gone, the per-stage shortcut-creation and confirm
+checks catch it and spare the internal copies (worst case: the preview offers slightly more than
+confirm deletes). → No writes/stats here; lazy DB cleanup happens as broken targets are encountered.
 
-**Phase 2 — Exact-duplicate resolution** *(byte-identical = same asset)*
-For each asset with ≥1 live instance **in the target folder**:
-5. **Exact dup with an external folder** → the external copy is byte-identical, so **all** of the
-   target folder's instances of this asset are redundant. Plan every target-folder instance for
-   deletion (`kind='exact'`, `reason='exact-external'`, survivor = the external instance). Keep
-   nothing locally.
-6. **Else, exact dups within the target folder** (asset has ≥2 live instances, all in this root)
-   → keep the instance with the **oldest `mtime`** (tiebreak: stable by path), plan the rest for
-   deletion (`kind='exact'`, `reason='exact-internal'`, survivor = the kept instance).
-7. **Else** (single live instance, no external copy) → it is a survivor; nothing to delete.
-   → All planned deletions are **written** to `review_actions` (`folder='will_be_deleted'`,
+**Phase 2 — Stage 1: exact-duplicate resolution** *(byte-identical = same asset)*
+For each **active** asset with ≥1 live instance **in the target folder**:
+3. **Exact dup with an external folder** → the external copy is byte-identical, so **all** of the
+   target folder's instances are redundant. Plan every target-folder instance for deletion
+   (`kind='exact'`, `reason='exact-external'`, survivor = the external instance). Keep nothing locally.
+4. **Else, exact dups within the target folder** (≥2 live instances, all in this root) → keep the
+   **oldest `mtime`** (tiebreak: stable by path), plan the rest for deletion (`kind='exact'`,
+   `reason='exact-internal'`, survivor = the kept instance).
+5. **Else** (single live instance, no external copy) → a survivor; nothing to delete.
+   → Stage-1 deletions are **written** to `review_actions` (`stage=1`, `folder='exact_dup_to_delete'`,
    `default_action='delete'`, target instance/asset/path, survivor reference).
 
-**Phase 3 — Perceptual grouping** *(near-dup = distinct assets; edge-case-6 guard)*
-8. **Compute similarity edges first (the §5 matching engine).** Before grouping, run the §5 PDQ /
-   video-frame matcher for the target folder's pure-survivor assets against all **active** assets
-   in the collection (**trashed assets excluded** — see §5), and **upsert** the results into
-   `similarity_edges` (this is the operation that populates that table — see §4/§8 division of
-   labor). Pure DB + fingerprint math, no file I/O: it reads `phash`/`vphash` rows and writes
-   edges. Video matching **pre-filters by duration** — compare only pairs whose durations are within
-   tolerance per the §5.3 formula (`|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min)`) — to
-   avoid the naïve all-pairs blowup.
-   - **Edges are always (re)computed for this run, never reused from a stale cache.** `dedup`
-     always recomputes the edges incident to the target's pure-survivors. There is deliberately
-     **no `--reuse-edges` / cache-reuse flag**: `similarity_edges` stores only *matches*, not
-     "compared, no match," so reusing it cannot tell an asset that genuinely has no near-dups from
-     one that was simply never compared (e.g. scanned in — or backfilled — after the cache was
-     built) — reuse would **silently miss** those, a recall loss the user can't see (against the
-     recall-first tenet, cf. §5.3 photo-quality). Since the matcher is pure DB/CPU and runs in
-     seconds–low-minutes (§5.4), always recomputing is cheap and always correct. (The `upsert` into
-     `similarity_edges` still means the table accumulates edges usable by read-only stats like the
-     TUI "duplicates (est)" count — it just is never *trusted as complete input* to a grouping run.)
-9. Build clusters from `similarity_edges` (§5 near-dup relationships) among **pure-survivor
-   assets only** — assets with **no** instance planned for deletion in Phase 2. An asset touched
-   by exact resolution (i.e. any instance of it is in `_will_be_deleted`) is **excluded from
-   grouping entirely** — even if its content survives in an external folder. It is represented in
-   exactly one place: `_will_be_deleted`. Each remaining (pure-survivor) asset is represented by
-   its single surviving instance (target-folder if present, else external).
-   - *Example:* asset X exists internally + byte-identically external → its internal copy goes to
-     `_will_be_deleted` (exact-external). A near-dup Y of X is **not** grouped with X this run,
-     because X is excluded; if that leaves Y with no other cluster partner, Y is simply not staged
-     this run.
-   - **Deferral (consequence):** a near-dup entangled with an exact-deleted asset surfaces on a
-     **later** dedup run — once the exact copy is gone and the asset is a pure survivor, it groups
-     normally. So re-running `dedup <folder>` after a confirm can reveal near-dups that the first
-     run deferred. This is intentional: each run does exact cleanup *or* near-dup review for a
-     given asset, never both at once.
-   - **Invariant (asserted, asset-level):** no **asset** appears in both `_will_be_deleted` and
-     `_grouped_by_similarity` (strictly stronger than instance-level disjointness). Exact
-     resolution always wins: any asset with a planned exact deletion is removed from all
-     perceptual clusters. If the assertion ever fails, the run aborts with a logged error for
-     investigation. *(edge case 6)*
-10. For each cluster of size ≥2, assign a 4-digit `group_no`; for each member a 4-digit
-    `member_no`. Plan a shortcut named `group{NNNN}_{MMMM}.lnk`, with an `_external` suffix
-    (`group{NNNN}_{MMMM}_external.lnk`) when the member's live file is in an external folder.
-    → **write** `review_actions` (`folder='grouped'`, `kind='perceptual'`, `default_action='keep'`,
-    `group_no`, `member_no`, target instance/asset/path, `is_external`).
+**Phase 3 — The perceptual stages (2 and 3) — computed when each is staged**
+Perceptual stages are the **§5 matching engine**: run the PDQ / video-frame matcher for the target
+folder's assets against all **active** assets collection-wide (**trashed excluded** — §5), **upsert**
+the results into `similarity_edges` (dedup is that table's writer — §4/§8 division of labor), and
+build clusters from the edges. Pure DB + fingerprint math, no file I/O. Video matching **pre-filters
+by duration** (`|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min)`, §5.3) to avoid the all-pairs
+blowup.
+6. **Which edges belong to which stage** (photo, by PDQ distance `d`):
+   - **Stage 2 (`_suspect_recompression`)** — `d ≤ t_photo_recompress` (the tight band), **plus every
+     video near-dup match** (video is a single frame-vote match, so all video pairs go here).
+   - **Stage 3 (`_with_minor_edits`)** — `t_photo_recompress < d ≤ t_photo_edit` (photo only). A pair
+     already in stage 2's band is **not** re-shown in stage 3.
+7. **No cross-stage exclusion, no deferral.** Because stage 1 deleted only *redundant instances* and
+   never removed an *asset*, an asset can legitimately appear in stage 1 (a copy deleted) **and** a
+   later stage (it's a near-dup of something else) — both in the same run. There is **no**
+   edge-case-6 asset-level exclusion and **no** "run it again to see the group" deferral anymore.
+   (Between staging stage 2 and stage 3, exclude any pair already offered in stage 2 — see step 6 —
+   so a spared recompression isn't nagged again as an "edit".)
+8. **Edges are always (re)computed for this run, never reused as complete input.** `similarity_edges`
+   stores only *matches*, not "compared, no match," so it cannot distinguish "no near-dups" from
+   "never compared" (e.g. an asset scanned/backfilled after the cache was built) — trusting it would
+   **silently miss** those, a recall loss the user can't see (against the recall-first tenet, cf.
+   §5.3). The matcher is pure DB/CPU and runs in seconds–low-minutes (§5.4), so recomputing is cheap
+   and always correct; the upsert still lets read-only stats (TUI "duplicates (est)") use the table.
+9. For each cluster of size ≥2 in a stage, assign a 4-digit `group_no` and each member a 4-digit
+   `member_no`; plan a shortcut `group{NNNN}_{MMMM}.lnk`, with an `_external` suffix when the
+   member's live file is in an external folder. Each member is represented by its single surviving
+   instance (target-folder if present, else external). → **write** `review_actions`
+   (`stage=2|3`, `folder='suspect_recompression'|'with_minor_edits'`, `kind='perceptual'`,
+   `default_action='keep'`, `group_no`, `member_no`, target instance/asset/path, `is_external`,
+   `distance`). **Perceptual actions carry no survivor** (`survivor_instance_id` NULL) — near-dup
+   members are distinct assets.
+   - **Stage-2 keep-lead (annotate-only).** In **stage 2** the members of a group are essentially the
+     same content at differing compression (the tight `t_photo_recompress` band / the video frame-vote
+     → almost no visible difference), so packrat **suggests which copy to keep** — the least-compressed
+     one — by marking the winner's shortcut **`_suggested`** (`group{NNNN}_{MMMM}_suggested.lnk`,
+     combined with `_external` if applicable). A group is homogeneous (a photo never matches a video),
+     so the group's medium picks the ranking key; both lead with **resolution** (`width·height`) — a
+     downscaled re-export loses outright:
+     - **Photo:** resolution → **lossless-format tier** (a `png`/`tif`/`tiff`/`bmp`/RAW original
+       outranks a lossy `jpg`/`heic`/`webp`/`avif` sibling) → **`detail_score`** (step 8) → file
+       `size` → stable path. *Why the lossless tier sits above `detail_score`:* JPEG blocking
+       artifacts are high-frequency, so a mildly-recompressed JPEG can score a *higher* `detail_score`
+       than a pristine lossless master — `detail_score` is trusted only *within* a lossy/lossless tier.
+     - **Video:** resolution → **effective-bitrate band** → **codec-efficiency weight** → stable path.
+       Effective bitrate = `size / duration_s × codec_weight` (`match.codec_weights`, §9.2): a
+       more-efficient codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
+       resolution+quality. Dividing by `duration_s` removes the length bias within the duration
+       tolerance (a slightly-longer clip at equal quality has a bigger file, not more detail). Two
+       effective bitrates within `match.video_bitrate_tie_pct` (default 10%) share a **log-scale band**
+       (a "tie"), so the codec weight then the path decide — not a coin-flip on a noisy diff.
+       *Accepted caveat:* bitrate lies **across codecs** (HEVC is ~2× H.264-efficient), which the
+       weight *reduces* but doesn't cure — surfaced in the manifest (codec + bitrate shown) for
+       hand-override, not solved. No `duration_s`/`codec` → falls back to raw size / weight 1.0.
+     **This is a hint, nothing more:** the stage stays default-**KEEP** (you still delete a member by
+     removing its shortcut); the marker never deletes anything and never changes a default. **Stage 3
+     (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want to keep.
+     → `is_lead` recorded in the plan; surfaced in `manifest.csv` (`suggested_lead`, `media_type`,
+     `width`, `height`, `detail_score`, `size`, `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
 
-**Phase 4 — Materialize staging folders (shortcuts, no copies)** *(edge case 5)*
-Create both dedup staging folders under the target root's **`_packrat_review\`** parent (the same
-packrat-owned review area merge uses):
-`<root>\_packrat_review\_will_be_deleted\` (one `.lnk` per Phase-2 deletion) and
-`<root>\_packrat_review\_grouped_by_similarity\` (one `.lnk` per Phase-3 member, per the naming
-above). Shortcuts (not copies) mean **no extra disk** and live thumbnail preview in Explorer.
-(`_packrat_review\` is already in the ignore set, so scan never indexes it or the `.lnk`s.)
-11. **Stat-before-create — never emit a broken `.lnk`.** For each planned action, `stat()` its
-    real target *at the instant of creating the shortcut*:
-    - **Target present** → create the `.lnk` pointing at the real file. (This is also where the
-      `is_external` flag / `_external` suffix is finalized from the live path.)
-    - **Target gone** → **skip the shortcut** and lazily clean the DB: **delete** the gone
-      `file_instances` row; if an `active` asset now has zero instances → **delete the asset**
-      (cascading fingerprints). Also drop or mark the corresponding `review_actions` row
-      (`default_action='skip'`, `reason+=':target-gone'`) so `--confirm` won't look for a
-      shortcut that was never made. Count as "skipped-at-staging".
-    - **Survivor-gone special case (exact deletions):** if a target is present but its planned
-      **survivor** (internal or external) has vanished, do **not** stage the target for deletion —
-      **promote it to survivor** (redirect the asset's other exact deletions at it) and skip its
-      `_will_be_deleted` shortcut; lazily delete the vanished survivor's `file_instances` row.
-      Same sparing/promotion logic as the Phase-6 gate (step 19b), applied early so no
-      soon-to-be-spared file gets a shortcut.
-    Net result: **every `.lnk` that ends up in either folder resolves to a real file** and previews
-    correctly. The single-target stat here is cheap and only touches files we're actually staging.
-12. Write a **`manifest.csv`** in each staging folder — a flat, human- and machine-readable
-    export of this run's `review_actions` for that folder, so the opaque `.lnk`s are legible in
-    Explorer/Excel (each `.lnk` hides its target path in a binary blob). It is a *documentation*
-    sidecar: `--confirm` reads shortcut presence, **not** the manifest (see strict semantics
-    below). Columns:
-    - `_will_be_deleted\manifest.csv`:
-      `shortcut, target_path, asset_id, reason /* exact-internal|exact-external */, survivor_path`
-    - `_grouped_by_similarity\manifest.csv`:
-      `shortcut, target_path, asset_id, group_no, member_no, is_external, distance, quality,
-      low_confidence` — `quality` is this photo's PDQ quality (0–100); `low_confidence` is `1` when
-      this member (or its matched partner) is below `review.low_quality_hint`, marking a match that
-      may be a flat/near-black spurious PDQ collision to skip quickly (§5.3). Video members carry the
-      min quality across their comparable frames.
-    Example (`_will_be_deleted`):
-    ```csv
-    shortcut,target_path,asset_id,reason,survivor_path
-    001.lnk,D:\Backup\iPhone\2019\IMG_4471.jpg,8842,exact-internal,D:\Backup\iPhone\2021\IMG_4471.jpg
-    002.lnk,D:\Backup\iPhone\photo.png,9105,exact-external,E:\Photos\photo.png
-    ```
-    Its main value is Explorer-readability — especially seeing when a flagged file (or, for
-    perceptual groups, an `_external` member) lives in *another* root. It duplicates data that
-    also lives in `review_actions`; that redundancy is intentional (visible without the DB).
-13. **Audit trail (capture point 1 — the proposed plan).** Write an immutable
-    `proposed.json` into this run's audit directory (see §8.1). It records the full plan *as
-    calculated* — every action with its target path, reason, survivor, group/member, distance,
-    per-member PDQ `quality` and the `low_confidence` flag (§5.3) — plus the counts of
-    skipped-at-staging/spared files and the thresholds and config in effect (`T_match_photo`,
-    `T_match_video`, the other `video.*` knobs, `review.low_quality_hint`). This is the durable
-    "what dedup proposed" record;
-    unlike the in-folder `manifest.csv` (which is deleted at finalize), it lives outside the folder
-    and is never modified.
-14. Open both folders in Explorer (or their `_packrat_review\` parent), print the
-    `--confirm` / `--cancel` commands, and **pause** (`review_runs.status` stays `pending`). Being
-    under `_packrat_review\`, they are already ignored by scan. If staging skipped everything
-    (all targets gone), the
-    run auto-completes with an "already clean" report instead of pausing.
+**Phase 4 — Materialize the current stage's staging folder** *(edge case 5)*
+Create the current stage's folder under `<root>\_packrat_review\` (already in the ignore set, so
+scan never indexes it or the `.lnk`s). Analyze materializes **stage 1**; `--confirm` materializes the
+next stage after applying the current one (Phase 6). Per staged action:
+10. **Stat-before-create — never emit a broken `.lnk`.** `stat()` the target at the instant of
+    creating its shortcut:
+    - **Target present** → create the `.lnk` (this also finalizes `is_external` / the `_external`
+      suffix from the live path).
+    - **Target gone** → **skip** the shortcut, lazily clean the DB (delete the gone `file_instances`
+      row; if an `active` asset hits zero instances → delete the asset, cascading fingerprints), and
+      **do not persist** a `review_actions` row for it — count "skipped-at-staging". *(Never persist a
+      row whose shortcut isn't on disk: in a default-KEEP stage `--confirm` reads an absent shortcut as
+      "delete", so a phantom row would silently delete an unreviewed file.)*
+    - **Survivor-gone special case (stage 1 only):** if an exact target is present but its planned
+      **survivor** has vanished, do **not** stage the target — **promote it to survivor** (redirect the
+      asset's other exact deletions at it) and skip its shortcut. Same promotion as the Phase-6 gate
+      (step 17b), applied early. *(Stages 2–3 have no survivors, so this case can't arise there.)*
+    Net: **every `.lnk` that lands resolves to a real file** and previews correctly.
+11. Write a **`manifest.csv`** in the stage folder — a flat export of that stage's `review_actions`
+    so the opaque `.lnk`s are legible (a documentation sidecar; `--confirm` reads shortcut presence,
+    **not** the manifest). Columns:
+    - `_exact_dup_to_delete\manifest.csv`: `shortcut, target_path, asset_id, reason, survivor_path`
+    - `_suspect_recompression\` / `_with_minor_edits\manifest.csv`:
+      `shortcut, target_path, asset_id, group_no, member_no, suggested_lead, media_type, width,
+      height, detail_score, size, duration_s, codec, bitrate, is_external, distance, quality,
+      low_confidence` — `suggested_lead`=`1` on the keep-hint member (stage 2 only, step 9); the
+      `media_type`/`width`/`height`/`detail_score`/`size`/`duration_s`/`codec`/`bitrate` columns are
+      the ranking inputs (so a surprising lead is explainable at a glance — e.g. an HEVC-vs-H.264
+      call); `quality` is the member's PDQ quality (0–100; video: min across comparable frames);
+      `low_confidence`=`1` when this member or its partner is below `review.low_quality_hint` (a
+      flat/near-black spurious-collision hint to skip fast, §5.3).
+12. **Audit trail (capture point 1 — the proposed plan).** Write/append an immutable `proposed.json`
+    in this run's audit dir (§8.1): the full plan **for every stage as calculated**, each action with
+    its stage, target path, reason, survivor, group/member, distance, per-member `quality` and
+    `low_confidence`, plus skipped/spared counts and the thresholds in effect (`t_photo_recompress`,
+    `t_photo_edit`, `t_match_video`, the `video.*` knobs, `review.low_quality_hint`). During
+    `--dry-run` this is the whole preview; during a live run it records the plan as each stage is
+    computed. Immutable, outside the folder, unlike the in-folder `manifest.csv` (deleted at finalize).
+13. Open the stage folder in Explorer (or its `_packrat_review\` parent), print the `--confirm` /
+    `--cancel` commands **naming the current stage**, and **pause** (`review_runs.status='pending'`,
+    `stage_phase='staged'`). If the current stage staged nothing (all targets gone), auto-advance to
+    the next non-empty stage instead of pausing; if none remain, auto-complete "already clean".
 
-**The two review conventions are OPPOSITE — read carefully:**
-| Folder | Default if you do nothing | To change a file's fate |
+**The conventions differ by stage — read carefully:**
+| Stage folder | Default if you do nothing | To change a file's fate |
 |---|---|---|
-| `_will_be_deleted\` | the real file **is deleted** | **remove** its shortcut to **spare** the file |
-| `_grouped_by_similarity\` | the real file **is kept** | **remove** its shortcut to **delete** the file |
+| `_exact_dup_to_delete\` | the real file **is deleted** | **remove** its shortcut to **spare** the file |
+| `_suspect_recompression\` | the real file **is kept** | **remove** its shortcut to **delete** the file |
+| `_with_minor_edits\` | the real file **is kept** | **remove** its shortcut to **delete** the file |
 
-Rationale: exact dups are objectively redundant (default-delete, veto to keep); near-dups need
-human judgment (default-keep, remove to delete). The `--confirm` step prints an explicit
-per-folder summary and requires typed confirmation, so the inversion can't cause a silent
-mistake.
-
-**Reviewing = deleting shortcuts, not renaming them.** Matching is strict on the planned
-filename, so a *renamed* shortcut counts as removed (see Phase 5). In `_grouped_by_similarity`
-that means an accidental rename would delete the target — the typed `--confirm` summary lists
-every such file (per root) precisely so this can't happen silently.
+**Reviewing = deleting shortcuts, not renaming them.** Matching is strict on the planned filename, so
+a *renamed* shortcut counts as removed (Phase 5). In the default-KEEP stages that means an accidental
+rename would delete the target — the typed `--confirm` summary lists every such file (per root) so it
+can't happen silently.
 
 ---
 
-#### B2. `packrat dedup <folder> --confirm` — apply the review (→ `completed`)
+#### B2. `packrat dedup <folder> --confirm` — apply the current stage, advance (→ `completed` after stage 3)
 
 **Phase 5 — Read the user's edits**
-15. Load the `pending` run and its `review_actions`. If there is **no pending run** for this root
-    → error ("nothing to confirm; run `dedup <folder>` first"); same for `--cancel`. If a run is
-    already `completed`/`cancelled`, it is terminal — re-running `--confirm` is a no-op error.
-16. **Safety guard:** if an entire staging folder is *missing* (user deleted the whole folder),
-    **abort** — do not interpret "folder gone" as "delete all" (which for `_grouped` would be
-    mass data loss). Require the folders to exist to be read.
-17. For each planned action, check whether a file with **its exact planned shortcut name** still
-    exists in the folder (strict, filename-only match — the manifest is not consulted here):
-    - `_will_be_deleted`: named shortcut **present** → intend delete; **absent** → spare (vetoed).
-    - `_grouped_by_similarity`: named shortcut **absent** → intend delete the target; **present** → keep.
-    **Strict rename semantics:** a shortcut that has been *renamed* no longer matches its planned
-    name, so it counts exactly as **removed/absent** — there is no attempt to recover the original
-    action from a renamed file via the manifest. Consequence, made explicit to the user in the
-    `--confirm` summary and the folder conventions: in `_will_be_deleted` a rename **spares** the
-    file (safe); in `_grouped_by_similarity` a rename **deletes** the target (as if you'd removed
-    it). So the intended review gesture in both folders is **delete the shortcut**, not rename it;
-    renaming is treated as removal. Extra files the user drops in are ignored (only planned
-    shortcut names are consulted). This yields the *intended* delete set; liveness is applied
-    per-file in Phase 6.
+14. Load the `pending` run and its current stage's `review_actions`. **No pending run** → error
+    ("nothing to confirm; run `dedup <folder>` first"); same for `--cancel`. A `completed`/`cancelled`
+    run is terminal — re-`--confirm` is a no-op error.
+15. **Safety guard:** if the current stage's staging folder is *missing* (user deleted the whole
+    folder), **abort** — never read "folder gone" as "delete all" (mass data loss in a default-KEEP
+    stage). Require the folder to exist to be read.
+16. For each of the stage's planned actions, check whether a file with **its exact planned shortcut
+    name** still exists in the folder (strict, filename-only — the manifest is not consulted):
+    - `_exact_dup_to_delete`: shortcut **present** → intend delete; **absent/renamed** → spare (veto).
+    - `_suspect_recompression` / `_with_minor_edits`: shortcut **absent/renamed** → intend delete the
+      target; **present** → keep.
+    A renamed shortcut counts as **removed**; extra files dropped in are ignored (only planned names
+    consulted). This yields the *intended* delete set; liveness is applied per-file in Phase 6.
 
-**Phase 6 — Authoritative liveness + apply deletions** (backup DB first) *(edge case 5)*
-The **authoritative** liveness gate (Phase 4 already stat'd once at staging, but a file may have
-changed again in the interim). Done lazily — one target at a time, right before the irreversible
-move — so cold external drives are touched only for files actually being deleted.
-18. Print a summary grouped by target root — **including any external-folder files** a perceptual
-    shortcut removal would delete — and require typed confirmation. **Flag non-recyclable paths:**
-    the summary must count and call out files on network/SMB roots, which are deleted
-    **permanently** (no Recycle Bin — §10), e.g. "K of N are on network shares → permanent."
-19. For each file in the intended delete set, at the moment of deletion:
-    a. **`stat()` the target file.**
-       - **Gone already** → nothing to delete. Lazily clean the DB: **delete** the gone
-         `file_instances` row; if an `active` asset now has zero instances → **delete the asset**
-         (cascading fingerprints) — forgotten, not remembered. Count as "already-gone". Continue.
-       - **Present** → proceed.
-    b. **For every exact deletion (internal *and* external), verify the survivor is still live**
-       before deleting — this guarantees an asset never loses its last copy:
-       - `stat()` the action's `survivor_instance_id` path.
-       - **Survivor live** → proceed to delete (the target is genuinely redundant).
-       - **Survivor gone** → the target is no longer redundant. **Spare it** (do not delete), and
-         **promote it to survivor**: update the asset's remaining planned exact deletions to point
-         at this now-surviving instance. Lazily delete the vanished survivor's `file_instances`
-         row. Log "spared: survivor vanished (promoted)". Because a spared file becomes the new
-         survivor, the asset's *other* redundant copies (if any) still delete correctly against it
-         — exactly one instance is always kept. (Covers the internal case where the user deleted
-         the kept oldest-mtime copy in Explorer after staging, and the external case where the
-         external copy vanished.)
-    c. Move the (still-present, still-redundant) file to the **Recycle Bin** (recoverable on local
-       volumes; **permanent on NAS/SMB** — §10), then update the DB:
-       - **Exact deletions** → delete that redundant `file_instances` row. The asset keeps its
-         survivor instance, so it **stays `active`** — never trashed (we still have the content).
-         No re-appearance concern.
-       - **Perceptual deletions** → the user deliberately discarded a near-dup. Delete its
-         `file_instances` row; if the asset now has zero instances → **write**
-         `assets.status='trashed'`, `trashed_at`, `trash_reason='dedup-perceptual'`, and **retain
-         its fingerprints** (this is the one path where an asset survives at zero instances) so a
-         future merge/dedup excludes this near-dup from re-appearing (§6 trash memory). *(This is
-         a deliberate choice: a confirmed perceptual deletion is remembered as trash so it won't
-         re-enter via merge — unlike a plain filesystem delete, which is forgotten.)*
+**Phase 6 — Authoritative liveness + apply this stage's deletions** (backup DB first) *(edge case 5)*
+The authoritative gate — done lazily, one target at a time, right before the irreversible move.
+17. Print a summary for **this stage** grouped by target root — **including any external-folder files**
+    a default-KEEP-stage shortcut removal would delete — and require typed confirmation. **Flag
+    non-recyclable paths:** count and call out files on network/SMB roots, deleted **permanently** (no
+    Recycle Bin — §10), e.g. "K of N are on network shares → permanent."
+18. For each file in the intended delete set, at the moment of deletion:
+    a. **`stat()` the target.** Gone already → nothing to delete; lazily clean the DB (delete the gone
+       `file_instances` row; an `active` asset at zero instances → delete the asset, cascading
+       fingerprints) — count "already-gone". Present → proceed.
+    b. **Stage 1 only — verify the survivor is still live** before deleting (guarantees an asset never
+       loses its last copy): `stat()` the `survivor_instance_id` path. **Live** → delete the target.
+       **Gone** → the target is no longer redundant: **spare it** and **promote it to survivor**
+       (redirect the asset's remaining exact deletions at it), lazily delete the vanished survivor's
+       row, log "spared: survivor vanished (promoted)". *(Stages 2–3 have no survivor step.)*
+    c. Move the (still-present, still-redundant) file to the **Recycle Bin** (recoverable locally;
+       **permanent on NAS/SMB** — §10), then update the DB:
+       - **Stage 1 (exact)** → delete that redundant `file_instances` row. The asset keeps its survivor,
+         so it **stays `active`** — never trashed. No re-appearance concern.
+       - **Stages 2–3 (perceptual)** → the user deliberately discarded a near-dup. Delete its
+         `file_instances` row; if the asset now has zero instances → **write** `assets.status='trashed'`,
+         `trashed_at`, `trash_reason='dedup-perceptual'`, **retain its fingerprints** (the one path where
+         an asset survives at zero instances) so a future merge/dedup excludes this near-dup (§6 trash
+         memory).
 
-**Phase 7 — Finalize**
-20. **Audit trail (capture point 2 — the applied outcome).** *Before* deleting the staging
-    folders, write an immutable `applied.json` into the run's audit directory (§8.1): the final
-    disposition of every action — `deleted` / `spared` (vetoed) / `kept` / `already-gone` /
-    `survivor-vanished`, with each file's path, root, asset_id, and its Recycle-Bin destination
-    for deleted items — plus totals and `confirmed_at`. Paired with `proposed.json`, this gives a
-    complete before/after record of the run. (`--cancel` writes `applied.json` with every action
-    marked `cancelled`.)
-21. Delete the `_packrat_review\_will_be_deleted\` and `_packrat_review\_grouped_by_similarity\`
-    folders (shortcuts + manifests); leave the shared `_packrat_review\` parent in place.
-22. → **write** `review_runs.status='completed'`, `confirmed_at`; close the `jobs` row. Report:
-    exact deleted, perceptual deleted, spared/kept (vetoes), external files deleted, plus the
-    lazily-cleaned stale rows — **skipped-at-staging** (Phase 4), **already-gone** and
-    **survivor-vanished spares** (Phase 6) — and the audit path. `--cancel` instead deletes the
-    staging folders, marks the run `cancelled`, and deletes nothing (but still writes
-    `applied.json` as above).
+**Phase 7 — Apply-then-advance / finalize** *(the one new crash window — resumable via `stage_phase`)*
+`--confirm` applies the current stage and then stages the next, as **two committed steps** (like
+merge's copied→registered gap):
+19. **Commit "applied".** After Phase 6's deletions commit, set `review_runs.stage_phase='applied'`
+    (still `pending`, same `stage`). *(A crash here leaves `applied` with nothing staged — reconcile
+    must **not** roll this back, the deletions were correct; re-running `--confirm` sees `applied` and
+    jumps straight to step 20.)*
+20. **Stage the next non-empty stage** (§Phase 3–4): compute stage `stage+1` (then `+2` if it's
+    empty), materialize its folder + `review_actions` + append to `proposed.json`, and commit
+    `stage=<next>`, `stage_phase='staged'`. Then **pause** with the next stage's `--confirm`/`--cancel`
+    prompt. If **no non-empty stage remains**, instead finalize:
+21. **Audit + finalize.** Write the immutable `applied.json` (§8.1): the final disposition of every
+    action across all applied stages — `deleted` / `spared` / `kept` / `already-gone` /
+    `survivor-vanished`, with path, root, asset_id, Recycle-Bin destination, stage — plus totals and
+    `confirmed_at`. Delete all of this run's stage folders (shortcuts + manifests), leaving the shared
+    `_packrat_review\` parent. → **write** `review_runs.status='completed'`, `confirmed_at`; close the
+    `jobs` row. Report per-stage: exact deleted, perceptual deleted (stage 2/3), spared/kept, external
+    deleted, plus lazily-cleaned stale rows. **`--cancel`** (any stage) deletes **all** the run's stage
+    folders, marks the run `cancelled`, deletes nothing, and still writes `applied.json` (every action
+    `cancelled`). *(A run cancelled mid-sequence keeps whatever earlier stages already deleted — those
+    were confirmed — and its `similarity_edges` rows, which are a cache never trusted as complete input.)*
 
-**Cross-folder note:** a perceptual group member can still live in an external folder
-(`_external` shortcut) — e.g. a pure-survivor asset that physically resides only in another root
-but is a near-dup of something in the target folder. Removing that shortcut deletes a file in
-*another* root. (Note this is **not** produced by exact-external resolution anymore — those
-assets are excluded from grouping per Phase 3.) This cross-root reach is powerful and intended,
-but the Phase 6 typed-confirm summary (step 18) calls it out per-root so it is never accidental.
+**Cross-folder note:** a perceptual member can live in an external folder (`_external` shortcut) — a
+near-dup of a target-folder asset that physically resides only in another root. Removing that shortcut
+deletes a file in *another* root — the Phase 6 typed-confirm summary (step 17) calls this out per-root
+so it is never accidental.
 
-**Why dedup is DB-first with lazy liveness:** dedup compares collection assets that are all in the
-DB, so the *decision* work is pure DB comparison — no eager whole-pool stat. It stats a file only
-twice, and only for files it is about to touch: once when creating that file's shortcut (Phase 4,
-to guarantee no broken `.lnk`) and once immediately before deleting it (Phase 6, the authoritative
-gate). **Merge (§C)** is unrelated to this near-dup machinery: it hashes the transient source
-files and classifies them by exact hash against the DB — no perceptual signatures, no
-`similarity_edges`, no shortcuts.
+**Why dedup is DB-first with lazy liveness:** the *decision* work is pure DB comparison — no eager
+whole-pool stat. It stats a file only when a stage acts on it: once creating that file's shortcut
+(no broken `.lnk`) and once immediately before deleting it (the authoritative gate). **Merge (§C)** is
+unrelated to this machinery: it hashes transient source files and classifies them by exact hash — no
+perceptual signatures, no `similarity_edges`, no shortcuts.
 
 #### 8.1 Review-run audit trail (dedup & perceptual-cleanup)
 
@@ -1760,8 +1809,18 @@ raw = false            # include the RAW group (dng cr2 cr3 nef arw raf orf rw2 
 mtime_tolerance_s = 2  # tolerant-mtime skip window (§8 A2 step 4); 0 = strict path+size+mtime
 
 [match]
-t_match_photo = 32     # photo PDQ Hamming cutoff (§5.3); the single photo decision — tune tight
-t_match_video = 90     # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+t_photo_recompress = 10   # photo PDQ cutoff for dedup stage 2 (recompression band, §5.3/§8 B)
+t_photo_edit       = 32    # photo PDQ match cutoff (§5.3); recompress < d ≤ edit → stage 3 (minor edit)
+t_match_video      = 90    # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+pdq_max_edge       = 512   # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
+video_bitrate_tie_pct = 10.0  # video keep-lead (§8 B): effective-bitrates within this % tie → codec then path
+# codec-efficiency weights for the video keep-lead effective bitrate (§8 B); unlisted codec → 1.0
+[match.codec_weights]
+h264 = 1.0
+hevc = 2.0    # == h265 (same codec); ~2x more efficient than h264
+av1  = 2.5
+vp9  = 1.5
+mpeg4 = 0.5
 
 [video]
 sample_frames        = 12    # frames sampled per video, at segment midpoints (§5.3)
@@ -1781,10 +1840,11 @@ scan_workers = 6       # concurrent hashing/decoding streams over SMB (§10.1); 
 retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune older (deferred knob, §14 #5)
 ```
 
-> **Defaults marked `# e.g.` / tuning-dependent** (`t_match_photo`, `t_match_video`, the `video.*`
-> knobs) are **starting points to be calibrated on real data before the first full scan** (§5.3,
-> §14 #1) — they are not claimed-correct constants. `mtime_tolerance_s`, `allowlist.raw`,
-> `smb.scan_workers`, and `review.low_quality_hint` are ordinary operational settings.
+> **Defaults marked tuning-dependent** (`t_photo_recompress`, `t_photo_edit`, `t_match_video`, the
+> `video.*` knobs, and the keep-lead `codec_weights` / `video_bitrate_tie_pct`) are **starting points
+> to be calibrated on real data before the first full scan** (§5.3, §8 B, §14 #1) — not
+> claimed-correct constants. `mtime_tolerance_s`, `allowlist.raw`, `smb.scan_workers`, and
+> `review.low_quality_hint` are ordinary operational settings.
 
 ---
 
@@ -1996,33 +2056,39 @@ that root and log it. Confirm/cancel the review (or let the merge finish) to sca
 ```
 
 ### `packrat dedup`
-Dedup **one registered folder**. Analyze stages removable duplicates as Explorer shortcuts under
-`<root>\_packrat_review\` (`_will_be_deleted\`, `_grouped_by_similarity\`) and pauses in
-`pending`; `--confirm` applies the user's review and deletes (to Recycle Bin). Compares the
-target folder against all **active** assets across the collection (internal + external roots;
-trashed excluded). At most one `pending` run per folder.
+Dedup **one registered folder** as a **3-stage sequence** (§8 B), one stage staged + reviewed at a
+time under `<root>\_packrat_review\`: **stage 1** `_exact_dup_to_delete\` (byte-identical copies,
+default-DELETE) → **stage 2** `_suspect_recompression\` (recompressions + all video near-dups,
+default-KEEP) → **stage 3** `_with_minor_edits\` (photo minor-edits/crops, default-KEEP). `--confirm`
+applies the current stage (to Recycle Bin) and **auto-advances** to the next non-empty stage; after
+the last it completes. Compares against all **active** assets collection-wide (internal + external
+roots; trashed excluded). At most one `pending` run per folder (one run spans all three stages).
 
 ```
-packrat dedup <folder>              # analyze → stage shortcuts → pending
-packrat dedup <folder> --confirm    # apply review, delete confirmed dups → completed
-packrat dedup <folder> --cancel     # discard staging, delete nothing → cancelled
-# (per-root dedup/review state is shown by the general `packrat status`, §11)
+packrat dedup <folder>              # analyze → stage 1 → pending (stage 1)
+packrat dedup <folder> --confirm    # apply current stage, auto-advance to next; last stage → completed
+packrat dedup <folder> --cancel     # discard the whole run's staging, delete nothing → cancelled
+packrat dedup <folder> --dry-run    # compute all 3 stages read-only; stage/write nothing
+# (per-root dedup/review state, incl. current stage, is shown by `packrat status`, §11)
 
 Arguments
-  <folder>               A registered root to dedup (path or --name handle).
+  <folder>               A registered library root to dedup (path or --name handle).
 
 Options
-  --confirm              Apply the pending run for <folder>: read which shortcuts remain, delete
-                         accordingly (typed confirmation; DB backup first).
-  --cancel               Discard the pending run's staging folders; delete nothing.
-  --dry-run              Analyze and print the plan (counts, would-stage list) without creating
-                         staging folders or shortcuts.
+  --confirm              Apply the current stage's review (read which shortcuts remain, delete
+                         accordingly; typed confirmation; DB backup first) and advance to the next
+                         non-empty stage — repeat until the run completes after the last stage.
+  --cancel               Discard the run's staging folders (any stage); delete nothing.
+  --dry-run              Compute all 3 stages and print the plan (per-stage counts, would-stage
+                         list) without creating staging folders or shortcuts.
   --json                 Machine-readable plan/report.
 
-Conventions (OPPOSITE per folder): in `_will_be_deleted\`, remove a shortcut to SPARE the file
-(default = delete); in `_grouped_by_similarity\`, remove a shortcut to DELETE the file
-(default = keep). Exact dups: keep oldest-mtime internally / drop all when an external copy
-exists. Perceptual near-dups: grouped for manual review.
+Conventions differ by stage: `_exact_dup_to_delete\` is default-DELETE (remove a shortcut to SPARE);
+`_suspect_recompression\` and `_with_minor_edits\` are default-KEEP (remove a shortcut to DELETE).
+Stage 1 keeps oldest-mtime internally / drops all when an external copy exists; stages 2–3 stage
+near-dup members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2,
+packrat marks the least-compressed photo member `_suggested` (resolution → lossless → detail_score →
+size) as a keep-hint — advisory only; default still KEEP.
 ```
 
 ### `packrat merge`
@@ -2084,7 +2150,8 @@ Options
   --json                 Machine-readable report.
 
 Review convention (--perceptual, delete-default): a staged shortcut = "will delete"; remove it to
-spare the file. Opposite of dedup's `_grouped_by_similarity` (keep-default).
+spare the file. Same as dedup's `_exact_dup_to_delete\`; opposite of dedup's keep-default perceptual
+stages (`_suspect_recompression\` / `_with_minor_edits\`).
 ```
 
 ### `packrat trash refresh`
@@ -2310,12 +2377,15 @@ but v1 is considered done when M0–M6 are.)
 - **M2 — Perceptual signatures (scan)**: PDQ for both photos and video frames (+ quality) written
   to `phash`/`vphash` during scan, with the §5.3 sampling/quality parameters. No pairwise matching
   yet — just the inputs. No GPU/CLIP. No `imagehash` dependency.
-- **M3 — Dedup operation**: single-folder `dedup` — §5 matching engine over DB fingerprints +
-  liveness check, `similarity_edges`/`review_runs`/`review_actions` tables, exact-dup resolution
-  (oldest-mtime internal / drop-on-external), perceptual grouping, Windows-shortcut staging
-  (`_will_be_deleted\`, `_grouped_by_similarity\`), the pending→confirmed state machine,
-  `--confirm`/`--cancel`, and the §8.1 audit trail (`proposed.json` + `applied.json`
-  in APPDATA). Builds the §5 perceptual matching engine (also reused by `cleanup --perceptual`).
+- **M3 — Dedup operation**: single-folder `dedup` as a **3-stage sequence** — §5 matching engine
+  over DB fingerprints + lazy liveness, `similarity_edges`/`review_runs`(+`stage`/`stage_phase`)/
+  `review_actions`(+`stage`) tables, exact-dup resolution (stage 1: oldest-mtime internal /
+  drop-on-external), perceptual banding into recompression (stage 2, + all video) and minor-edit
+  (stage 3, photo) stages, Windows-shortcut staging (`_exact_dup_to_delete\` /
+  `_suspect_recompression\` / `_with_minor_edits\`), the pending+stage-cursor state machine with
+  `--confirm` auto-advance, `--cancel`, `--dry-run`, and the §8.1 audit trail (`proposed.json` +
+  `applied.json` in APPDATA). Builds the §5 perceptual matching engine (also reused by
+  `cleanup --perceptual`).
 - **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (§6.1 —
   index trash-folder files → record/flip assets to `trashed` → empty the folders), scan's refusal
   to index trash roots, `packrat cleanup` (default exact-hash removal with count-confirm; and
@@ -2340,11 +2410,12 @@ but v1 is considered done when M0–M6 are.)
 
 ## 14. Open questions / risks
 
-1. **Near-dup thresholds** `T_match_photo` and `T_match_video` need empirical tuning on your real
-   data (burst shots and edited copies are the hard photo cases; heavy re-encodes the hard video
-   ones). They are **separate cutoffs** (§5.3): the photo one carries the whole decision, the video
-   one only feeds the `frame_match_fraction` vote and tolerates frame noise, so expect
-   `T_match_video` to land more permissive. Calibrate both — plus the `video.*` structure knobs —
+1. **Near-dup thresholds** `t_photo_recompress`, `t_photo_edit`, and `T_match_video` need empirical
+   tuning on your real data (burst shots and edited copies are the hard photo cases; heavy re-encodes
+   the hard video ones). They are **separate cutoffs** (§5.3): `t_photo_edit` is the photo match
+   decision and `t_photo_recompress` bands matched photos into dedup's stage-2/stage-3 review (§8 B);
+   the video cutoff only feeds the `frame_match_fraction` vote and tolerates frame noise, so expect
+   `T_match_video` to land more permissive. Calibrate all three — plus the `video.*` structure knobs —
    on a small labeled sample. **Single-signal risk (accepted, §7 gap review):** photos rely on
    **PDQ alone** — pHash is not stored. If calibration shows PDQ-only precision/recall is
    inadequate, adding a second signal (pHash, or an AND/OR gate) means **re-decoding the whole

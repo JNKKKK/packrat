@@ -146,20 +146,69 @@ class Database:
                 self._conn.commit()
         return {t: n for t, n in counts.items() if n}
 
+    def backup_to(self, dest: Path | str) -> None:
+        """Online-copy the whole DB to ``dest`` via SQLite's backup API (§10).
+
+        Taken before every destructive apply (dedup/cleanup ``--confirm``, merge
+        copy) as the backstop. Uses the live backup API (WAL-safe — a plain file
+        copy would miss the WAL), holding the write lock so nothing mutates
+        mid-copy. Overwrites ``dest`` if present.
+        """
+        import sqlite3
+
+        with self._lock:
+            target = sqlite3.connect(str(dest))
+            try:
+                self._conn.backup(target)
+            finally:
+                target.close()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
 
 
+#: Columns added to EXISTING tables after v1 — CREATE IF NOT EXISTS can't alter a
+#: table, and there is no migration runner, so init_db adds any missing one via an
+#: idempotent ADD COLUMN pass (§4 / schema v3). New *tables* need no entry here
+#: (CREATE IF NOT EXISTS handles them). Keep in sync with schema.py.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, column-def) — v3: the M3 3-stage dedup cursor + per-action stage.
+    ("review_runs", "stage", "INTEGER NOT NULL DEFAULT 1"),
+    ("review_runs", "stage_phase", "TEXT"),
+    ("review_actions", "stage", "INTEGER"),
+    # v4: photo detail estimate for dedup stage-2 keep-lead (§8 B).
+    ("assets", "detail_score", "INTEGER"),
+    # v5: video codec for the video keep-lead's codec-efficiency weight (§8 B).
+    ("assets", "codec", "TEXT"),
+)
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """Add any post-v1 column missing from an existing table (idempotent).
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an already-created table untouched, so a
+    DB from an earlier schema version keeps the old table shape. We reconcile by
+    checking ``PRAGMA table_info`` and ``ALTER TABLE … ADD COLUMN`` for each
+    declared addition. A fresh DB already has them from ``SCHEMA_SQL`` → all no-ops.
+    """
+    for table, column, coldef in _ADDED_COLUMNS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+
+
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     """Create the schema if missing and return an open connection (§4).
 
-    Idempotent — every DDL statement is ``IF NOT EXISTS``. Records/updates the
-    ``schema_version`` in ``meta``.
+    Idempotent — every DDL statement is ``IF NOT EXISTS``, plus an ADD-COLUMN pass
+    for columns added to existing tables after v1 (:func:`_migrate_columns`).
+    Records/updates the ``schema_version`` in ``meta``.
     """
     conn = connect(db_file)
     with transaction(conn):
         conn.executescript(SCHEMA_SQL)
+        _migrate_columns(conn)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

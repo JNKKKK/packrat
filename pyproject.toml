@@ -13,6 +13,12 @@ dependencies = [
     "uvicorn>=0.27",
     "typer>=0.12",
     "httpx>=0.27",
+    # dedup/cleanup (M3+) staging + deletion. Windows-only: pywin32 gives the
+    # IShellLink COM used to create Explorer-previewable .lnk shortcuts (§8 B
+    # Phase 4, PLAN §14 #4 spike), send2trash the move-to-Recycle-Bin (§8 B
+    # Phase 6). Platform-marked so a non-Windows dev install stays importable.
+    "pywin32>=312; sys_platform == 'win32'",
+    "send2trash>=2.1.0",
 ]
 
 [project.optional-dependencies]

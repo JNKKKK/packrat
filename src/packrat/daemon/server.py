@@ -37,6 +37,7 @@ log = logging.getLogger("packrat.daemon")
 
 # Import job type modules for their register_job() side effects.
 from ..jobs import scan as _scan  # noqa: E402,F401
+from ..jobs import dedup as _dedup  # noqa: E402,F401
 
 from .. import roots as roots_mod  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -248,6 +249,41 @@ def build_app(token: str, *, db_file=None, config_path=None):
             params["root_id"] = row["id"]
         try:
             job_id = queue.submit("scan", params)
+        except BusyError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
+            )
+        return {"job_id": job_id}
+
+    @app.post("/dedup", dependencies=[Depends(require_token)])
+    def submit_dedup(body: dict):
+        """Resolve a root arg (path/--name) + submit a dedup job (§8 B).
+
+        Modes are carried in params: default analyze, or ``--confirm``/``--cancel``
+        (act on the pending run) / ``--dry-run`` (analyze without staging). A trash
+        root is rejected here so the CLI stays a thin client.
+        """
+        arg = body.get("root")
+        if not arg:
+            raise HTTPException(status_code=400, detail="dedup needs a <folder> (path or --name)")
+        try:
+            row = roots_mod.resolve_root(database, arg)
+        except roots_mod.RootError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        if row["kind"] != "library":
+            raise HTTPException(
+                status_code=400,
+                detail=f"{row['name']!r} is a {row['kind']} root; dedup targets a library root",
+            )
+        params = {
+            "root_id": row["id"],
+            "confirm": bool(body.get("confirm")),
+            "cancel": bool(body.get("cancel")),
+            "dry_run": bool(body.get("dry_run")),
+        }
+        try:
+            job_id = queue.submit("dedup", params)
         except BusyError as exc:
             return JSONResponse(
                 status_code=409,

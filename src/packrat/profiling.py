@@ -36,6 +36,7 @@ _MEDIUM_BUCKETS: tuple[tuple[str, str, str], ...] = (
     ("hash", "hash: BLAKE3", "cpu"),
     ("decode", "decode: Pillow/PyAV", "cpu"),
     ("pdq", "pdq: perceptual hash", "cpu"),
+    ("detail", "detail: keep-lead score", "cpu"),  # photo only (§8 B stage-2 keep-lead)
 )
 #: Shared (medium-independent) buckets.
 _SHARED_BUCKETS: tuple[tuple[str, str], ...] = (

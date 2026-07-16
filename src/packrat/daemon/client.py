@@ -155,6 +155,25 @@ class DaemonClient:
             raise DaemonError(f"{r.status_code}: {r.text}")
         return int(r.json()["job_id"])
 
+    def submit_dedup(
+        self,
+        folder: str,
+        *,
+        confirm: bool = False,
+        cancel: bool = False,
+        dry_run: bool = False,
+    ) -> int:
+        """Submit a dedup job (§8 B); returns the job id. Raises :class:`BusyResponse`."""
+        r = self._raw_post(
+            "/dedup",
+            {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run},
+        )
+        if r.status_code == 409:
+            raise BusyResponse(r.json())
+        if r.status_code >= 400:
+            raise DaemonError(f"{r.status_code}: {r.text}")
+        return int(r.json()["job_id"])
+
     # -- snapshots -------------------------------------------------------
     def status(self, root: str | None = None) -> dict:
         if root:

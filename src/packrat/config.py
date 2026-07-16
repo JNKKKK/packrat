@@ -61,16 +61,42 @@ class FastpathConfig:
     mtime_tolerance_s: float = 2.0
 
 
+#: Codec-efficiency weights for the video keep-lead (§8 B). A more-efficient codec's
+#: bits are "worth more" → higher weight, so at equal resolution an HEVC master beats
+#: an H.264 re-export on effective bitrate (= size/duration × weight). Coarse + tunable;
+#: an unknown/missing codec gets weight 1.0 (neutral). H.265 == HEVC (same codec).
+DEFAULT_CODEC_WEIGHTS: dict[str, float] = {
+    "mpeg2video": 0.5, "mpeg4": 0.5, "msmpeg4v3": 0.5, "wmv3": 0.6, "vc1": 0.7,
+    "h264": 1.0, "avc": 1.0,
+    "vp8": 1.2, "vp9": 1.5,
+    "hevc": 2.0, "h265": 2.0,
+    "av1": 2.5,
+    "vvc": 3.0, "h266": 3.0,
+}
+
+
 @dataclass(frozen=True)
 class MatchConfig:
-    #: photo PDQ Hamming cutoff (§5.3); the single photo decision — tune tight.
-    t_match_photo: int = 32
+    #: photo PDQ Hamming cutoffs (§5.3). `t_photo_edit` is the match decision (a pair
+    #: with distance ≤ this is a near-dup); `t_photo_recompress` (tighter) BANDS matched
+    #: photos into dedup's review stages — ≤ recompress = stage 2 (recompression),
+    #: recompress < d ≤ edit = stage 3 (minor edit). recompress < edit. Both need
+    #: calibration (§14 #1). `cleanup --perceptual` uses t_photo_edit alone (no banding).
+    t_photo_recompress: int = 10
+    t_photo_edit: int = 32
     #: per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision.
+    #: Video near-dups are a single frame-vote match (not banded) → all go to dedup stage 2.
     t_match_video: int = 90
     #: downscale each decoded image/frame to this longest edge before PDQ. PDQ on a
     #: full 12MP photo is ~7x slower than on a 512px copy while the hash barely moves
-    #: (drift ~7/256, well inside t_match_photo). 0 = no downscale (hash full-res).
+    #: (drift ~7/256, well inside t_photo_edit). 0 = no downscale (hash full-res).
     pdq_max_edge: int = 512
+    #: video keep-lead (§8 B): two effective-bitrates within this percent are a "tie"
+    #: (log-scale bucket), so the codec-efficiency weight then the path decide — not a
+    #: coin-flip on a noisy bitrate diff. Resolution is ranked above this either way.
+    video_bitrate_tie_pct: float = 10.0
+    #: codec-efficiency weights for the video keep-lead effective bitrate (see above).
+    codec_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CODEC_WEIGHTS))
 
 
 @dataclass(frozen=True)
@@ -169,9 +195,22 @@ raw = false            # include the RAW group (dng cr2 cr3 nef arw raf orf rw2 
 mtime_tolerance_s = 2  # tolerant-mtime skip window (§8 A2 step 4); 0 = strict path+size+mtime
 
 [match]
-t_match_photo = 32     # photo PDQ Hamming cutoff (§5.3); the single photo decision — tune tight
-t_match_video = 90     # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
-pdq_max_edge  = 512    # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
+t_photo_recompress = 10  # photo PDQ cutoff for dedup stage 2 (recompression band, §5.3/§8 B); tight
+t_photo_edit       = 32  # photo PDQ match cutoff (§5.3); recompress < d ≤ edit → dedup stage 3 (minor edit)
+t_match_video      = 90  # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+pdq_max_edge       = 512 # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
+video_bitrate_tie_pct = 10.0  # video keep-lead (§8 B): effective-bitrates within this % tie → codec then path decide
+
+# Codec-efficiency weights for the video keep-lead's effective bitrate (§8 B): size/duration × weight.
+# A more-efficient codec's bits are worth more (higher weight), so an HEVC master beats an H.264
+# re-export at equal resolution. Unknown/missing codec → 1.0. Override only the ones you care about;
+# unlisted codecs keep their built-in default. (H.265 == HEVC.)
+[match.codec_weights]
+h264 = 1.0
+hevc = 2.0
+av1  = 2.5
+vp9  = 1.5
+mpeg4 = 0.5
 
 [video]
 sample_frames        = 12    # frames sampled per video, at segment midpoints (§5.3)
@@ -231,6 +270,16 @@ def _coerce_value(f, value, dotted: str):
     # frozenset[str] fields (the extension allowlists) arrive as TOML arrays.
     if f.name in ("photo", "video") and isinstance(value, list):
         return frozenset(str(v).lower().lstrip(".") for v in value)
+    # codec_weights: a TOML table → {codec (lower): weight (float)}. Merge onto the
+    # defaults so a partial user override doesn't drop the built-in codecs.
+    if f.name == "codec_weights" and isinstance(value, dict):
+        merged = dict(DEFAULT_CODEC_WEIGHTS)
+        for k, v in value.items():
+            try:
+                merged[str(k).lower()] = float(v)
+            except (TypeError, ValueError):
+                log.warning("bad codec weight [%s] %s=%r — ignored", dotted, k, v)
+        return merged
     if f.type in ("bool", bool):
         return bool(value)
     if f.type in ("int", int):

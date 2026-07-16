@@ -137,6 +137,11 @@ class Fingerprint:
     captured_at: str | None = None
     undecodable: bool = False
     decode_error: str | None = None
+    #: Photo detail estimate (§8 B stage-2 keep-lead): zlib size of the full-res
+    #: horizontal pixel residual. Higher = more retained detail. Photos only.
+    detail_score: int | None = None
+    #: Video codec name (h264|hevc|av1|…) for the §8 B video keep-lead weight. Video only.
+    codec: str | None = None
     # photo perceptual
     phash_bits: bytes | None = None
     phash_quality: int | None = None
@@ -234,7 +239,7 @@ def _downscale_for_pdq(arr, max_edge: int):
     """Return ``arr`` shrunk so its longest edge ≤ ``max_edge`` (or unchanged).
 
     PDQ on a full-resolution ~12MP array is ~7x slower than on a 512px copy while
-    the hash drifts only ~7/256 bits (well inside ``t_match_photo``); downscaling
+    the hash drifts only ~7/256 bits (well inside ``t_photo_edit``); downscaling
     also normalizes away JPEG recompression noise, so near-dup recall is unchanged.
     A LANCZOS (antialiasing) resize is essential — a naive subsample would alias
     and *hurt* the hash. ``max_edge<=0`` disables (hash full-res). This copies, so
@@ -252,6 +257,43 @@ def _downscale_for_pdq(arr, max_edge: int):
     img = Image.fromarray(arr)
     img.thumbnail((max_edge, max_edge), Image.LANCZOS)
     return np.ascontiguousarray(np.asarray(img))
+
+
+def _detail_score(arr) -> int:
+    r"""Estimate retained photo detail from the full-res RGB array (§8 B stage-2 keep-lead).
+
+    The measure: zlib-compress the **horizontal pixel residual** (each pixel minus its
+    left neighbour — the PNG "Sub" filter) and return the byte count. Rationale:
+    - **Decoding to pixels first** makes it codec-fair — a PNG-of-a-JPEG decodes to the
+      same pixels as the JPEG, so it scores the same (not inflated by the fat PNG file);
+      a HEIC original decodes to genuinely more detail than its JPEG re-export.
+    - **The residual** isolates local high-frequency content — exactly what lossy
+      compression smooths away — so the score tracks *retained detail*, not scene
+      busyness. Heavily compressed → small residuals → small score.
+
+    Deterministic + version-stable (zlib's deflate format is frozen, ``level=1`` for
+    speed), so a score stored last scan is comparable to one computed today. Compared
+    **only within a resolution tier** by dedup, so the raw byte count needs no
+    normalization. Never raises (returns 0 on any failure) — it's an advisory hint.
+
+    NOTE (why a lossless-format tier sits ABOVE this in dedup's ranking): JPEG blocking
+    artifacts are themselves high-frequency, so a mildly-compressed JPEG can score
+    *higher* than a pristine lossless master of the same image. detail_score is
+    therefore trusted only to rank *within* a lossy/lossless tier, never across it
+    (§8 B). We still compute it uniformly here; dedup applies the tiering.
+    """
+    import zlib
+
+    import numpy as np
+
+    try:
+        a = np.ascontiguousarray(arr)
+        if a.ndim < 2 or a.shape[1] < 2:
+            return 0
+        residual = (a[:, 1:].astype(np.int16) - a[:, :-1].astype(np.int16)).astype(np.int8)
+        return len(zlib.compress(residual.tobytes(), 1))
+    except Exception:  # noqa: BLE001 - an advisory hint must never break a scan
+        return 0
 
 
 def _pdq(arr, *, max_edge: int = 0, medium: str = "photo", profiler=NULL_PROFILER) -> tuple[bytes, int]:
@@ -273,15 +315,16 @@ def _pdq(arr, *, max_edge: int = 0, medium: str = "photo", profiler=NULL_PROFILE
 
 def _probe_video(
     path: str, cfg: VideoConfig, *, max_edge: int = 0, profiler=NULL_PROFILER
-) -> tuple[float | None, int | None, int | None, str | None, list[FrameSig]]:
-    """Decode a video: return ``(duration_s, width, height, captured_at, frames)`` (§5.3).
+) -> tuple[float | None, int | None, int | None, str | None, str | None, list[FrameSig]]:
+    """Decode a video: return ``(duration_s, width, height, captured_at, codec, frames)`` (§5.3).
 
     Samples ``cfg.sample_frames`` frames at segment midpoints ``t_k = dur·(k+0.5)/N``.
     For each target time we seek to the preceding keyframe then decode forward to
     the first frame at/after the target (seek lands on a keyframe, not the exact
     pts). Per-frame PDQ + quality is stored for *every* decoded frame; the
     ``min_frame_quality`` gate is a *matching*-time filter (M3), not a scan-time
-    drop (§5.3: frames are "stored, but flagged").
+    drop (§5.3: frames are "stored, but flagged"). ``codec`` is the video stream's
+    codec name (``h264``/``hevc``/``av1``/…) for the §8 B video keep-lead weight.
     """
     import av  # type: ignore
 
@@ -294,6 +337,7 @@ def _probe_video(
         tb = vs.time_base
         width = vs.codec_context.width or None
         height = vs.codec_context.height or None
+        codec = (vs.codec_context.name or None) if vs.codec_context else None
         if vs.duration and tb:
             duration_s = float(vs.duration * tb)
         elif container.duration:
@@ -312,7 +356,7 @@ def _probe_video(
             if arr is not None:
                 bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
                 frames.append(FrameSig(0, 0.0, bits, q))
-            return duration_s, width, height, captured_at, frames
+            return duration_s, width, height, captured_at, codec, frames
 
         for k in range(n):
             t = duration_s * (k + 0.5) / n
@@ -334,7 +378,7 @@ def _probe_video(
                 continue
             bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
             frames.append(FrameSig(k, float(picked.pts * tb), bits, q))
-        return duration_s, width, height, captured_at, frames
+        return duration_s, width, height, captured_at, codec, frames
     finally:
         container.close()
 
@@ -398,12 +442,13 @@ def fill_perceptual(
     max_edge = config.match.pdq_max_edge
     try:
         if fp.media_type == "video":
-            duration_s, width, height, captured_at, frames = _probe_video(
+            duration_s, width, height, captured_at, codec, frames = _probe_video(
                 path, config.video, max_edge=max_edge, profiler=profiler
             )
             fp.duration_s = duration_s
             fp.width, fp.height = width, height
             fp.captured_at = captured_at
+            fp.codec = codec
             if not frames:
                 raise RuntimeError("no decodable frames")
             fp.frames = frames
@@ -413,6 +458,12 @@ def fill_perceptual(
             arr, captured_at = _decode_still(path, data=data, profiler=profiler)
             fp.height, fp.width = int(arr.shape[0]), int(arr.shape[1])
             fp.captured_at = captured_at
+            # Detail score on the FULL-RES array (before PDQ downscales its own copy —
+            # detail lives in the high frequencies the downscale low-passes away). §8 B.
+            # Timed in its own `detail` bucket (pure CPU: residual + zlib) so --profile
+            # shows the keep-lead cost separately from PDQ.
+            with profiler.timer("photo", "detail"):
+                fp.detail_score = _detail_score(arr)
             bits, quality = _pdq(arr, max_edge=max_edge, medium="photo", profiler=profiler)
             fp.phash_bits, fp.phash_quality = bits, quality
     except Exception as exc:  # noqa: BLE001 - undecodable: keep the hash, flag it (§9.1)
