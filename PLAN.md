@@ -1314,10 +1314,16 @@ blowup.
      so the group's medium picks the ranking key; both lead with **resolution** (`width·height`) — a
      downscaled re-export loses outright:
      - **Photo:** resolution → **lossless-format tier** (a `png`/`tif`/`tiff`/`bmp`/RAW original
-       outranks a lossy `jpg`/`heic`/`webp`/`avif` sibling) → **`detail_score`** (step 8) → file
+       outranks a lossy `jpg`/`heic`/`webp`/`avif` sibling) → **`detail_score` band** (step 8) → file
        `size` → stable path. *Why the lossless tier sits above `detail_score`:* JPEG blocking
        artifacts are high-frequency, so a mildly-recompressed JPEG can score a *higher* `detail_score`
        than a pristine lossless master — `detail_score` is trusted only *within* a lossy/lossless tier.
+       *Why `detail_score` is banded (`detail_tie_pct`, default 15%) with `size` breaking the tie:*
+       within a lossy tier the residual-entropy measure is **noisy in the high-quality band** — a
+       slightly-more-compressed copy can score marginally higher — so near-equal `detail_score`s tie
+       and file `size` (the clean monotonic quality proxy at fixed resolution+format) decides; heavy
+       compression still spans bands, so `detail_score` separates it. Symmetric with the video
+       effective-bitrate band below.
      - **Video:** resolution → **effective-bitrate band** → **codec-efficiency weight** → stable path.
        Effective bitrate = `size / duration_s × codec_weight` (`match.codec_weights`, §9.2): a
        more-efficient codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
@@ -1814,6 +1820,7 @@ t_photo_edit       = 32    # photo PDQ match cutoff (§5.3); recompress < d ≤ 
 t_match_video      = 90    # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
 pdq_max_edge       = 512   # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
 video_bitrate_tie_pct = 10.0  # video keep-lead (§8 B): effective-bitrates within this % tie → codec then path
+detail_tie_pct     = 15.0  # photo keep-lead (§8 B): detail_scores within this % tie → file size then path decide
 # codec-efficiency weights for the video keep-lead effective bitrate (§8 B); unlisted codec → 1.0
 [match.codec_weights]
 h264 = 1.0
@@ -1841,7 +1848,7 @@ retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune olde
 ```
 
 > **Defaults marked tuning-dependent** (`t_photo_recompress`, `t_photo_edit`, `t_match_video`, the
-> `video.*` knobs, and the keep-lead `codec_weights` / `video_bitrate_tie_pct`) are **starting points
+> `video.*` knobs, and the keep-lead `codec_weights` / `video_bitrate_tie_pct` / `detail_tie_pct`) are **starting points
 > to be calibrated on real data before the first full scan** (§5.3, §8 B, §14 #1) — not
 > claimed-correct constants. `mtime_tolerance_s`, `allowlist.raw`, `smb.scan_workers`, and
 > `review.low_quality_hint` are ordinary operational settings.
@@ -2087,8 +2094,8 @@ Conventions differ by stage: `_exact_dup_to_delete\` is default-DELETE (remove a
 `_suspect_recompression\` and `_with_minor_edits\` are default-KEEP (remove a shortcut to DELETE).
 Stage 1 keeps oldest-mtime internally / drops all when an external copy exists; stages 2–3 stage
 near-dup members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2,
-packrat marks the least-compressed photo member `_suggested` (resolution → lossless → detail_score →
-size) as a keep-hint — advisory only; default still KEEP.
+packrat marks the least-compressed photo member `_suggested` (resolution → lossless → detail_score
+band → size) as a keep-hint — advisory only; default still KEEP.
 ```
 
 ### `packrat merge`

@@ -29,10 +29,10 @@ def _rank(**by_id):
     return out
 
 
-def test_bitrate_band_ties_within_pct():
-    assert dedup._bitrate_band(4.0, 10.0) == dedup._bitrate_band(4.3, 10.0)   # within 10%
-    assert dedup._bitrate_band(4.0, 10.0) != dedup._bitrate_band(8.0, 10.0)   # 2x apart
-    assert dedup._bitrate_band(0.0, 10.0) == -1                                # sentinel
+def test_log_band_ties_within_pct():
+    assert dedup._log_band(4.0, 10.0) == dedup._log_band(4.3, 10.0)   # within 10%
+    assert dedup._log_band(4.0, 10.0) != dedup._log_band(8.0, 10.0)   # 2x apart
+    assert dedup._log_band(0.0, 10.0) == -1                            # sentinel
 
 
 def test_effective_bitrate_weight_and_duration_fallback():
@@ -104,6 +104,76 @@ def test_video_lead_config_weights_override():
     )
     # Equal raw bitrate; with h264 weighted higher, asset 2 wins.
     assert dedup._pick_lead(m, rank, flipped) == 2
+
+
+# ---------------------------------------------------------------------------
+# photo keep-lead (§8 B): resolution → lossless tier → detail_score BAND → size
+# ---------------------------------------------------------------------------
+def _photo_members(*ids, ext="jpg"):
+    return [(i, {"fid": i, "root_id": 1, "path": f"C:\\lib\\{i}.{ext}"}) for i in ids]
+
+
+def _photo_rank(**by_id):
+    out = {}
+    for aid, d in by_id.items():
+        r = {"media_type": "photo", "width": None, "height": None, "size": None,
+             "detail_score": None, "duration_s": None, "codec": None}
+        r.update(d)
+        out[int(aid)] = r
+    return out
+
+
+def test_photo_lead_size_breaks_detail_tie():
+    """Near-equal detail_scores (within detail_tie_pct) tie → file size decides (§8 B).
+
+    This is the high-quality-band flip fix: a slightly-more-compressed copy can score
+    a marginally HIGHER detail_score (JPEG blocking is high-freq), so within the band
+    the larger FILE — the clean monotonic quality proxy — must win, not raw detail.
+    """
+    cfg = Config()  # detail_tie_pct = 15
+    m = _photo_members(1, 2)
+    # Asset 2 has a hair-higher detail (noise) but asset 1 is the larger, less-
+    # compressed file. Within 15% → same band → size picks asset 1.
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 620_000, "detail_score": 554_000},
+           "2": {"width": 4000, "height": 3000, "size": 416_000, "detail_score": 558_000}},
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # larger file wins the tie, not higher detail
+
+
+def test_photo_lead_detail_separates_heavy_compression():
+    """When detail_scores are far apart (>tie_pct), detail_score still decides (§8 B)."""
+    cfg = Config()
+    m = _photo_members(1, 2)
+    # Heavy compression drops detail well outside the band → higher detail wins even
+    # though (here) it's also the bigger file; the point is detail still separates.
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 600_000, "detail_score": 550_000},
+           "2": {"width": 4000, "height": 3000, "size": 165_000, "detail_score": 400_000}},
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1
+
+
+def test_photo_lead_lossless_tier_above_detail_band():
+    """A lossless master outranks a lossy sibling regardless of detail/size (§8 B)."""
+    cfg = Config()
+    m = [(1, {"fid": 1, "root_id": 1, "path": "C:\\lib\\1.png"}),   # lossless
+         (2, {"fid": 2, "root_id": 1, "path": "C:\\lib\\2.jpg"})]   # lossy, bigger + higher detail
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 300_000, "detail_score": 500_000},
+           "2": {"width": 4000, "height": 3000, "size": 900_000, "detail_score": 900_000}},
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # PNG master wins on the lossless tier
+
+
+def test_photo_lead_resolution_dominates():
+    cfg = Config()
+    m = _photo_members(1, 2)
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 100_000, "detail_score": 100_000},
+           "2": {"width": 2000, "height": 1500, "size": 900_000, "detail_score": 900_000}},
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # higher resolution wins outright
 
 
 # ---------------------------------------------------------------------------

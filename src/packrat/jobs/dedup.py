@@ -415,9 +415,15 @@ def _pick_lead(members, rank, config):
     (a downscaled re-export loses outright); a member with no rank row sorts last.
 
     - **Photo** (best first, all DESC): pixels → lossless-format tier → `detail_score`
-      → file size. The lossless tier sits ABOVE `detail_score` because JPEG blocking
-      artifacts can inflate `detail_score` above a pristine master, so `detail_score`
-      is trusted only WITHIN a lossy/lossless tier.
+      BAND → file size. The lossless tier sits ABOVE `detail_score` because JPEG
+      blocking artifacts can inflate `detail_score` above a pristine master, so
+      `detail_score` is trusted only WITHIN a lossy/lossless tier. Within that tier
+      `detail_score` is *banded* (`detail_tie_pct`): the residual-entropy measure is
+      noisy in the high-quality band (a slightly-more-compressed copy can score
+      higher), so near-equal scores tie and **file size** — the clean monotonic
+      quality proxy at fixed resolution+format — breaks the tie. Heavy compression
+      still spans bands, so `detail_score` separates it. (Symmetric with video's
+      bitrate band below.)
     - **Video** (best first, all DESC): pixels → effective-bitrate BAND → codec weight.
       Effective bitrate = `size/duration_s × codec_weight` (§8 B): a more-efficient
       codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
@@ -432,9 +438,10 @@ def _pick_lead(members, rank, config):
         r = rank.get(aid, {})
         pixels = (r.get("width") or 0) * (r.get("height") or 0)
         lossless = 1 if ext_of(inst["path"]) in _LOSSLESS_PHOTO_EXTS else 0
-        detail = r.get("detail_score") or -1
+        detail = r.get("detail_score") or 0
+        band = _log_band(detail, config.match.detail_tie_pct)
         size = r.get("size") or 0
-        return (pixels, lossless, detail, size)
+        return (pixels, lossless, band, size)
 
     def video_key(item):
         aid, _inst = item
@@ -442,7 +449,7 @@ def _pick_lead(members, rank, config):
         pixels = (r.get("width") or 0) * (r.get("height") or 0)
         weight = config.match.codec_weights.get((r.get("codec") or "").lower(), 1.0)
         eff = _effective_bitrate(r.get("size"), r.get("duration_s"), weight)
-        band = _bitrate_band(eff, config.match.video_bitrate_tie_pct)
+        band = _log_band(eff, config.match.video_bitrate_tie_pct)
         return (pixels, band, weight)
 
     # A group is homogeneous; sample any member's media type.
@@ -469,18 +476,20 @@ def _effective_bitrate(size, duration_s, weight: float) -> float:
     return size * weight  # no duration → raw size (still weighted); consistent within a group
 
 
-def _bitrate_band(eff: float, tie_pct: float) -> int:
-    """Quantize an effective bitrate to a log-scale band so ~equal values tie (§8 B).
+def _log_band(value: float, tie_pct: float) -> int:
+    """Quantize a value to a log-scale band so ~equal values tie (§8 B keep-lead).
 
-    Two bitrates within ``tie_pct`` percent land in the same band → the codec weight
-    (then path) decides, instead of a coin-flip on a noisy diff. Log scale so "within
-    X%" means the same at any magnitude. ``eff<=0`` → a sentinel low band.
+    Two values within ``tie_pct`` percent land in the same band → the next ranking
+    key decides, instead of a coin-flip on a noisy diff. Log scale so "within X%"
+    means the same at any magnitude. ``value<=0`` → a sentinel low band. Shared by
+    the video keep-lead (effective bitrate → codec weight breaks the tie) and the
+    photo keep-lead (detail_score → file size breaks the tie).
     """
     import math
 
-    if eff <= 0 or tie_pct <= 0:
+    if value <= 0 or tie_pct <= 0:
         return -1
-    return round(math.log(eff) / math.log(1.0 + tie_pct / 100.0))
+    return round(math.log(value) / math.log(1.0 + tie_pct / 100.0))
 
 
 def _asset_rank_fields(db, asset_ids):
@@ -913,6 +922,7 @@ def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
             "t_photo_recompress": cfg.match.t_photo_recompress, "t_photo_edit": cfg.match.t_photo_edit,
             "t_match_video": cfg.match.t_match_video, "low_quality_hint": cfg.review.low_quality_hint,
             "video_bitrate_tie_pct": cfg.match.video_bitrate_tie_pct,
+            "detail_tie_pct": cfg.match.detail_tie_pct,
             "codec_weights": cfg.match.codec_weights,
             "video": {"sample_frames": cfg.video.sample_frames,
                       "frame_match_fraction": cfg.video.frame_match_fraction,

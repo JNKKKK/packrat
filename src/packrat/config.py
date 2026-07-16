@@ -95,6 +95,15 @@ class MatchConfig:
     #: (log-scale bucket), so the codec-efficiency weight then the path decide — not a
     #: coin-flip on a noisy bitrate diff. Resolution is ranked above this either way.
     video_bitrate_tie_pct: float = 10.0
+    #: photo keep-lead (§8 B): two detail_scores within this percent are a "tie"
+    #: (same log-scale bucket), so file size then the path decide. detail_score is a
+    #: residual-entropy estimate that JPEG blocking makes noisy in the high-quality
+    #: band (a slightly-more-compressed copy can score higher), so within a tier
+    #: near-equal scores must NOT decide the lead on their own — file size is the clean
+    #: monotonic quality proxy at fixed resolution+format. Wider than the video tie
+    #: (the residual flip band is ~1-1.5%, but needs ~15% banding to fully absorb —
+    #: calibrate on real data, §14 #1). Resolution + lossless tier rank above this.
+    detail_tie_pct: float = 15.0
     #: codec-efficiency weights for the video keep-lead effective bitrate (see above).
     codec_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CODEC_WEIGHTS))
 
@@ -200,6 +209,7 @@ t_photo_edit       = 32  # photo PDQ match cutoff (§5.3); recompress < d ≤ ed
 t_match_video      = 90  # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
 pdq_max_edge       = 512 # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
 video_bitrate_tie_pct = 10.0  # video keep-lead (§8 B): effective-bitrates within this % tie → codec then path decide
+detail_tie_pct        = 15.0  # photo keep-lead (§8 B): detail_scores within this % tie → file size then path decide
 
 # Codec-efficiency weights for the video keep-lead's effective bitrate (§8 B): size/duration × weight.
 # A more-efficient codec's bits are worth more (higher weight), so an HEVC master beats an H.264
