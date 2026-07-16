@@ -39,10 +39,15 @@ def status_snapshot() -> dict:
             "WHERE status='interrupted' ORDER BY id DESC LIMIT 20"
         ).fetchall()
         pending_reviews = conn.execute(
-            "SELECT rr.id, rr.root_id, rr.run_type, rr.created_at, r.name root_name "
+            "SELECT rr.id, rr.root_id, rr.run_type, rr.stage, rr.created_at, r.name root_name "
             "FROM review_runs rr JOIN roots r ON r.id = rr.root_id "
             "WHERE rr.status='pending'"
         ).fetchall()
+        pending_list = []
+        for r in pending_reviews:
+            d = dict(r)
+            d["counts"] = _review_counts(conn, r["id"], r["run_type"], r["stage"])
+            pending_list.append(d)
         return {
             "assets": assets,
             "photos": photos,
@@ -50,7 +55,7 @@ def status_snapshot() -> dict:
             "trashed": trashed,
             "running": dict(running) if running else None,
             "interrupted": [dict(r) for r in interrupted],
-            "pending_reviews": [dict(r) for r in pending_reviews],
+            "pending_reviews": pending_list,
             "roots": roots_snapshot(),
         }
     finally:
@@ -126,9 +131,16 @@ def root_detail(root_arg: str) -> dict | None:
         ).fetchone()
         instances, last_scan_at = row["c"], row["last_scan_at"]
         pending = conn.execute(
-            "SELECT id, run_type, created_at FROM review_runs WHERE root_id=? AND status='pending'",
+            "SELECT id, run_type, stage, created_at FROM review_runs "
+            "WHERE root_id=? AND status='pending'",
             (rid,),
         ).fetchone()
+        pending_dict = None
+        if pending is not None:
+            pending_dict = dict(pending)
+            pending_dict["counts"] = _review_counts(
+                conn, pending["id"], pending["run_type"], pending["stage"]
+            )
         # Most-recent persisted scan result for this root + its problem files, so
         # `status <root>` can re-render the last scan's banner + undecodable/error
         # paths (the §scan-results read path). Newest by job_id.
@@ -151,12 +163,89 @@ def root_detail(root_arg: str) -> dict | None:
             "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
-            "pending_review": dict(pending) if pending else None,
+            "pending_review": pending_dict,
             "last_scan": dict(last_scan) if last_scan is not None else None,
             "problem_files": problem_files,
         }
     finally:
         conn.close()
+
+
+def _resolve_root_ro(conn, root_arg: str):
+    """Resolve ``root_arg`` (path-then-name, §11) against an open RO connection."""
+    from . import fsutil
+
+    rows = conn.execute("SELECT * FROM roots").fetchall()
+    canon = fsutil.canonicalize(root_arg)
+    for r in rows:
+        if fsutil.paths_equal(canon, r["path"]):
+            return r
+    for r in rows:
+        if r["name"].lower() == root_arg.lower():
+            return r
+    return None
+
+
+def cleanup_exact_preview(root_arg: str) -> dict | None:
+    """Count a library root's files whose content is **trashed** (exact hash, §6.2).
+
+    Backs the CLI's default-``cleanup`` typed confirmation — the count the user
+    approves before the apply job deletes. Read-only + post-refresh-stable (the
+    preview job commits the refresh before this runs). ``network`` is how many of
+    those files sit on a non-recyclable network share (deleted permanently, §10).
+    Returns ``None`` if the root doesn't resolve; raises nothing on a trash root
+    (the caller/handler rejects that separately).
+    """
+    conn = _ro()
+    try:
+        match = _resolve_root_ro(conn, root_arg)
+        if match is None:
+            return None
+        rows = conn.execute(
+            "SELECT fi.path FROM file_instances fi JOIN assets a ON a.id=fi.asset_id "
+            "WHERE fi.root_id=? AND a.status='trashed'",
+            (match["id"],),
+        ).fetchall()
+        from . import fsutil
+
+        network = sum(1 for r in rows if fsutil.is_network_path(r["path"]))
+        return {"root_id": match["id"], "name": match["name"], "kind": match["kind"],
+                "count": len(rows), "network": network}
+    finally:
+        conn.close()
+
+
+def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
+    """Actionable count breakdown for a pending review run's *current* stage (§11).
+
+    Scoped to ``stage`` (the run's cursor) so the numbers reflect what is **still
+    pending**, not the whole run's history — a dedup run mid-sequence keeps its
+    already-confirmed earlier-stage ``review_actions`` rows (dedup never deletes
+    them), so counting all rows would report already-deleted exact dups as still
+    "to delete". Cleanup is single-stage (``stage=1``) so the filter is a no-op there.
+
+    - **dedup:** ``{to_delete_exact, groups, members}`` — for the current stage:
+      exact deletions (stage 1) or near-dup group/member totals (stages 2/3).
+    - **cleanup-perceptual:** ``{exact, perceptual}`` — exact-trash matches (delete on
+      confirm) + staged perceptual candidates.
+    """
+    if stage is None:
+        rows = conn.execute(
+            "SELECT kind, group_no FROM review_actions WHERE run_id=?", (run_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT kind, group_no FROM review_actions WHERE run_id=? AND stage=?",
+            (run_id, stage),
+        ).fetchall()
+    if run_type == "dedup":
+        exact = sum(1 for r in rows if r["kind"] == "exact")
+        groups = {r["group_no"] for r in rows if r["kind"] == "perceptual" and r["group_no"] is not None}
+        members = sum(1 for r in rows if r["kind"] == "perceptual")
+        return {"to_delete_exact": exact, "groups": len(groups), "members": members}
+    exact = sum(1 for r in rows if r["kind"] == "exact")
+    perceptual = sum(1 for r in rows if r["kind"] == "perceptual")
+    return {"exact": exact, "perceptual": perceptual}
 
 
 def recent_jobs(limit: int = 20) -> list[dict]:

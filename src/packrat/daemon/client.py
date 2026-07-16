@@ -174,6 +174,50 @@ class DaemonClient:
             raise DaemonError(f"{r.status_code}: {r.text}")
         return int(r.json()["job_id"])
 
+    def submit_cleanup(
+        self,
+        folder: str,
+        *,
+        perceptual: bool = False,
+        confirm: bool = False,
+        cancel: bool = False,
+        dry_run: bool = False,
+        apply: bool = False,
+    ) -> int:
+        """Submit a cleanup job (§6.2); returns the job id. Raises :class:`BusyResponse`."""
+        r = self._raw_post(
+            "/cleanup",
+            {"root": folder, "perceptual": perceptual, "confirm": confirm,
+             "cancel": cancel, "dry_run": dry_run, "apply": apply},
+        )
+        if r.status_code == 409:
+            raise BusyResponse(r.json())
+        if r.status_code >= 400:
+            raise DaemonError(f"{r.status_code}: {r.text}")
+        return int(r.json()["job_id"])
+
+    def cleanup_preview(self, folder: str) -> dict:
+        """Read-only exact-trash count for the default-cleanup confirm (§6.2)."""
+        return self._get(f"/cleanup/preview?root={folder}")
+
+    def submit_trash_refresh(self) -> int:
+        """Submit a ``trash refresh`` job (§6.1); returns the job id."""
+        r = self._raw_post("/trash/refresh", {})
+        if r.status_code == 409:
+            raise BusyResponse(r.json())
+        if r.status_code >= 400:
+            raise DaemonError(f"{r.status_code}: {r.text}")
+        return int(r.json()["job_id"])
+
+    def submit_untrash(self, path: str, *, dry_run: bool = False) -> int:
+        """Submit an ``untrash`` job (§6.3); returns the job id."""
+        r = self._raw_post("/untrash", {"path": path, "dry_run": dry_run})
+        if r.status_code == 409:
+            raise BusyResponse(r.json())
+        if r.status_code >= 400:
+            raise DaemonError(f"{r.status_code}: {r.text}")
+        return int(r.json()["job_id"])
+
     # -- snapshots -------------------------------------------------------
     def status(self, root: str | None = None) -> dict:
         if root:

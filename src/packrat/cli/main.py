@@ -41,6 +41,9 @@ app.add_typer(daemon_app, name="daemon")
 roots_app = typer.Typer(help="Manage roots: register + list (§8 A1, §11).", invoke_without_command=True)
 app.add_typer(roots_app, name="roots")
 
+trash_app = typer.Typer(help="Trash memory: refresh the trash folders (§6.1).")
+app.add_typer(trash_app, name="trash")
+
 # Dev-only commands are registered ONLY in a dev build (source checkout or
 # $PACKRAT_DEV) — a release/wheel install never sees the `dev` group at all.
 dev_app = typer.Typer(help="Dev-only helpers (hidden in release builds).")
@@ -177,7 +180,10 @@ def status(
         typer.echo(f"  last full scan: {_short_ts(d['last_full_scan_at']) if d['last_full_scan_at'] else 'never'}")
         if d.get("pending_review"):
             pr = d["pending_review"]
-            typer.echo(f"  ⚠ {pr['run_type']} pending since {pr['created_at']} — --confirm/--cancel to free the root.")
+            typer.echo(f"  ⚠ {pr['run_type']} pending since {pr['created_at']} — "
+                       f"{_review_count_summary(pr)}")
+            typer.echo(f"    review: {d['path']}\\_packrat_review\\ · "
+                       f"`packrat {_review_verb(pr)} {d['name']} --confirm` (or --cancel).")
         _print_last_scan(d)
         return
     snap = client.status()
@@ -202,7 +208,8 @@ def status(
         rj = snap["running"]
         typer.echo(f"running: {rj['type']} ({rj['done']}/{rj['total']})")
     for pr in snap.get("pending_reviews", []):
-        typer.echo(f"⚠ {pr['run_type']} pending on {pr['root_name']} — --confirm/--cancel to free it.")
+        typer.echo(f"⚠ {pr['run_type']} pending on {pr['root_name']} — {_review_count_summary(pr)} "
+                   f"(`packrat {_review_verb(pr)} {pr['root_name']} --confirm`/--cancel).")
     for it in snap.get("interrupted", []):
         typer.echo(f"⚠ interrupted: {it['type']} — re-run its command to resume.")
 
@@ -382,6 +389,167 @@ def dedup(
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
 
 
+# ---------------------------------------------------------------------------
+# cleanup — remove trashed content from a library folder (§6.2)
+# ---------------------------------------------------------------------------
+@app.command("cleanup")
+def cleanup(
+    folder: str = typer.Argument(..., help="A registered library root to clean (path or --name)."),
+    perceptual: bool = typer.Option(False, "--perceptual", help="Also stage recompressed-trash matches for review (§6.2)."),
+    confirm: bool = typer.Option(False, "--confirm", help="Apply a pending --perceptual run (exact + still-staged perceptual)."),
+    cancel: bool = typer.Option(False, "--cancel", help="Discard the pending --perceptual run; delete nothing."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be deleted/staged; delete nothing (still refreshes trash)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the typed confirmation (default exact mode)."),
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    r"""Delete files in <folder> whose content matches something you've trashed (§6.2).
+
+    Default (exact hash): refresh trash → count → typed confirm → delete to Recycle Bin.
+    `--perceptual`: also catch recompressed trash copies, staged under
+    `<root>\_packrat_review\_perceptually_identified_trash\` for review (delete-default:
+    a staged shortcut WILL be deleted — remove it to spare), then `--confirm`/`--cancel`.
+    Refresh always runs for real, even under `--dry-run` (§6.1).
+    """
+    if confirm and cancel:
+        typer.echo("give --confirm or --cancel, not both.", err=True)
+        raise typer.Exit(2)
+    client = _client_or_spawn()
+
+    # Stateful --perceptual verbs (analyze / --confirm / --cancel) and any --dry-run,
+    # plus the perceptual analyze itself: submit one job and stream it.
+    if perceptual or confirm or cancel or dry_run:
+        label = ("cleanup --cancel" if cancel else "cleanup --confirm" if confirm
+                 else "cleanup --perceptual" if perceptual else "cleanup --dry-run")
+        try:
+            job_id = client.submit_cleanup(
+                folder, perceptual=perceptual, confirm=confirm, cancel=cancel, dry_run=dry_run
+            )
+        except BusyResponse as exc:
+            _print_busy(exc)
+            raise typer.Exit(1)
+        except DaemonError as exc:
+            typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
+            raise typer.Exit(1)
+        if detach:
+            typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
+            return
+        final = stream_job(client, job_id, label=label)
+        typer.echo(f"{label} {final}")
+        if json_out:
+            import json
+            typer.echo(json.dumps(client.get_job(job_id), indent=2))
+        return
+
+    # Default exact mode: preview (refresh + count) → typed confirm → apply.
+    try:
+        prev_job = client.submit_cleanup(folder)  # preview: refresh + report, act on nothing
+    except BusyResponse as exc:
+        _print_busy(exc)
+        raise typer.Exit(1)
+    except DaemonError as exc:
+        typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    prev_final = stream_job(client, prev_job, label="cleanup (refresh + preview)")
+    if prev_final != "done":
+        typer.echo(f"cleanup preview {prev_final} — not deleting.", err=True)
+        raise typer.Exit(1)
+
+    prev = client.cleanup_preview(folder)
+    n, n_net = prev["count"], prev.get("network", 0)
+    if n == 0:
+        typer.echo(f"cleanup {prev['name']}: no files match trashed content — nothing to delete.")
+        return
+    net = (f"\n  ⚠ {n_net} of them are on a network share and will be deleted PERMANENTLY "
+           f"(no Recycle Bin)." if n_net else "")
+    if not yes:
+        typer.echo(f"{n} file(s) in {prev['name']} match trashed content and will be moved to the "
+                   f"Recycle Bin.{net}")
+        ans = typer.prompt(f"Type the count ({n}) to confirm deletion")
+        if ans.strip() != str(n):
+            typer.echo("count mismatch — aborted, nothing deleted.")
+            raise typer.Exit(1)
+    try:
+        apply_job = client.submit_cleanup(folder, apply=True)
+    except BusyResponse as exc:
+        _print_busy(exc)
+        raise typer.Exit(1)
+    final = stream_job(client, apply_job, label="cleanup")
+    typer.echo(f"cleanup {final}")
+    if json_out:
+        import json
+        typer.echo(json.dumps(client.get_job(apply_job), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# trash — refresh the registered trash folders (§6.1)
+# ---------------------------------------------------------------------------
+@trash_app.command("refresh")
+def trash_refresh(
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    r"""Absorb whatever is in the registered trash folders into trash memory, then empty them (§6.1).
+
+    Fingerprints each trash-folder file, records/flips its asset to `trashed` (kept
+    forever), and moves the file to the Recycle Bin (permanent on NAS/SMB, §10). No
+    `--dry-run` — refresh is never a no-op (§6.1); browse the folders in Explorer first
+    to preview.
+    """
+    client = _client_or_spawn()
+    try:
+        job_id = client.submit_trash_refresh()
+    except BusyResponse as exc:
+        _print_busy(exc)
+        raise typer.Exit(1)
+    except DaemonError as exc:
+        typer.echo(f"cannot refresh trash: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if detach:
+        typer.echo("submitted trash refresh — running in the daemon; `packrat jobs` to check.")
+        return
+    final = stream_job(client, job_id, label="trash refresh")
+    typer.echo(f"trash refresh {final}")
+    if json_out:
+        import json
+        typer.echo(json.dumps(client.get_job(job_id), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# untrash — forget content from trash memory by presenting the file (§6.3)
+# ---------------------------------------------------------------------------
+@app.command("untrash")
+def untrash(
+    path: str = typer.Argument(..., help="A file (or folder, recursive) to hash — need NOT be a registered root."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be forgotten/reactivated; change nothing."),
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Forget content from the trashed-hash set so it's no longer excluded from merges (§6.3).
+
+    You present the file (packrat stores no pixels to preview); untrash hashes it and
+    matches by exact content hash. It does NOT restore bytes (that's the Recycle Bin)
+    and writes nothing to disk — only DB rows.
+    """
+    client = _client_or_spawn()
+    try:
+        job_id = client.submit_untrash(path, dry_run=dry_run)
+    except BusyResponse as exc:
+        _print_busy(exc)
+        raise typer.Exit(1)
+    except DaemonError as exc:
+        typer.echo(f"cannot untrash: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if detach:
+        typer.echo("submitted untrash — running in the daemon; `packrat jobs` to check.")
+        return
+    final = stream_job(client, job_id, label="untrash")
+    typer.echo(f"untrash {final}")
+    if json_out:
+        import json
+        typer.echo(json.dumps(client.get_job(job_id), indent=2))
+
+
 @app.command("cancel")
 def cancel(
     job_id: Optional[int] = typer.Argument(None, help="Job id (optional; defaults to the running job)."),
@@ -499,6 +667,25 @@ def _detail(exc: DaemonError) -> str:
         return json.loads(body).get("detail", msg)
     except (ValueError, TypeError):
         return msg
+
+
+def _review_verb(pr: dict) -> str:
+    """The CLI verb that confirms/cancels a pending review run (§11)."""
+    return "cleanup" if pr.get("run_type") == "cleanup-perceptual" else "dedup"
+
+
+def _review_count_summary(pr: dict) -> str:
+    """A one-line actionable count for a pending review run (§11 status).
+
+    dedup: ``N to delete (exact) · G groups / M members (near-dup, default-keep)``.
+    cleanup: ``X exact-trash (will delete) · P perceptual candidates (staged)``.
+    """
+    c = pr.get("counts") or {}
+    if pr.get("run_type") == "cleanup-perceptual":
+        return (f"{c.get('exact', 0)} exact-trash (will delete) · "
+                f"{c.get('perceptual', 0)} perceptual candidate(s) (staged)")
+    return (f"{c.get('to_delete_exact', 0)} to delete (exact) · "
+            f"{c.get('groups', 0)} group(s) / {c.get('members', 0)} member(s) (near-dup, default-keep)")
 
 
 def _scan_recency(r: dict) -> str:

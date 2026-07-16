@@ -414,6 +414,41 @@ def test_dedup_second_analyze_rejected_while_pending(queue_and_db, tmp_path):
     assert q.submit("dedup", {"root_id": root["id"], "cancel": True})
 
 
+def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
+    """`status` counts reflect the run's CURRENT stage, not all-time rows (§11).
+
+    A dedup run keeps its confirmed stage-1 `review_actions` rows after advancing, so
+    an unscoped count would report already-deleted exact dups as still 'to delete'.
+    """
+    q, database = queue_and_db
+    from packrat import queries
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    # A pending run advanced to stage 2, but with a leftover stage-1 exact action.
+    database.execute(
+        "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+        "VALUES (?, 'dedup', 'pending', 2, 'staged', 't')",
+        (root["id"],),
+    )
+    run_id = database.query_one("SELECT id FROM review_runs WHERE root_id=?", (root["id"],))["id"]
+    database.execute(
+        "INSERT INTO review_actions(run_id, stage, folder, kind, path) VALUES (?, 1, 'x', 'exact', 'p1')",
+        (run_id,),
+    )
+    database.execute(
+        "INSERT INTO review_actions(run_id, stage, folder, kind, path, group_no, member_no) "
+        "VALUES (?, 2, 'x', 'perceptual', 'p2', 1, 1)",
+        (run_id,),
+    )
+    d = queries.root_detail(str(lib))
+    counts = d["pending_review"]["counts"]
+    # Stage 2 is current → the stage-1 exact row is NOT counted as pending.
+    assert counts["to_delete_exact"] == 0
+    assert counts["members"] == 1 and counts["groups"] == 1
+
+
 def test_scan_blocked_on_root_with_pending_dedup(queue_and_db, tmp_path):
     q, database = queue_and_db
     lib = tmp_path / "lib"
