@@ -295,24 +295,12 @@ def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == files_before
 
 
-def test_scan_persists_detail_score_for_photos(queue_and_db, tmp_path):
-    q, database = queue_and_db
-    lib = tmp_path / "lib"
-    lib.mkdir()
-    _photo(lib / "a.png", 1)
-    root = register(database, str(lib))
-    _scan_root(q, database, root["id"])
-    row = database.query_one("SELECT media_type, detail_score FROM assets")
-    assert row["media_type"] == "photo"
-    assert row["detail_score"] is not None and row["detail_score"] > 0
-
-
 @win_only
 def test_dedup_stage2_marks_lossless_original_as_lead(queue_and_db, tmp_path):
     """Stage 2 suggests the lossless original over a same-resolution recompression (§8 B).
 
     A resize shifts PDQ into stage 3; the real stage-2 case is a same-resolution
-    recompression. The lossless-format tier must rank the PNG master above the JPEG."""
+    recompression. The format rank must rank the PNG master above the JPEG."""
     q, database = queue_and_db
     lib = lib = tmp_path / "lib"
     lib.mkdir()
@@ -325,14 +313,14 @@ def test_dedup_stage2_marks_lossless_original_as_lead(queue_and_db, tmp_path):
     assert run["stage"] == 2
     acts = {os.path.basename(a["path"]): a for a in _stage_actions(database, run["id"], 2)}
     assert set(acts) == {"master.png", "export.jpg"}
-    # The lossless PNG master is the suggested lead (lossless tier > detail_score).
+    # The lossless PNG master is the suggested lead (format rank: lossless > lossy).
     lead = acts["master.png"]
     assert lead["shortcut_name"].endswith("_suggested.lnk")
     assert not acts["export.jpg"]["shortcut_name"].endswith("_suggested.lnk")
     grp = _stage_dir(lib, 2)
     assert os.path.exists(os.path.join(grp, lead["shortcut_name"]))
     manifest = open(os.path.join(grp, "manifest.csv"), encoding="utf-8").read()
-    assert "suggested_lead" in manifest and "detail_score" in manifest
+    assert "suggested_lead" in manifest and "size" in manifest
 
 
 @win_only

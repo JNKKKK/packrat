@@ -21,13 +21,16 @@ from __future__ import annotations
 
 #: Bumped when the DDL changes. M0 ships v1; v2 adds scan_results +
 #: scan_problem_files (new tables only). v3 adds the M3 3-stage dedup columns
-#: (review_runs.stage/stage_phase, review_actions.stage). v4 adds assets.detail_score
-#: (the photo detail estimate for dedup stage-2 keep-lead, §8 B). v5 adds assets.codec
-#: (video codec, for the video keep-lead's codec-efficiency weight, §8 B). All of v3/v4/v5
-#: add columns to EXISTING tables, so — unlike v2's new tables — they need an idempotent
-#: ADD COLUMN pass in init_db (CREATE IF NOT EXISTS can't alter a table). See
-#: connection._migrate_columns.
-SCHEMA_VERSION = 5
+#: (review_runs.stage/stage_phase, review_actions.stage). v4 added assets.detail_score
+#: (a photo detail estimate for the keep-lead). v5 adds assets.codec (video codec, for
+#: the video keep-lead's codec-efficiency weight, §8 B). v6 **retires** detail_score —
+#: the photo keep-lead now ranks resolution → format rank → file size (§8 B), so a fresh
+#: DB no longer creates the column and _ADDED_COLUMNS no longer lists it. There is no
+#: DROP-column migration (SQLite lacks it pre-3.35 and we keep migrations additive), so
+#: an existing DB just keeps an unread dead column — harmless, nothing writes or reads it.
+#: v3/v4/v5 additions to EXISTING tables need an idempotent ADD COLUMN pass in init_db
+#: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns.
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -60,16 +63,12 @@ CREATE TABLE IF NOT EXISTS assets (
     status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'trashed')),
     undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels (§4)
     decode_error  TEXT,                       -- last decoder failure detail (debugging POC wheels)
-    detail_score  INTEGER,                    -- photo detail estimate: zlib size of the horizontal
-                                              --   pixel residual, ROW-SUBSAMPLED (media._DETAIL_ROW_STRIDE;
-                                              --   full-res was ~40% of scan CPU — strided reproduces the
-                                              --   ranking, §8 B stage-2 keep-lead). Higher = more retained
-                                              --   detail. Photos only (NULL for video/undecodable, and for
-                                              --   pre-v4 assets — NOT recomputed by `scan --full`, which
-                                              --   skips re-decoding a fully-fingerprinted hit; keep-lead
-                                              --   falls back to resolution→size when NULL). Compared only
-                                              --   WITHIN a near-dup group, so the strided-vs-full basis
-                                              --   change is advisory-safe (affects a suggestion, never a delete).
+    -- (v4 added assets.detail_score; DROPPED in v6 — the residual-entropy keep-lead
+    --  tiebreak cost ~40% of scan CPU yet, banded to tame its high-quality-JPEG noise,
+    --  only ever agreed with file size within a format. The photo keep-lead now ranks
+    --  resolution → format rank → file size, §8 B. A fresh DB never creates the column;
+    --  an existing DB keeps it as a harmless unread dead column — there is no DROP-column
+    --  migration mechanism, and nothing reads it.)
     codec         TEXT,                       -- video codec name (h264|hevc|av1|vp9|…) from the decode
                                               --   probe; VIDEO only (NULL for photo/undecodable). Feeds
                                               --   the video keep-lead's codec-efficiency weight (§8 B).

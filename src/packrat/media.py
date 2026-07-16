@@ -36,17 +36,6 @@ log = logging.getLogger("packrat.media")
 
 _HASH_CHUNK = 1 << 20  # 1 MiB streaming reads (§10.1 bandwidth-bound over SMB)
 
-#: Row-subsample factor for the detail_score residual (§8 B keep-lead). The score
-#: is the zlib size of the *horizontal* pixel residual, so it only needs enough rows
-#: to characterize the image's high-frequency content — every Nth row reproduces the
-#: full-res score curve within <1% (ranking behavior identical: measured across a
-#: q100→q50 recompression sweep) at ~1/N the cost. On a 48MP HEIC that turns a ~2.1s
-#: full-res residual+zlib into ~0.5s — detail_score was ~40% of scan CPU before this
-#: (profiled, all-photo NAS scan), grossly out of proportion for an advisory tiebreak
-#: that never gates or deletes. It samples ROWS (not columns) so the horizontal
-#: residual per kept row is unchanged — column-striding would corrupt the residual.
-_DETAIL_ROW_STRIDE = 4
-
 # PDQ hashes are 256 bits → 32 bytes packed (np.packbits). Stored as a BLOB.
 PDQ_BYTES = 32
 
@@ -148,9 +137,6 @@ class Fingerprint:
     captured_at: str | None = None
     undecodable: bool = False
     decode_error: str | None = None
-    #: Photo detail estimate (§8 B stage-2 keep-lead): zlib size of the full-res
-    #: horizontal pixel residual. Higher = more retained detail. Photos only.
-    detail_score: int | None = None
     #: Video codec name (h264|hevc|av1|…) for the §8 B video keep-lead weight. Video only.
     codec: str | None = None
     # photo perceptual
@@ -268,53 +254,6 @@ def _downscale_for_pdq(arr, max_edge: int):
     img = Image.fromarray(arr)
     img.thumbnail((max_edge, max_edge), Image.LANCZOS)
     return np.ascontiguousarray(np.asarray(img))
-
-
-def _detail_score(arr) -> int:
-    r"""Estimate retained photo detail from the full-res RGB array (§8 B stage-2 keep-lead).
-
-    The measure: zlib-compress the **horizontal pixel residual** (each pixel minus its
-    left neighbour — the PNG "Sub" filter) and return the byte count. Rationale:
-    - **Decoding to pixels first** makes it codec-fair — a PNG-of-a-JPEG decodes to the
-      same pixels as the JPEG, so it scores the same (not inflated by the fat PNG file);
-      a HEIC original decodes to genuinely more detail than its JPEG re-export.
-    - **The residual** isolates local high-frequency content — exactly what lossy
-      compression smooths away — so the score tracks *retained detail*, not scene
-      busyness. Heavily compressed → small residuals → small score.
-
-    Deterministic + version-stable (zlib's deflate format is frozen, ``level=1`` for
-    speed), so a score stored last scan is comparable to one computed today. Compared
-    **only within a resolution tier** by dedup, so the raw byte count needs no
-    normalization. Never raises (returns 0 on any failure) — it's an advisory hint.
-
-    NOTE (why a lossless-format tier sits ABOVE this in dedup's ranking): JPEG blocking
-    artifacts are themselves high-frequency, so a mildly-compressed JPEG can score
-    *higher* than a pristine lossless master of the same image. detail_score is
-    therefore trusted only to rank *within* a lossy/lossless tier, never across it
-    (§8 B). We still compute it uniformly here; dedup applies the tiering.
-
-    **Row-subsampled** (``_DETAIL_ROW_STRIDE``): the residual is *horizontal*, so
-    scoring every Nth row reproduces the full-res score curve within <1% at ~1/N the
-    cost — verified to leave the compression ranking (lossless > q95 > … > q50)
-    identical. This matters because a full-res residual+zlib on a 48MP HEIC is ~2.1s,
-    which profiled at ~40% of a whole (all-photo, NAS) scan's CPU — wildly
-    disproportionate for an advisory tiebreak. The absolute value changes scale (~÷N),
-    which is fine: dedup only compares detail_score *within* a near-dup group, and all
-    of a scan's photos are scored the same way. (A pre-existing NULL from before this
-    column still falls back to resolution→size; §8 B.)
-    """
-    import zlib
-
-    import numpy as np
-
-    try:
-        a = np.ascontiguousarray(arr[::_DETAIL_ROW_STRIDE])
-        if a.ndim < 2 or a.shape[1] < 2:
-            return 0
-        residual = (a[:, 1:].astype(np.int16) - a[:, :-1].astype(np.int16)).astype(np.int8)
-        return len(zlib.compress(residual.tobytes(), 1))
-    except Exception:  # noqa: BLE001 - an advisory hint must never break a scan
-        return 0
 
 
 def _pdq(arr, *, max_edge: int = 0, medium: str = "photo", profiler=NULL_PROFILER) -> tuple[bytes, int]:
@@ -479,12 +418,6 @@ def fill_perceptual(
             arr, captured_at = _decode_still(path, data=data, profiler=profiler)
             fp.height, fp.width = int(arr.shape[0]), int(arr.shape[1])
             fp.captured_at = captured_at
-            # Detail score on the FULL-RES array (before PDQ downscales its own copy —
-            # detail lives in the high frequencies the downscale low-passes away). §8 B.
-            # Timed in its own `detail` bucket (pure CPU: residual + zlib) so --profile
-            # shows the keep-lead cost separately from PDQ.
-            with profiler.timer("photo", "detail"):
-                fp.detail_score = _detail_score(arr)
             bits, quality = _pdq(arr, max_edge=max_edge, medium="photo", profiler=profiler)
             fp.phash_bits, fp.phash_quality = bits, quality
     except Exception as exc:  # noqa: BLE001 - undecodable: keep the hash, flag it (§9.1)

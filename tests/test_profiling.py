@@ -46,18 +46,6 @@ def test_report_has_photo_video_shared_sections():
     assert "1 photo · 1 video" in blob
 
 
-def test_detail_bucket_renders_in_photo_section():
-    # The keep-lead detail-score time is its own CPU bucket (§8 B), separate from pdq.
-    p = ScanProfiler()
-    p.add("photo", "pdq", 1.0)
-    p.add("photo", "detail", 0.5)
-    p.file_done("photo")
-    blob = "\n".join(p.report_lines())
-    assert "detail: keep-lead score" in blob
-    # It's flattened for persistence too.
-    assert p.snapshot_json()["secs"]["photo.detail"] == 0.5
-
-
 def test_bottleneck_verdict_io_bound():
     p = ScanProfiler()
     p.add("photo", "io", 1.0)

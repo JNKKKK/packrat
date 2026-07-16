@@ -277,10 +277,10 @@ def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_
     with db.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO assets(content_hash, media_type, size, width, height, duration_s, "
-            "captured_at, status, undecodable, decode_error, detail_score, codec, added_at) "
-            "VALUES (?,?,?,?,?,?,?, 'active', ?, ?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
+            "captured_at, status, undecodable, decode_error, codec, added_at) "
+            "VALUES (?,?,?,?,?,?,?, 'active', ?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
             (fp.content_hash, fp.media_type, fp.size, fp.width, fp.height, fp.duration_s,
-             fp.captured_at, 1 if fp.undecodable else 0, fp.decode_error, fp.detail_score,
+             fp.captured_at, 1 if fp.undecodable else 0, fp.decode_error,
              fp.codec, now_iso()),
         )
         created = cur.rowcount == 1
@@ -297,9 +297,9 @@ def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: medi
     with db.transaction() as conn:
         conn.execute(
             "UPDATE assets SET size=?, width=?, height=?, duration_s=?, captured_at=?, "
-            "undecodable=?, decode_error=?, detail_score=?, codec=? WHERE id=?",
+            "undecodable=?, decode_error=?, codec=? WHERE id=?",
             (fp.size, fp.width, fp.height, fp.duration_s, fp.captured_at,
-             1 if fp.undecodable else 0, fp.decode_error, fp.detail_score, fp.codec, asset_id),
+             1 if fp.undecodable else 0, fp.decode_error, fp.codec, asset_id),
         )
         conn.execute("DELETE FROM phash WHERE asset_id=?", (asset_id,))
         conn.execute("DELETE FROM vphash WHERE asset_id=?", (asset_id,))

@@ -16,8 +16,6 @@ def test_defaults_match_plan():
     # video keep-lead knobs (§8 B)
     assert c.match.video_bitrate_tie_pct == 10.0
     assert c.match.codec_weights["hevc"] == 2.0 > c.match.codec_weights["h264"] == 1.0
-    # photo keep-lead detail band (§8 B)
-    assert c.match.detail_tie_pct == 15.0
     assert c.video.sample_frames == 12
     assert c.video.frame_match_fraction == 0.60
     assert c.video.min_comparable_frames == 5

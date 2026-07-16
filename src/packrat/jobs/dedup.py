@@ -54,15 +54,11 @@ def _photo_format_rank(path: str) -> int:
     """Ordinal photo-format preference for the keep-lead (§8 B), best first.
 
     ``2`` lossless/original (png/tif/bmp/RAW) · ``1`` efficient-lossy (heic/heif/avif)
-    · ``0`` other lossy (jpg/webp/gif/…). Sits ABOVE ``detail_score`` in the ranking
-    key **on purpose**: ``detail_score`` is a residual-entropy measure that JPEG's 8×8
-    blocking *inflates*, so it is biased toward JPEG **across formats** — a HEIC master
-    scores *lower* detail than its JPEG export (measured). Ranking format first means
-    ``detail_score`` only ever discriminates *within* one format, where it is reliable;
-    the cross-format call (the HEIC-master-vs-JPEG-export trap) is made here by codec
-    efficiency instead. Accepted cost: a genuinely low-quality HEIC now outranks a
-    high-quality JPEG of the same scene, and a JPEG re-wrapped as HEIC beats its own
-    source — rare (HEIC is the original on iPhone), and advisory-only (never deletes).
+    · ``0`` other lossy (jpg/webp/gif/…). This is the **primary quality signal** after
+    resolution: at equal resolution a lossless copy is the master, and among lossy
+    copies a modern codec (HEIC/AVIF) packs more real detail per byte than JPEG, so an
+    iPhone HEIC original outranks its JPEG export. Below it, file size breaks ties
+    *within a single format* (see ``_pick_lead``).
     """
     ext = ext_of(path)
     if ext in _LOSSLESS_PHOTO_EXTS:
@@ -385,7 +381,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
     all_ids = {aid for c in clusters for aid in c}
     insts = _surviving_instances(db, all_ids, root_id)
     quals = _asset_qualities(db, all_ids)
-    rank = _asset_rank_fields(db, all_ids)  # pixels/detail_score/size/duration/codec/media_type
+    rank = _asset_rank_fields(db, all_ids)  # pixels/size/duration/codec/media_type
     hint = ctx.config.review.low_quality_hint
     folder = _STAGE_FOLDER[stage]
     # Suggest a keep-lead only in stage 2 (recompression: members are essentially the
@@ -423,7 +419,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
                 "is_external": inst["root_id"] != root_id, "distance": near_d,
                 "quality": my_q, "low_confidence": low_conf, "is_lead": is_lead,
                 "media_type": r.get("media_type"), "width": r.get("width"), "height": r.get("height"),
-                "detail_score": r.get("detail_score"), "size": r.get("size"),
+                "size": r.get("size"),
                 "duration_s": r.get("duration_s"), "codec": r.get("codec"),
                 "shortcut_name": f"group{group_no:04d}_{member_no:04d}{suffix}.lnk",
             })
@@ -437,18 +433,19 @@ def _pick_lead(members, rank, config):
     so the group's media type picks the ranking key. Both keys lead with **resolution**
     (a downscaled re-export loses outright); a member with no rank row sorts last.
 
-    - **Photo** (best first, all DESC): pixels → **format rank** → `detail_score` BAND
-      → file size. **Format rank** (lossless > efficient-lossy HEIC/AVIF > other lossy
-      JPEG/WebP) sits ABOVE `detail_score` because `detail_score` is a residual-entropy
-      measure that JPEG's 8×8 blocking *inflates* — so it is biased toward JPEG *across
-      formats* (a HEIC master scores lower detail than its JPEG export, measured). By
-      ranking format first, `detail_score` only ever discriminates *within* one format,
-      where it is reliable. Within a format it is *banded* (`detail_tie_pct`): the
-      measure is noisy in the high-quality band (a slightly-more-compressed copy can
-      score higher), so near-equal scores tie and **file size** — the clean monotonic
-      quality proxy at fixed resolution+format — breaks the tie. Heavy compression
-      still spans bands, so `detail_score` separates it. (Symmetric with video's
-      bitrate band + codec weight below.)
+    - **Photo** (best first, all DESC): pixels → **format rank** → file **size**.
+      *Resolution* first — a downscaled re-export loses outright. Then **format rank**
+      (`_photo_format_rank`: lossless > efficient-lossy HEIC/AVIF > other-lossy
+      JPEG/WebP), the primary quality signal at equal resolution — a lossless copy is
+      the master, and among lossy copies a modern codec packs more real detail per byte
+      than JPEG, so an iPhone HEIC original outranks its JPEG export. Finally, **within
+      one format** (where it is a clean monotonic quality proxy — at fixed
+      resolution+format the encoder's output size *is* the quality dial), the larger
+      **file size** wins. Size is used only *within* a format because it lies *across*
+      them (an efficient HEIC master is smaller than a bloated JPEG export), which is
+      exactly what the format rank above it handles. *(A prior residual-entropy
+      `detail_score` was dropped — it cost ~40% of scan CPU yet, banded to tame its
+      high-quality-JPEG noise, only ever agreed with size within a format; §8 B.)*
     - **Video** (best first, all DESC): pixels → effective-bitrate BAND → codec weight.
       Effective bitrate = `size/duration_s × codec_weight` (§8 B): a more-efficient
       codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
@@ -463,10 +460,8 @@ def _pick_lead(members, rank, config):
         r = rank.get(aid, {})
         pixels = (r.get("width") or 0) * (r.get("height") or 0)
         fmt = _photo_format_rank(inst["path"])
-        detail = r.get("detail_score") or 0
-        band = _log_band(detail, config.match.detail_tie_pct)
         size = r.get("size") or 0
-        return (pixels, fmt, band, size)
+        return (pixels, fmt, size)
 
     def video_key(item):
         aid, _inst = item
@@ -506,9 +501,9 @@ def _log_band(value: float, tie_pct: float) -> int:
 
     Two values within ``tie_pct`` percent land in the same band → the next ranking
     key decides, instead of a coin-flip on a noisy diff. Log scale so "within X%"
-    means the same at any magnitude. ``value<=0`` → a sentinel low band. Shared by
-    the video keep-lead (effective bitrate → codec weight breaks the tie) and the
-    photo keep-lead (detail_score → file size breaks the tie).
+    means the same at any magnitude. ``value<=0`` → a sentinel low band. Used by the
+    video keep-lead (effective bitrate → codec weight breaks the tie); the photo
+    keep-lead needs no band (format rank + file size are both clean signals, §8 B).
     """
     import math
 
@@ -518,20 +513,19 @@ def _log_band(value: float, tie_pct: float) -> int:
 
 
 def _asset_rank_fields(db, asset_ids):
-    """Load ranking fields for the keep-lead (§8 B): photo detail + video bitrate/codec."""
+    """Load ranking fields for the keep-lead (§8 B): photo format/size + video bitrate/codec."""
     if not asset_ids:
         return {}
     ph = ",".join("?" for _ in asset_ids)
     out: dict[int, dict] = {}
     for r in db.query(
-        f"SELECT id, media_type, width, height, size, detail_score, duration_s, codec "
+        f"SELECT id, media_type, width, height, size, duration_s, codec "
         f"FROM assets WHERE id IN ({ph})",
         tuple(asset_ids),
     ):
         out[int(r["id"])] = {"media_type": r["media_type"], "width": r["width"],
                              "height": r["height"], "size": r["size"],
-                             "detail_score": r["detail_score"], "duration_s": r["duration_s"],
-                             "codec": r["codec"]}
+                             "duration_s": r["duration_s"], "codec": r["codec"]}
     return out
 
 
@@ -731,7 +725,7 @@ def _write_manifest(stage, stage_dir, staged) -> None:
         with open(os.path.join(stage_dir, "manifest.csv"), "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["shortcut", "target_path", "asset_id", "group_no", "member_no",
-                        "suggested_lead", "media_type", "width", "height", "detail_score",
+                        "suggested_lead", "media_type", "width", "height",
                         "size", "duration_s", "codec", "bitrate",
                         "is_external", "distance", "quality", "low_confidence"])
             for a in staged:
@@ -740,7 +734,6 @@ def _write_manifest(stage, stage_dir, staged) -> None:
                             a.get("media_type") or "",
                             a.get("width") if a.get("width") is not None else "",
                             a.get("height") if a.get("height") is not None else "",
-                            a.get("detail_score") if a.get("detail_score") is not None else "",
                             a.get("size") if a.get("size") is not None else "",
                             a.get("duration_s") if a.get("duration_s") is not None else "",
                             a.get("codec") or "",
@@ -947,7 +940,6 @@ def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
             "t_photo_recompress": cfg.match.t_photo_recompress, "t_photo_edit": cfg.match.t_photo_edit,
             "t_match_video": cfg.match.t_match_video, "low_quality_hint": cfg.review.low_quality_hint,
             "video_bitrate_tie_pct": cfg.match.video_bitrate_tie_pct,
-            "detail_tie_pct": cfg.match.detail_tie_pct,
             "codec_weights": cfg.match.codec_weights,
             "video": {"sample_frames": cfg.video.sample_frames,
                       "frame_match_fraction": cfg.video.frame_match_fraction,
@@ -962,7 +954,7 @@ def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
                                    "instance_id", "path", "survivor_instance_id", "survivor_path",
                                    "group_no", "member_no", "is_external", "distance", "quality",
                                    "low_confidence", "is_lead", "media_type", "width", "height",
-                                   "detail_score", "size", "duration_s", "codec", "shortcut_name")}
+                                   "size", "duration_s", "codec", "shortcut_name")}
             for a in plan["actions"]
         ],
     }

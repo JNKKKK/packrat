@@ -23,7 +23,7 @@ def _rank(**by_id):
     out = {}
     for aid, d in by_id.items():
         r = {"media_type": "video", "width": None, "height": None, "size": None,
-             "detail_score": None, "duration_s": None, "codec": None}
+             "duration_s": None, "codec": None}
         r.update(d)
         out[int(aid)] = r
     return out
@@ -107,82 +107,21 @@ def test_video_lead_config_weights_override():
 
 
 # ---------------------------------------------------------------------------
-# photo keep-lead (§8 B): resolution → lossless tier → detail_score BAND → size
+# photo keep-lead (§8 B): resolution → format rank → file size
 # ---------------------------------------------------------------------------
-def _photo_members(*ids, ext="jpg"):
-    return [(i, {"fid": i, "root_id": 1, "path": f"C:\\lib\\{i}.{ext}"}) for i in ids]
+def _photo_members(*specs):
+    """specs: (id, ext) pairs → [(id, instance-dict)] with the ext in the path."""
+    return [(i, {"fid": i, "root_id": 1, "path": f"C:\\lib\\{i}.{ext}"}) for i, ext in specs]
 
 
 def _photo_rank(**by_id):
     out = {}
     for aid, d in by_id.items():
         r = {"media_type": "photo", "width": None, "height": None, "size": None,
-             "detail_score": None, "duration_s": None, "codec": None}
+             "duration_s": None, "codec": None}
         r.update(d)
         out[int(aid)] = r
     return out
-
-
-def test_photo_lead_size_breaks_detail_tie():
-    """Near-equal detail_scores (within detail_tie_pct) tie → file size decides (§8 B).
-
-    This is the high-quality-band flip fix: a slightly-more-compressed copy can score
-    a marginally HIGHER detail_score (JPEG blocking is high-freq), so within the band
-    the larger FILE — the clean monotonic quality proxy — must win, not raw detail.
-    """
-    cfg = Config()  # detail_tie_pct = 15
-    m = _photo_members(1, 2)
-    # Asset 2 has a hair-higher detail (noise) but asset 1 is the larger, less-
-    # compressed file. Within 15% → same band → size picks asset 1.
-    rank = _photo_rank(
-        **{"1": {"width": 4000, "height": 3000, "size": 620_000, "detail_score": 554_000},
-           "2": {"width": 4000, "height": 3000, "size": 416_000, "detail_score": 558_000}},
-    )
-    assert dedup._pick_lead(m, rank, cfg) == 1  # larger file wins the tie, not higher detail
-
-
-def test_photo_lead_detail_separates_heavy_compression():
-    """When detail_scores are far apart (>tie_pct), detail_score still decides (§8 B)."""
-    cfg = Config()
-    m = _photo_members(1, 2)
-    # Heavy compression drops detail well outside the band → higher detail wins even
-    # though (here) it's also the bigger file; the point is detail still separates.
-    rank = _photo_rank(
-        **{"1": {"width": 4000, "height": 3000, "size": 600_000, "detail_score": 550_000},
-           "2": {"width": 4000, "height": 3000, "size": 165_000, "detail_score": 400_000}},
-    )
-    assert dedup._pick_lead(m, rank, cfg) == 1
-
-
-def test_photo_lead_lossless_tier_above_detail_band():
-    """A lossless master outranks a lossy sibling regardless of detail/size (§8 B)."""
-    cfg = Config()
-    m = [(1, {"fid": 1, "root_id": 1, "path": "C:\\lib\\1.png"}),   # lossless
-         (2, {"fid": 2, "root_id": 1, "path": "C:\\lib\\2.jpg"})]   # lossy, bigger + higher detail
-    rank = _photo_rank(
-        **{"1": {"width": 4000, "height": 3000, "size": 300_000, "detail_score": 500_000},
-           "2": {"width": 4000, "height": 3000, "size": 900_000, "detail_score": 900_000}},
-    )
-    assert dedup._pick_lead(m, rank, cfg) == 1  # PNG master wins on the lossless tier
-
-
-def test_photo_lead_heic_master_beats_jpeg_export():
-    """A HEIC master outranks its JPEG export even though the JPEG scores HIGHER detail (§8 B).
-
-    Measured: at matched quality a JPEG's 8×8 blocking inflates detail_score ABOVE the
-    HEIC master's, so detail-first ranking would wrongly pick the JPEG. The format rank
-    (efficient-lossy HEIC > other-lossy JPEG) sits above detail and fixes it.
-    """
-    cfg = Config()
-    m = [(1, {"fid": 1, "root_id": 1, "path": "C:\\lib\\master.heic"}),
-         (2, {"fid": 2, "root_id": 1, "path": "C:\\lib\\export.jpg"})]
-    # JPEG has HIGHER detail_score (the trap) AND could even be a larger file — the
-    # format rank must still pick the HEIC master.
-    rank = _photo_rank(
-        **{"1": {"width": 4000, "height": 3000, "size": 1_400_000, "detail_score": 774_000},
-           "2": {"width": 4000, "height": 3000, "size": 1_900_000, "detail_score": 801_000}},
-    )
-    assert dedup._pick_lead(m, rank, cfg) == 1  # HEIC master, not the higher-detail JPEG
 
 
 def test_photo_format_rank_ordering():
@@ -196,12 +135,51 @@ def test_photo_format_rank_ordering():
 
 def test_photo_lead_resolution_dominates():
     cfg = Config()
-    m = _photo_members(1, 2)
+    m = _photo_members((1, "jpg"), (2, "png"))
+    # Asset 2 is a lossless PNG with a bigger file, but LOWER resolution → asset 1 wins.
     rank = _photo_rank(
-        **{"1": {"width": 4000, "height": 3000, "size": 100_000, "detail_score": 100_000},
-           "2": {"width": 2000, "height": 1500, "size": 900_000, "detail_score": 900_000}},
+        **{"1": {"width": 4000, "height": 3000, "size": 100_000},
+           "2": {"width": 2000, "height": 1500, "size": 900_000}},
     )
     assert dedup._pick_lead(m, rank, cfg) == 1  # higher resolution wins outright
+
+
+def test_photo_lead_lossless_beats_lossy():
+    """At equal resolution a lossless master outranks a lossy sibling regardless of size (§8 B)."""
+    cfg = Config()
+    m = _photo_members((1, "png"), (2, "jpg"))
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 300_000},   # small lossless master
+           "2": {"width": 4000, "height": 3000, "size": 900_000}},  # big lossy export
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # PNG master wins on format rank
+
+
+def test_photo_lead_heic_master_beats_jpeg_export():
+    """A HEIC master outranks its JPEG export at equal resolution (§8 B).
+
+    HEIC/AVIF are efficient-lossy (format rank 1) vs JPEG's 0, so an iPhone HEIC
+    original beats its JPEG export even when the JPEG's file is larger — file size
+    is only a tiebreak WITHIN a format, never across (it lies cross-format).
+    """
+    cfg = Config()
+    m = _photo_members((1, "heic"), (2, "jpg"))
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 1_400_000},
+           "2": {"width": 4000, "height": 3000, "size": 1_900_000}},  # bigger JPEG, still loses
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # HEIC master
+
+
+def test_photo_lead_size_breaks_tie_within_format():
+    """Same resolution + same format → the larger (less-compressed) file wins (§8 B)."""
+    cfg = Config()
+    m = _photo_members((1, "jpg"), (2, "jpg"))
+    rank = _photo_rank(
+        **{"1": {"width": 4000, "height": 3000, "size": 620_000},   # less compressed
+           "2": {"width": 4000, "height": 3000, "size": 416_000}},  # more compressed
+    )
+    assert dedup._pick_lead(m, rank, cfg) == 1  # bigger JPEG = higher quality within-format
 
 
 # ---------------------------------------------------------------------------

@@ -160,12 +160,12 @@ def _create_trashed_asset(db, fp: media.Fingerprint) -> None:
     with db.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO assets(content_hash, media_type, size, width, height, duration_s, "
-            "captured_at, status, undecodable, decode_error, detail_score, codec, added_at, "
+            "captured_at, status, undecodable, decode_error, codec, added_at, "
             "trashed_at, trash_reason) "
-            "VALUES (?,?,?,?,?,?,?, 'trashed', ?, ?, ?, ?, ?, ?, 'trash-folder') "
+            "VALUES (?,?,?,?,?,?,?, 'trashed', ?, ?, ?, ?, ?, 'trash-folder') "
             "ON CONFLICT(content_hash) DO NOTHING",
             (fp.content_hash, fp.media_type, fp.size, fp.width, fp.height, fp.duration_s,
-             fp.captured_at, 1 if fp.undecodable else 0, fp.decode_error, fp.detail_score,
+             fp.captured_at, 1 if fp.undecodable else 0, fp.decode_error,
              fp.codec, now_iso(), now_iso()),
         )
         if cur.rowcount == 1:

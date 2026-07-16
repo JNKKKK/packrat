@@ -107,10 +107,10 @@ def _trash_asset_from(database, path, media_type="photo"):
     with database.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO assets(content_hash, media_type, size, width, height, status, "
-            "undecodable, detail_score, added_at, trashed_at, trash_reason) "
-            "VALUES (?,?,?,?,?, 'trashed', ?, ?, 't', 't', 'trash-folder')",
+            "undecodable, added_at, trashed_at, trash_reason) "
+            "VALUES (?,?,?,?,?, 'trashed', ?, 't', 't', 'trash-folder')",
             (fp.content_hash, fp.media_type, fp.size, fp.width, fp.height,
-             1 if fp.undecodable else 0, fp.detail_score),
+             1 if fp.undecodable else 0),
         )
         aid = int(cur.lastrowid)
         from packrat.jobs import scan as scanmod

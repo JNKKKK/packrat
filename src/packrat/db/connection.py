@@ -177,10 +177,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("review_runs", "stage", "INTEGER NOT NULL DEFAULT 1"),
     ("review_runs", "stage_phase", "TEXT"),
     ("review_actions", "stage", "INTEGER"),
-    # v4: photo detail estimate for dedup stage-2 keep-lead (§8 B).
-    ("assets", "detail_score", "INTEGER"),
     # v5: video codec for the video keep-lead's codec-efficiency weight (§8 B).
     ("assets", "codec", "TEXT"),
+    # NOTE: v4's assets.detail_score is intentionally ABSENT — retired in v6 (§8 B).
+    # A DB created at v4/v5 keeps the column as harmless dead data (no DROP migration);
+    # a fresh v6 DB never creates it. Nothing reads or writes it. Do NOT re-add it here.
 )
 
 
