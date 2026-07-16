@@ -69,6 +69,18 @@ def test_cleanup_preview_endpoint(client, tiny_photos):
         time.sleep(0.02)
     prev = client.get("/cleanup/preview?root=Pics", headers=_h()).json()
     assert prev["name"] == "Pics" and prev["count"] == 0  # nothing trashed yet
+    # undecodable-mode preview is a distinct count (0 here — the tiny PNGs decode fine).
+    prev_u = client.get("/cleanup/preview?root=Pics&mode=undecodable", headers=_h()).json()
+    assert prev_u["count"] == 0
+
+
+def test_cleanup_unknown_mode_400(client, tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    client.post("/roots", json={"path": str(lib), "name": "Lib"}, headers=_h())
+    r = client.post("/cleanup", json={"root": "Lib", "mode": "bogus"}, headers=_h())
+    assert r.status_code == 400
+    assert "unknown cleanup mode" in r.json()["detail"]
 
 
 def test_trash_refresh_endpoint(client, tmp_path):

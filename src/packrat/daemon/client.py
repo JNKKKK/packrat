@@ -180,16 +180,19 @@ class DaemonClient:
         self,
         folder: str,
         *,
-        perceptual: bool = False,
+        mode: str = "exact",
         confirm: bool = False,
         cancel: bool = False,
         dry_run: bool = False,
         apply: bool = False,
     ) -> int:
-        """Submit a cleanup job (§6.2); returns the job id. Raises :class:`BusyResponse`."""
+        """Submit a cleanup job (§6.2, §9.1); returns the job id. Raises :class:`BusyResponse`.
+
+        ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable``.
+        """
         r = self._raw_post(
             "/cleanup",
-            {"root": folder, "perceptual": perceptual, "confirm": confirm,
+            {"root": folder, "mode": mode, "confirm": confirm,
              "cancel": cancel, "dry_run": dry_run, "apply": apply},
         )
         if r.status_code == 409:
@@ -198,9 +201,9 @@ class DaemonClient:
             raise DaemonError(f"{r.status_code}: {r.text}")
         return int(r.json()["job_id"])
 
-    def cleanup_preview(self, folder: str) -> dict:
-        """Read-only exact-trash count for the default-cleanup confirm (§6.2)."""
-        return self._get(f"/cleanup/preview?root={folder}")
+    def cleanup_preview(self, folder: str, mode: str = "exact") -> dict:
+        """Read-only count for a one-shot cleanup mode's confirm (§6.2, §9.1)."""
+        return self._get(f"/cleanup/preview?root={folder}&mode={mode}")
 
     def submit_trash_refresh(self) -> int:
         """Submit a ``trash refresh`` job (§6.1); returns the job id."""

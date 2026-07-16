@@ -297,12 +297,13 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/cleanup", dependencies=[Depends(require_token)])
     def submit_cleanup(body: dict):
-        """Resolve a root arg (path/--name) + submit a cleanup job (§6.2).
+        """Resolve a root arg (path/--name) + submit a cleanup job (§6.2, §9.1).
 
-        Modes carried in params: default preview (no flags) / ``apply`` (default-exact
-        delete, submitted by the CLI after the typed count-confirm) / ``perceptual``
-        analyze / ``confirm`` / ``cancel`` / ``dry_run``. A trash root is rejected here
-        so the CLI stays a thin client.
+        ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable`` (one required for a
+        fresh op — the CLI enforces exactly-one via its three flags). Sub-verbs carried
+        in params: preview (no sub-verb) / ``apply`` (one-shot delete, submitted after
+        the typed count-confirm) / ``confirm`` / ``cancel`` (perceptual run) / ``dry_run``.
+        A trash root is rejected here so the CLI stays a thin client.
         """
         arg = body.get("root")
         if not arg:
@@ -316,9 +317,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
                 status_code=400,
                 detail=f"{row['name']!r} is a {row['kind']} root; cleanup targets a library root",
             )
+        mode = body.get("mode") or "exact"
+        if mode not in ("exact", "perceptual", "undecodable"):
+            raise HTTPException(status_code=400, detail=f"unknown cleanup mode {mode!r}")
         params = {
             "root_id": row["id"],
-            "perceptual": bool(body.get("perceptual")),
+            "mode": mode,
             "confirm": bool(body.get("confirm")),
             "cancel": bool(body.get("cancel")),
             "dry_run": bool(body.get("dry_run")),
@@ -334,9 +338,9 @@ def build_app(token: str, *, db_file=None, config_path=None):
         return {"job_id": job_id}
 
     @app.get("/cleanup/preview", dependencies=[Depends(require_token)])
-    def cleanup_preview(root: str):
-        """Read-only exact-trash count for the default-cleanup typed confirm (§6.2)."""
-        prev = queries.cleanup_exact_preview(root)
+    def cleanup_preview(root: str, mode: str = "exact"):
+        """Read-only count for a one-shot cleanup mode's typed confirm (§6.2, §9.1)."""
+        prev = queries.cleanup_exact_preview(root, mode)
         if prev is None:
             raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
         return prev

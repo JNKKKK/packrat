@@ -406,35 +406,56 @@ def dedup(
 @app.command("cleanup")
 def cleanup(
     folder: str = typer.Argument(..., help="A registered library root to clean (path or --name)."),
-    perceptual: bool = typer.Option(False, "--perceptual", help="Also stage recompressed-trash matches for review (§6.2)."),
-    confirm: bool = typer.Option(False, "--confirm", help="Apply a pending --perceptual run (exact + still-staged perceptual)."),
-    cancel: bool = typer.Option(False, "--cancel", help="Discard the pending --perceptual run; delete nothing."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be deleted/staged; delete nothing (still refreshes trash)."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the typed confirmation (default exact mode)."),
+    trash_exact: bool = typer.Option(False, "--trash-exact", help="Delete files that are byte-identical to trashed content (§6.2)."),
+    trash_perceptual: bool = typer.Option(False, "--trash-perceptual", help="Stage recompressed-trash matches for review; also deletes exact matches (§6.2)."),
+    undecodable: bool = typer.Option(False, "--undecodable", help="Delete the folder's undecodable files + mark them trashed (§9.1)."),
+    confirm: bool = typer.Option(False, "--confirm", help="Apply a pending --trash-perceptual run (exact + still-staged perceptual)."),
+    cancel: bool = typer.Option(False, "--cancel", help="Discard the pending --trash-perceptual run; delete nothing."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be deleted/staged; delete nothing (trash modes still refresh trash)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the typed confirmation (one-shot modes)."),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    r"""Delete files in <folder> whose content matches something you've trashed (§6.2).
+    r"""Delete junk from <folder>. Requires one mode: --trash-exact / --trash-perceptual / --undecodable.
 
-    Default (exact hash): refresh trash → count → typed confirm → delete to Recycle Bin.
-    `--perceptual`: also catch recompressed trash copies, staged under
-    `<root>\_packrat_review\_perceptually_identified_trash\` for review (delete-default:
-    a staged shortcut WILL be deleted — remove it to spare), then `--confirm`/`--cancel`.
-    Refresh always runs for real, even under `--dry-run` (§6.1).
+    - `--trash-exact`: files byte-identical to trashed content. Refresh trash → count →
+      typed confirm → delete to Recycle Bin.
+    - `--trash-perceptual`: also catch recompressed trash copies, staged under
+      `<root>\_packrat_review\_perceptually_identified_trash\` for review (delete-default:
+      a staged shortcut WILL be deleted — remove it to spare), then `--confirm`/`--cancel`.
+      Deletes exact matches too, at confirm.
+    - `--undecodable`: files whose pixels won't decode (§9.1); deletes them and marks each
+      asset trashed. Count → typed confirm → delete. Does not touch the trashed set.
+
+    Trash modes refresh the trash collection for real, even under `--dry-run` (§6.1).
     """
+    # --confirm/--cancel act on the pending perceptual run (no mode needed, like dedup).
     if confirm and cancel:
         typer.echo("give --confirm or --cancel, not both.", err=True)
         raise typer.Exit(2)
+    modes = [("exact", trash_exact), ("perceptual", trash_perceptual), ("undecodable", undecodable)]
+    chosen = [name for name, on in modes if on]
+    if not (confirm or cancel):
+        if len(chosen) != 1:
+            typer.echo(
+                "cleanup requires exactly one mode: --trash-exact, --trash-perceptual, "
+                "or --undecodable.", err=True)
+            raise typer.Exit(2)
+    elif chosen and chosen != ["perceptual"]:
+        typer.echo("--confirm/--cancel apply to a pending --trash-perceptual run; "
+                   "don't combine them with --trash-exact/--undecodable.", err=True)
+        raise typer.Exit(2)
+    mode = chosen[0] if chosen else "perceptual"  # confirm/cancel target the perceptual run
     client = _client_or_spawn()
 
-    # Stateful --perceptual verbs (analyze / --confirm / --cancel) and any --dry-run,
-    # plus the perceptual analyze itself: submit one job and stream it.
-    if perceptual or confirm or cancel or dry_run:
+    # Stateful perceptual verbs (analyze / --confirm / --cancel) and any --dry-run:
+    # submit one job and stream it (no CLI count-confirm — perceptual stages for review).
+    if mode == "perceptual" or confirm or cancel or dry_run:
         label = ("cleanup --cancel" if cancel else "cleanup --confirm" if confirm
-                 else "cleanup --perceptual" if perceptual else "cleanup --dry-run")
+                 else "cleanup --dry-run" if dry_run else f"cleanup --{_mode_flag(mode)}")
         try:
             job_id = client.submit_cleanup(
-                folder, perceptual=perceptual, confirm=confirm, cancel=cancel, dry_run=dry_run
+                folder, mode=mode, confirm=confirm, cancel=cancel, dry_run=dry_run
             )
         except BusyResponse as exc:
             _print_busy(exc)
@@ -452,44 +473,52 @@ def cleanup(
             typer.echo(json.dumps(client.get_job(job_id), indent=2))
         return
 
-    # Default exact mode: preview (refresh + count) → typed confirm → apply.
+    # One-shot modes (exact / undecodable): preview (count) → typed confirm → apply.
+    flag = _mode_flag(mode)
     try:
-        prev_job = client.submit_cleanup(folder)  # preview: refresh + report, act on nothing
+        prev_job = client.submit_cleanup(folder, mode=mode)  # preview: report, act on nothing
     except BusyResponse as exc:
         _print_busy(exc)
         raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
         raise typer.Exit(1)
-    prev_final = stream_job(client, prev_job, label="cleanup (refresh + preview)")
+    prev_final = stream_job(client, prev_job, label=f"cleanup --{flag} (preview)")
     if prev_final != "done":
         typer.echo(f"cleanup preview {prev_final} — not deleting.", err=True)
         raise typer.Exit(1)
 
-    prev = client.cleanup_preview(folder)
+    prev = client.cleanup_preview(folder, mode=mode)
     n, n_net = prev["count"], prev.get("network", 0)
+    what = "undecodable file(s)" if mode == "undecodable" else "file(s) match trashed content"
     if n == 0:
-        typer.echo(f"cleanup {prev['name']}: no files match trashed content — nothing to delete.")
+        typer.echo(f"cleanup {prev['name']}: no {what} — nothing to delete.")
         return
     net = (f"\n  ⚠ {n_net} of them are on a network share and will be deleted PERMANENTLY "
            f"(no Recycle Bin)." if n_net else "")
     if not yes:
-        typer.echo(f"{n} file(s) in {prev['name']} match trashed content and will be moved to the "
-                   f"Recycle Bin.{net}")
+        note = " (their assets will be marked trashed)" if mode == "undecodable" else ""
+        typer.echo(f"{n} {what} in {prev['name']} will be moved to the Recycle Bin{note}.{net}")
         ans = typer.prompt(f"Type the count ({n}) to confirm deletion")
         if ans.strip() != str(n):
             typer.echo("count mismatch — aborted, nothing deleted.")
             raise typer.Exit(1)
     try:
-        apply_job = client.submit_cleanup(folder, apply=True)
+        apply_job = client.submit_cleanup(folder, mode=mode, apply=True)
     except BusyResponse as exc:
         _print_busy(exc)
         raise typer.Exit(1)
-    final = stream_job(client, apply_job, label="cleanup")
+    final = stream_job(client, apply_job, label=f"cleanup --{flag}")
     typer.echo(f"cleanup {final}")
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(apply_job), indent=2))
+
+
+def _mode_flag(mode: str) -> str:
+    """Map an internal cleanup mode to its CLI flag name (for labels/messages)."""
+    return {"exact": "trash-exact", "perceptual": "trash-perceptual",
+            "undecodable": "undecodable"}[mode]
 
 
 # ---------------------------------------------------------------------------

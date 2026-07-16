@@ -467,7 +467,7 @@ Everything downstream rests on this distinction:
 - **Perceptual near-duplicate — different bytes, visually the same** (recompressed, resized,
   re-encoded, cropped…). These are **distinct assets** joined by a recorded similarity edge, never
   silently collapsed — because both files genuinely exist. Deciding what to do about them needs
-  human review, so this is **only** ever surfaced by `dedup` (§8 B) and `cleanup --perceptual`
+  human review, so this is **only** ever surfaced by `dedup` (§8 B) and `cleanup --trash-perceptual`
   (§6.2), which stage candidates in Explorer for the user.
 
 Exact resolution is cheap and safe enough to run inline anywhere; perceptual matching is a
@@ -475,7 +475,7 @@ deliberate, reviewed, opt-in operation.
 
 ### 5.3 The perceptual matching engine
 
-A single scope-agnostic matcher, run only by `dedup` and `cleanup --perceptual`. It uses the
+A single scope-agnostic matcher, run only by `dedup` and `cleanup --trash-perceptual`. It uses the
 perceptual signature alone (never CLIP), over fingerprints already in the DB — pure hash math, no
 file I/O.
 
@@ -489,7 +489,7 @@ file I/O.
   (stage 2, near-certain), `t_photo_recompress < d ≤ t_photo_edit` = a minor edit/crop (stage 3,
   scrutinize). The engine's own match cutoff is the wider `t_photo_edit`; the tighter cutoff only
   splits already-matched pairs into stages, so it is a review-ergonomics band, not a second recall
-  gate. (`cleanup --perceptual` uses the single wider cutoff, no banding — §6.2.)
+  gate. (`cleanup --trash-perceptual` uses the single wider cutoff, no banding — §6.2.)
   - **Photo quality — annotate, never gate (asymmetric with video).** PDQ's 0–100 quality is
     *stored* per photo but **does not exclude** a photo from matching. This is deliberate and
     differs from video (`video.min_frame_quality`): a video has ~12 frames, so dropping a bad one
@@ -559,7 +559,7 @@ on real data — §14 #1.**
 - **`dedup`** compares a folder's assets against **active assets only** — trashed assets are
   excluded (its model is "collapse redundant copies, keep one survivor," which a trashed asset —
   usually zero instances, nothing to keep, opposite intended action — cannot fit).
-- **`cleanup --perceptual`** compares a folder's active assets against the **trashed** set (find
+- **`cleanup --trash-perceptual`** compares a folder's active assets against the **trashed** set (find
   recompressed copies of things you trashed).
 - **`merge`** does **not** use this engine at all — it decides purely by exact hash, including its
   trash check.
@@ -649,32 +649,39 @@ as `packrat trash refresh`). Steps:
 validation). This keeps the "inbox that gets emptied" semantics from colliding with scan's
 "index and keep" semantics.
 
-### 6.2 `packrat cleanup <folder>` — remove trashed content from a library folder
+### 6.2 `packrat cleanup <folder>` — cull trashed / undecodable files from a library folder
 
-From the user's perspective: **delete every file in `<folder>` whose content matches something
-you've trashed.** Use case: a photo you trashed still lives on the iPhone and got re-pasted into
-a library backup folder; `cleanup` removes those re-appearances.
+From the user's perspective: **delete junk from `<folder>`.** Use case: a photo you trashed still
+lives on the iPhone and got re-pasted into a library backup folder; `cleanup` removes those
+re-appearances — and, separately, culls files that won't decode at all.
 
-Two modes:
-- **Default (exact only):** one-shot. Byte-identical matches to trashed content are deleted after
-  a typed count confirmation — no per-file review (exact-hash matching is false-positive-free).
-- **`--perceptual`:** stateful (analyze → pause → `--confirm`). Adds *perceptual* trash matches
+**`cleanup` requires exactly one mode** (there is no bare default — the command errors without one):
+- **`--trash-exact`:** one-shot. Byte-identical matches to trashed content are deleted after a typed
+  count confirmation — no per-file review (exact-hash matching is false-positive-free).
+- **`--trash-perceptual`:** stateful (analyze → pause → `--confirm`). Adds *perceptual* trash matches
   (recompressed/resized copies of trashed content), staged as shortcuts for Explorer review since
   perceptual matching can misfire. Exact matches are **not** deleted inline in this mode — both
   exact and reviewed-perceptual deletions apply together at `--confirm`.
+- **`--undecodable`:** one-shot. Deletes the folder's `undecodable=1` files (§9.1 — bytes hashed but
+  the decoder rejected the pixels, so they carry no perceptual signature and can never dedup) after a
+  typed count confirmation, **and marks each deleted asset `trashed`** (`trash_reason=
+  'cleanup-undecodable'`) so a re-import of the same corrupt bytes is excluded from a future merge.
+  Unlike the trash modes it does **not** refresh the trash collection — it targets the folder's own
+  undecodables, independent of the trashed set. (`status <root>` lists exactly this set as the
+  undecodable problem files, §11.)
 
-**Shared validation & lock (both modes):** `<folder>` must be a registered **library** root —
+**Shared validation & lock (all modes):** `<folder>` must be a registered **library** root —
 reject a `kind='trash'` root (its files are consumed by refresh, not cleaned). Then apply the
 **§3 per-root exclusivity invariant**: reject if this root already has an active operation — a
 `pending` dedup run, a `pending` perceptual-cleanup run, or an in-flight merge (an open
 `merge_runs` row with `dest_root_id` = this root, §4) — since they may stage `.lnk`s pointing at
 files cleanup would delete, leaving broken shortcuts / a stale plan; conversely, once a
-`--perceptual` cleanup opens its own `pending` `review_runs` row it *owns* the root, so dedup,
+`--trash-perceptual` cleanup opens its own `pending` `review_runs` row it *owns* the root, so dedup,
 merge, **and scan** (via §8 A2 step 1a) are blocked on it until confirm/cancel. Recommend a fresh
 `scan <folder>` first so newly-arrived files are indexed (run it *before* cleanup, since scan is
 blocked once the pending run opens); cleanup operates on indexed instances.
 
-#### Default mode — `packrat cleanup <folder>`
+#### Exact mode — `packrat cleanup <folder> --trash-exact`
 1. **Refresh the trash collection** (§6.1), so the trashed set is fully current.
 2. In `<folder>`, find every `file_instances` row whose asset has `status='trashed'`, matched by
    **exact content hash only**.
@@ -684,7 +691,17 @@ blocked once the pending run opens); cleanup operates on indexed instances.
    delete its `file_instances` row. The asset stays `trashed` (fingerprints retained). Report
    deleted count.
 
-#### Perceptual mode — `packrat cleanup <folder> --perceptual` (analyze → `--confirm`)
+#### Undecodable mode — `packrat cleanup <folder> --undecodable`
+1. **No trash refresh** — this mode is independent of the trashed set.
+2. In `<folder>`, find every `file_instances` row whose asset is `undecodable=1` **and** `active`
+   (§9.1). (An already-`trashed` undecodable is left for the exact mode.)
+3. **Print the count** and require typed confirmation (network-path permanent-delete warning as above).
+4. On confirm, move each file to the **Recycle Bin**, delete its `file_instances` row, and — if the
+   asset now has zero instances — **mark the asset `trashed`** (`trash_reason='cleanup-undecodable'`,
+   fingerprints = the hash retained), so a re-import of the same corrupt bytes is excluded from a
+   future merge. Report deleted count.
+
+#### Perceptual mode — `packrat cleanup <folder> --trash-perceptual` (analyze → `--confirm`)
 Analyze:
 1. **Refresh the trash collection** (§6.1); open a persisted `pending` cleanup run for this root.
 2. **Exact matches:** find library instances whose asset is `trashed` (exact hash), as in default
@@ -719,14 +736,15 @@ per §8 B).
 7. Delete the `_perceptually_identified_trash\` staging folder, write `applied.json`, mark the run
    `completed`. `--cancel` discards staging and deletes nothing.
 
-**`--dry-run`** (both modes) **still refreshes-and-empties the trash collection** (the refresh
-runs for real), then reports the count/list of library files that *would* be deleted (and, with
-`--perceptual`, would be staged) without deleting or staging anything. This is a deliberate
-exception to "dry-run changes nothing": refresh (§6.1) is a shared, idempotent procedure whose
-no-op variant isn't worth building, and it is non-destructive to your *library* (it only absorbs
-hashes and empties the transient trash inbox — which is what trashing already means). Dry-run's
-guarantee is scoped precisely: **it never deletes from the library folder being cleaned**; it may
-still empty the trash inboxes.
+**`--dry-run`** reports the count/list of library files that *would* be deleted (and, with
+`--trash-perceptual`, would be staged) without deleting or staging anything. For the two **trash
+modes** it **still refreshes-and-empties the trash collection** (the refresh runs for real) — a
+deliberate exception to "dry-run changes nothing": refresh (§6.1) is a shared, idempotent procedure
+whose no-op variant isn't worth building, and it is non-destructive to your *library* (it only
+absorbs hashes and empties the transient trash inbox — which is what trashing already means).
+**`--undecodable --dry-run` changes nothing at all** — that mode never refreshes. Dry-run's
+guarantee is scoped precisely: **it never deletes from the library folder being cleaned**; the trash
+modes may still empty the trash inboxes.
 
 ### 6.3 `packrat untrash <path>` — forget content from trash memory
 
@@ -1494,7 +1512,7 @@ perceptual signatures, no `similarity_edges`, no shortcuts.
 
 #### 8.1 Review-run audit trail (dedup & perceptual-cleanup)
 
-Every stateful review run — `dedup` **and** `cleanup --perceptual` — leaves a permanent,
+Every stateful review run — `dedup` **and** `cleanup --trash-perceptual` — leaves a permanent,
 append-only record outside the collection, so you can always answer "what did it propose, and
 what did it actually delete" long after the staging folders (and their `manifest.csv`s) are gone.
 Deleting a whole registered folder never erases this history.
@@ -2153,37 +2171,45 @@ files and clean recompressed near-dups.
 ```
 
 ### `packrat cleanup`
-Remove from a library folder every file whose content matches something you've **trashed**.
-Default: **exact hash**, one-shot (refresh → count-confirm → delete to Recycle Bin; no staging).
-`--perceptual`: also catch *recompressed* trash copies, staged for Explorer review (stateful:
-analyze → `--confirm`). See §6.2.
+Cull junk from a library folder. **Requires exactly one mode** (no bare default):
+- `--trash-exact` — files **byte-identical** to trashed content; one-shot (refresh → count-confirm
+  → delete to Recycle Bin; no staging). False-positive-free.
+- `--trash-perceptual` — also catch *recompressed* trash copies, staged for Explorer review
+  (stateful: analyze → `--confirm`); deletes exact matches too, at confirm.
+- `--undecodable` — files whose pixels won't decode (§9.1); deletes them **and marks each asset
+  `trashed`** so a re-import is excluded from a future merge. One-shot count-confirm. Does **not**
+  touch the trashed set. See §6.2 / §9.1.
 
 ```
-packrat cleanup <folder> [options]          # default: exact only, one-shot
-packrat cleanup <folder> --perceptual       # analyze: delete-nothing-yet, stage perceptual → pending
-packrat cleanup <folder> --confirm          # apply exact + reviewed perceptual deletions
-packrat cleanup <folder> --cancel           # discard the pending perceptual run; delete nothing
+packrat cleanup <folder> --trash-exact       # one-shot: refresh → count-confirm → delete
+packrat cleanup <folder> --trash-perceptual  # analyze: delete-nothing-yet, stage perceptual → pending
+packrat cleanup <folder> --undecodable       # one-shot: delete undecodables + mark them trashed
+packrat cleanup <folder> --confirm           # apply a pending --trash-perceptual run (exact + reviewed)
+packrat cleanup <folder> --cancel            # discard the pending perceptual run; delete nothing
 
 Arguments
   <folder>               A registered library root to clean (a trash root is rejected).
 
-Options
-  --perceptual           Also match recompressed/resized copies of trashed content (§5 matcher,
+Options (one mode required for a fresh op; --confirm/--cancel act on a pending perceptual run)
+  --trash-exact          Delete files byte-identical to trashed content (exact hash), one-shot.
+  --trash-perceptual     Also match recompressed/resized copies of trashed content (§5 matcher,
                          active-vs-trashed). Stages them at
                          <root>\_packrat_review\_perceptually_identified_trash\ for review, and
                          defers ALL deletions (exact + perceptual) to --confirm.
-  --confirm              Apply a pending --perceptual run: delete exact matches + still-staged
+  --undecodable          Delete the folder's undecodable files (§9.1) and mark each asset trashed
+                         (trash_reason='cleanup-undecodable'). One-shot; no trash refresh.
+  --confirm              Apply a pending --trash-perceptual run: delete exact matches + still-staged
                          perceptual matches (typed confirmation; DB backup first). Confirmed
                          perceptual deletions mark their asset `trashed`.
-  --cancel               Discard the pending --perceptual run's staging; delete nothing.
-  --dry-run              Report the count/list that would be deleted (and, with --perceptual,
-                         staged) without deleting or staging. NOTE: still refreshes-and-empties
-                         the trash collection (§6.1) — that step always runs (see §6.2).
+  --cancel               Discard the pending --trash-perceptual run's staging; delete nothing.
+  --dry-run              Report the count/list that would be deleted (and, with --trash-perceptual,
+                         staged) without deleting or staging. NOTE: the trash modes still refresh-
+                         and-empty the trash collection (§6.1); --undecodable does not.
   --json                 Machine-readable report.
 
-Review convention (--perceptual, delete-default): a staged shortcut = "will delete"; remove it to
-spare the file. Same as dedup's `_exact_dup_to_delete\`; opposite of dedup's keep-default perceptual
-stages (`_suspect_recompression\` / `_with_minor_edits\`).
+Review convention (--trash-perceptual, delete-default): a staged shortcut = "will delete"; remove it
+to spare the file. Same as dedup's `_exact_dup_to_delete\`; opposite of dedup's keep-default
+perceptual stages (`_suspect_recompression\` / `_with_minor_edits\`).
 ```
 
 ### `packrat trash refresh`
@@ -2260,7 +2286,7 @@ history and live in the §8.1 audit trail, **not** here. Per root:
   confirm/cancel to free the root. Count summary is per `run_type` (read from `review_actions`):
   - **dedup:** `N to delete (exact)` · `G groups / M members (near-dup, default-keep)` —
     optionally `(K low-confidence)` from the §5.3 photo-quality flag.
-  - **cleanup --perceptual:** `X exact-trash (will delete)` · `P perceptual candidates (staged)`.
+  - **cleanup --trash-perceptual:** `X exact-trash (will delete)` · `P perceptual candidates (staged)`.
 - **No pending run** → a compact **recency** stat only: `deduped <age>` / `cleaned <age>` (from the
   most recent completed run's `confirmed_at`), or `never deduped`. Mirrors the "last scan"
   freshness; no run history is listed.
@@ -2417,12 +2443,13 @@ but v1 is considered done when M0–M6 are.)
   `_suspect_recompression\` / `_with_minor_edits\`), the pending+stage-cursor state machine with
   `--confirm` auto-advance, `--cancel`, `--dry-run`, and the §8.1 audit trail (`proposed.json` +
   `applied.json` in APPDATA). Builds the §5 perceptual matching engine (also reused by
-  `cleanup --perceptual`).
+  `cleanup --trash-perceptual`).
 - **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (§6.1 —
   index trash-folder files → record/flip assets to `trashed` → empty the folders), scan's refusal
-  to index trash roots, `packrat cleanup` (default exact-hash removal with count-confirm; and
-  `--perceptual` stateful mode staging recompressed-trash matches for review — reuses the M3
-  engine), and `trash refresh`. Comes before merge because merge's headline value is excluding
+  to index trash roots, `packrat cleanup` (mode-required: `--trash-exact` count-confirm removal;
+  `--trash-perceptual` stateful staging of recompressed-trash matches for review — reuses the M3
+  engine; `--undecodable` culls the folder's undecodable files + marks them trashed, §9.1), and
+  `trash refresh`. Comes before merge because merge's headline value is excluding
   trashed-but-still-on-device content.
 - **M5 — Merge workflow**: `merge` — refresh-trash-first, exact-hash classification
   (dup-in-source / trashed / exact-known / new; byte-identical collapse only), copy-only ingest
@@ -2475,7 +2502,7 @@ but v1 is considered done when M0–M6 are.)
 6. **Recompressed-trash on merge (accepted):** `merge` excludes trashed content by **exact hash
    only** — a *recompressed* copy of trashed content slips through as `new` on ingest. This is the
    accepted cost of keeping merge simple/one-shot; it is caught afterward by
-   `cleanup <dest> --perceptual` (§6.2), which stages recompressed-trash matches for review.
+   `cleanup <dest> --trash-perceptual` (§6.2), which stages recompressed-trash matches for review.
    (`dedup` still excludes trashed assets from grouping — §5 — so cleanup is the dedicated path.)
 7. **`packrat config` command (deferred):** v1 config is a hand-edited, auto-created
    `%APPDATA%\packrat\config.toml` (§9.2) — there is no CLI to read/write keys. A future

@@ -145,7 +145,7 @@ def test_cleanup_blocked_by_pending_dedup(queue_and_db, tmp_path):
     from packrat.jobs import BusyError
 
     with pytest.raises(BusyError):
-        q.submit("cleanup", {"root_id": root["id"], "perceptual": True})
+        q.submit("cleanup", {"root_id": root["id"], "mode": "perceptual"})
     # A default preview owns nothing but re-checks the holder in-handler → errors.
     _run(q, database, "cleanup", expect="error", root_id=root["id"])
 
@@ -215,7 +215,7 @@ def test_cleanup_perceptual_stage_confirm_deletes(queue_and_db, tmp_path):
     _run(q, database, "scan", root_id=root["id"])
     _trash_asset_from(database, master)  # zero-instance trashed asset (matches the jpg)
 
-    _run(q, database, "cleanup", root_id=root["id"], perceptual=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     assert run is not None and run["stage"] == 1
     acts = database.query("SELECT * FROM review_actions WHERE run_id=?", (run["id"],))
@@ -247,7 +247,7 @@ def test_cleanup_perceptual_spare_by_removing_shortcut(queue_and_db, tmp_path):
     _run(q, database, "scan", root_id=root["id"])
     _trash_asset_from(database, master)
 
-    _run(q, database, "cleanup", root_id=root["id"], perceptual=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     a = database.query_one("SELECT * FROM review_actions WHERE run_id=? AND kind='perceptual'", (run["id"],))
     # Remove the shortcut → spare the file (delete-default veto).
@@ -278,7 +278,7 @@ def test_cleanup_perceptual_confirm_deletes_exact_too(queue_and_db, tmp_path):
     )
     _trash_asset_from(database, master)  # perceptual match for recompressed.jpg
 
-    _run(q, database, "cleanup", root_id=root["id"], perceptual=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     acts = database.query("SELECT * FROM review_actions WHERE run_id=?", (run["id"],))
     assert sum(1 for a in acts if a["kind"] == "exact") == 1
@@ -301,7 +301,7 @@ def test_cleanup_perceptual_cancel_discards(queue_and_db, tmp_path):
     root = register(database, str(lib))
     _run(q, database, "scan", root_id=root["id"])
     _trash_asset_from(database, master)
-    _run(q, database, "cleanup", root_id=root["id"], perceptual=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     _run(q, database, "cleanup", root_id=root["id"], cancel=True)
     r = database.query_one("SELECT status FROM review_runs WHERE id=?", (run["id"],))
@@ -321,7 +321,7 @@ def test_cleanup_perceptual_confirm_aborts_if_folder_missing(queue_and_db, tmp_p
     root = register(database, str(lib))
     _run(q, database, "scan", root_id=root["id"])
     _trash_asset_from(database, master)
-    _run(q, database, "cleanup", root_id=root["id"], perceptual=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     # Delete the whole staging folder → confirm must ABORT (delete-default: never "delete all").
     review.remove_tree(review.staging_folder(str(lib), review.PERCEPTUAL_TRASH))
     _run(q, database, "cleanup", expect="error", root_id=root["id"], confirm=True)
@@ -423,7 +423,7 @@ def test_cleanup_dry_run_refreshes_but_deletes_nothing(queue_and_db, tmp_path):
     shutil.copy(lib / "junk.png", trash / "same.png")
     register(database, str(trash), kind="trash")
 
-    logs = _run_capture(q, database, "cleanup", root_id=root["id"], dry_run=True)
+    logs = _run_capture(q, database, "cleanup", root_id=root["id"], mode="exact", dry_run=True)
     blob = "\n".join(logs)
     assert "dry-run" in blob
     # Refresh ran for real (§6.1): the active asset was flipped to trashed …
@@ -432,3 +432,85 @@ def test_cleanup_dry_run_refreshes_but_deletes_nothing(queue_and_db, tmp_path):
     )["status"] == "trashed"
     # … but the library file was NOT deleted.
     assert (lib / "junk.png").exists()
+
+
+# ---------------------------------------------------------------------------
+# --undecodable mode (§9.1)
+# ---------------------------------------------------------------------------
+def _make_undecodable(database, root_id, lib, name):
+    """Create an undecodable asset + a live instance at ``lib/name`` (bytes exist, no PDQ)."""
+    from packrat import media
+
+    p = lib / name
+    p.write_bytes(b"\xff\xd8\xff\xee not a real image " + name.encode())  # hashes, won't decode
+    ch = media.hash_file(str(p))
+    with database.transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO assets(content_hash, media_type, size, status, undecodable, "
+            "decode_error, added_at) VALUES (?, 'photo', ?, 'active', 1, 'test', 't')",
+            (ch, p.stat().st_size),
+        )
+        aid = int(cur.lastrowid)
+        conn.execute(
+            "INSERT INTO file_instances(asset_id, root_id, path, filename, size, mtime, last_seen_at) "
+            "VALUES (?,?,?,?,?,?, 't')",
+            (aid, root_id, str(p), name, p.stat().st_size, p.stat().st_mtime),
+        )
+    return aid
+
+
+def test_cleanup_undecodable_preview_counts(queue_and_db, tmp_path):
+    q, database = queue_and_db
+    from packrat import queries
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    _make_undecodable(database, root["id"], lib, "bad1.jpg")
+    _make_undecodable(database, root["id"], lib, "bad2.jpg")
+    _photo(lib / "good.png", 1)
+    _run(q, database, "scan", root_id=root["id"])  # good.png → decodable active asset
+
+    prev = queries.cleanup_exact_preview(str(lib), mode="undecodable")
+    assert prev["count"] == 2  # only the two undecodables
+    # Preview deletes nothing.
+    _run(q, database, "cleanup", root_id=root["id"], mode="undecodable")
+    assert (lib / "bad1.jpg").exists() and (lib / "bad2.jpg").exists()
+
+
+@win_only
+def test_cleanup_undecodable_apply_deletes_and_trashes(queue_and_db, tmp_path):
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    aid = _make_undecodable(database, root["id"], lib, "bad.jpg")
+    _photo(lib / "good.png", 1)
+    _run(q, database, "scan", root_id=root["id"])
+
+    _run(q, database, "cleanup", root_id=root["id"], mode="undecodable", apply=True)
+    assert not (lib / "bad.jpg").exists()          # deleted
+    assert (lib / "good.png").exists()              # decodable file untouched
+    # Its asset is now trashed with the cleanup-undecodable reason (fingerprints kept).
+    row = database.query_one("SELECT status, trash_reason FROM assets WHERE id=?", (aid,))
+    assert row["status"] == "trashed" and row["trash_reason"] == "cleanup-undecodable"
+    assert database.query_one("SELECT COUNT(*) c FROM file_instances WHERE asset_id=?", (aid,))["c"] == 0
+
+
+def test_cleanup_undecodable_does_not_refresh_trash(queue_and_db, tmp_path):
+    """--undecodable targets the folder's own bad files — it must NOT run trash refresh (§9.1)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    _make_undecodable(database, root["id"], lib, "bad.jpg")
+    # A trash folder with a file in it: if cleanup --undecodable refreshed, this would
+    # be absorbed + emptied. It must be left alone.
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    _photo(trash / "dropped.png", 3)
+    register(database, str(trash), kind="trash")
+
+    _run(q, database, "cleanup", root_id=root["id"], mode="undecodable")  # preview
+    assert (trash / "dropped.png").exists()  # NOT absorbed/emptied
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE trash_reason='trash-folder'")["c"] == 0

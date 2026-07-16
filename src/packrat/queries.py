@@ -186,24 +186,31 @@ def _resolve_root_ro(conn, root_arg: str):
     return None
 
 
-def cleanup_exact_preview(root_arg: str) -> dict | None:
-    """Count a library root's files whose content is **trashed** (exact hash, §6.2).
+def cleanup_exact_preview(root_arg: str, mode: str = "exact") -> dict | None:
+    """Count a library root's files a one-shot ``cleanup`` mode would delete (§6.2, §9.1).
 
-    Backs the CLI's default-``cleanup`` typed confirmation — the count the user
-    approves before the apply job deletes. Read-only + post-refresh-stable (the
-    preview job commits the refresh before this runs). ``network`` is how many of
-    those files sit on a non-recyclable network share (deleted permanently, §10).
-    Returns ``None`` if the root doesn't resolve; raises nothing on a trash root
-    (the caller/handler rejects that separately).
+    Backs the CLI's typed confirmation — the count the user approves before the apply
+    job deletes. Read-only + stable (the preview job commits any refresh before this
+    runs). ``mode``:
+    - ``exact`` → files whose asset is ``trashed`` (byte-identical trash re-appearances);
+    - ``undecodable`` → the folder's ``undecodable=1`` **active** files (§9.1).
+    ``network`` is how many sit on a non-recyclable network share (permanent, §10).
+    Returns ``None`` if the root doesn't resolve; raises nothing on a trash root (the
+    handler rejects that separately). ``perceptual`` mode has no count-confirm (it stages
+    for review), so it is not a valid ``mode`` here.
     """
     conn = _ro()
     try:
         match = _resolve_root_ro(conn, root_arg)
         if match is None:
             return None
+        if mode == "undecodable":
+            where = "a.undecodable=1 AND a.status='active'"
+        else:  # exact
+            where = "a.status='trashed'"
         rows = conn.execute(
-            "SELECT fi.path FROM file_instances fi JOIN assets a ON a.id=fi.asset_id "
-            "WHERE fi.root_id=? AND a.status='trashed'",
+            f"SELECT fi.path FROM file_instances fi JOIN assets a ON a.id=fi.asset_id "
+            f"WHERE fi.root_id=? AND {where}",
             (match["id"],),
         ).fetchall()
         from . import fsutil
