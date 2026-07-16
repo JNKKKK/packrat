@@ -262,6 +262,102 @@ def test_dedup_stage2_keep_by_leaving_shortcut(queue_and_db, tmp_path):
 
 
 @win_only
+def test_dedup_stage2_keep_suggested_deletes_non_leads(queue_and_db, tmp_path):
+    """--confirm --keep-suggested keeps ONLY each group's suggested lead, ignoring edits."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "master.png", 5, kind="PNG")               # lossless → suggested lead
+    _photo(lib / "export.jpg", 5, kind="JPEG", quality=80)  # recompression, not the lead
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])
+    run = _run_row(database, root["id"])
+    assert run["stage"] == 2
+    acts = {os.path.basename(a["path"]): a for a in _stage_actions(database, run["id"], 2)}
+    lead = acts["master.png"]
+    assert lead["shortcut_name"].endswith("_suggested.lnk")
+
+    # DELETE the lead's shortcut too — under normal confirm that would delete the lead.
+    # --keep-suggested must IGNORE edits: keep master.png, delete export.jpg.
+    grp = _stage_dir(lib, 2)
+    os.remove(os.path.join(grp, lead["shortcut_name"]))
+    os.remove(os.path.join(grp, acts["export.jpg"]["shortcut_name"]))
+    _run(q, database, "dedup", root_id=root["id"], confirm=True, keep_suggested=True)
+    assert _run_row(database, root["id"]) is None
+    assert (lib / "master.png").exists()          # lead kept despite its shortcut removed
+    assert not (lib / "export.jpg").exists()       # non-lead deleted
+    tr = database.query_one("SELECT status, trash_reason FROM assets WHERE id=?",
+                            (acts["export.jpg"]["asset_id"],))
+    assert tr["status"] == "trashed" and tr["trash_reason"] == "dedup-perceptual"
+
+
+@win_only
+def test_dedup_keep_suggested_spares_group_without_lead(queue_and_db, tmp_path):
+    """A stage-2 group with no _suggested lead is fully SPARED under --keep-suggested.
+
+    Stage 3 (minor edits) never marks a lead, so a run that opens directly on stage 3
+    with --keep-suggested is rejected; here we assert the group-level safety inside the
+    intended-set builder via a stage-2 group whose lead row we strip of its marker.
+    """
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 5, kind="PNG")
+    _photo(lib / "a.jpg", 5, kind="JPEG", quality=80)
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])
+    run = _run_row(database, root["id"])
+    assert run["stage"] == 2
+    # Simulate a group with no suggested lead: strip the _suggested marker from the
+    # persisted rows AND rename the on-disk shortcut so nothing is a lead.
+    grp = _stage_dir(lib, 2)
+    for a in _stage_actions(database, run["id"], 2):
+        if a["shortcut_name"].endswith("_suggested.lnk"):
+            plain = a["shortcut_name"].replace("_suggested", "")
+            os.rename(os.path.join(grp, a["shortcut_name"]), os.path.join(grp, plain))
+            database.execute("UPDATE review_actions SET shortcut_name=? WHERE id=?",
+                             (plain, a["id"]))
+    _run(q, database, "dedup", root_id=root["id"], confirm=True, keep_suggested=True)
+    # No lead → whole group spared → both files remain, nothing trashed.
+    assert (lib / "a.png").exists() and (lib / "a.jpg").exists()
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE status='trashed'")["c"] == 0
+
+
+def test_dedup_keep_suggested_rejected_on_non_stage2(queue_and_db, tmp_path):
+    """--keep-suggested on a run parked at stage 3 (no leads) is rejected, not silently applied."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 7, kind="PNG")
+    _photo(lib / "a_edit.png", 7, kind="PNG", tweak=20)  # minor edit → stage 3 only
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])
+    run = _run_row(database, root["id"])
+    assert run["stage"] == 3  # opens directly on stage 3 (no exact/stage-2 candidates)
+    _run(q, database, "dedup", expect="error", root_id=root["id"],
+         confirm=True, keep_suggested=True)
+    assert _run_row(database, root["id"]) is not None  # still pending, nothing applied
+
+
+def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
+    """Analyze logs the keep-lead pick breakdown (decided by resolution/format/size)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "master.png", 5, kind="PNG")               # lead by format (lossless > jpg)
+    _photo(lib / "export.jpg", 5, kind="JPEG", quality=80)
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    logs = _run_capture(q, database, "dedup", root_id=root["id"])
+    blob = "\n".join(logs)
+    assert "keep-lead picks" in blob
+    assert "resolution + format" in blob  # PNG vs JPEG at equal resolution → format decides
+
+
+@win_only
 def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
     """A crash between apply and stage-next (stage_phase='applied') → re-confirm advances,
     it does NOT re-delete (§8 B Phase 7 resumable window)."""

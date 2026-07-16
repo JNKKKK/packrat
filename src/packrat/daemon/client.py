@@ -162,11 +162,13 @@ class DaemonClient:
         confirm: bool = False,
         cancel: bool = False,
         dry_run: bool = False,
+        keep_suggested: bool = False,
     ) -> int:
         """Submit a dedup job (§8 B); returns the job id. Raises :class:`BusyResponse`."""
         r = self._raw_post(
             "/dedup",
-            {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run},
+            {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run,
+             "keep_suggested": keep_suggested},
         )
         if r.status_code == 409:
             raise BusyResponse(r.json())

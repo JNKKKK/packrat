@@ -355,6 +355,11 @@ def dedup(
     confirm: bool = typer.Option(False, "--confirm", help="Apply the current stage, then advance to the next."),
     cancel: bool = typer.Option(False, "--cancel", help="Discard the whole run's staging; delete nothing."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Compute all 3 stages + print the plan; stage nothing."),
+    keep_suggested: bool = typer.Option(
+        False, "--keep-suggested",
+        help="With --confirm on stage 2: keep ONLY each group's suggested lead, delete the rest — "
+             "ignoring your shortcut edits. (Groups with no suggested lead are spared.)",
+    ),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
@@ -364,15 +369,21 @@ def dedup(
     (default DELETE — remove a shortcut to SPARE), 2 `_suspect_recompression\\` and
     3 `_with_minor_edits\\` (default KEEP — remove a shortcut to DELETE). `--confirm`
     applies the current stage and advances to the next non-empty one; `--cancel`
-    discards the whole run.
+    discards the whole run. On stage 2, `--confirm --keep-suggested` trusts packrat's
+    `_suggested` lead per group and deletes every other member, ignoring your edits.
     """
     if confirm and cancel:
         typer.echo("give --confirm or --cancel, not both.", err=True)
         raise typer.Exit(2)
+    if keep_suggested and not confirm:
+        typer.echo("--keep-suggested only applies with --confirm.", err=True)
+        raise typer.Exit(2)
     client = _client_or_spawn()
-    label = "dedup --confirm" if confirm else "dedup --cancel" if cancel else "dedup"
+    label = ("dedup --confirm --keep-suggested" if confirm and keep_suggested
+             else "dedup --confirm" if confirm else "dedup --cancel" if cancel else "dedup")
     try:
-        job_id = client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run)
+        job_id = client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run,
+                                     keep_suggested=keep_suggested)
     except BusyResponse as exc:
         _print_busy(exc)
         raise typer.Exit(1)

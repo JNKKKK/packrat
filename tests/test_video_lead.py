@@ -183,6 +183,46 @@ def test_photo_lead_size_breaks_tie_within_format():
 
 
 # ---------------------------------------------------------------------------
+# keep-lead DECISION LEVEL (drives the stage-2 lead-pick stats, §8 B)
+# ---------------------------------------------------------------------------
+def test_lead_level_resolution():
+    cfg = Config()
+    m = _photo_members((1, "jpg"), (2, "jpg"))
+    rank = _photo_rank(**{"1": {"width": 4000, "height": 3000, "size": 100_000},
+                          "2": {"width": 2000, "height": 1500, "size": 900_000}})
+    lead, level = dedup._group_lead_and_level(m, rank, cfg)
+    assert lead == 1 and level == "resolution"
+
+
+def test_lead_level_resolution_plus_format():
+    cfg = Config()
+    m = _photo_members((1, "png"), (2, "jpg"))
+    rank = _photo_rank(**{"1": {"width": 4000, "height": 3000, "size": 100_000},
+                          "2": {"width": 4000, "height": 3000, "size": 900_000}})
+    lead, level = dedup._group_lead_and_level(m, rank, cfg)
+    assert lead == 1 and level == "resolution + format"
+
+
+def test_lead_level_resolution_plus_format_plus_size():
+    cfg = Config()
+    m = _photo_members((1, "jpg"), (2, "jpg"))
+    rank = _photo_rank(**{"1": {"width": 4000, "height": 3000, "size": 620_000},
+                          "2": {"width": 4000, "height": 3000, "size": 416_000}})
+    lead, level = dedup._group_lead_and_level(m, rank, cfg)
+    assert lead == 1 and level == "resolution + format + size"
+
+
+def test_lead_level_path_tiebreak():
+    """Fully-tied key (same res/format/size) → decided by the stable path tiebreak."""
+    cfg = Config()
+    m = _photo_members((1, "jpg"), (2, "jpg"))
+    rank = _photo_rank(**{"1": {"width": 4000, "height": 3000, "size": 500_000},
+                          "2": {"width": 4000, "height": 3000, "size": 500_000}})
+    lead, level = dedup._group_lead_and_level(m, rank, cfg)
+    assert lead == 1 and level == "path tiebreak (identical rank)"  # 1.jpg < 2.jpg
+
+
+# ---------------------------------------------------------------------------
 # scan-capture half: codec persisted to assets (unit tests can't cover this)
 # ---------------------------------------------------------------------------
 def test_scan_captures_video_codec(tmp_path, monkeypatch):

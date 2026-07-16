@@ -1332,11 +1332,25 @@ blowup.
        *Accepted caveat:* bitrate lies **across codecs** (HEVC is ~2× H.264-efficient), which the
        weight *reduces* but doesn't cure — surfaced in the manifest (codec + bitrate shown) for
        hand-override, not solved. No `duration_s`/`codec` → falls back to raw size / weight 1.0.
-     **This is a hint, nothing more:** the stage stays default-**KEEP** (you still delete a member by
-     removing its shortcut); the marker never deletes anything and never changes a default. **Stage 3
-     (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want to keep.
-     → `is_lead` recorded in the plan; surfaced in `manifest.csv` (`suggested_lead`, `media_type`,
-     `width`, `height`, `size`, `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
+     **This is a hint by default:** the stage stays default-**KEEP** (you still delete a member by
+     removing its shortcut); the marker itself never deletes anything and never changes a default.
+     **Stage 3 (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want
+     to keep. → `is_lead` recorded in the plan; surfaced in `manifest.csv` (`suggested_lead`,
+     `media_type`, `width`, `height`, `size`, `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
+     - **Keep-lead pick stats (reported at staging).** When stage 2 is staged, the report logs *how*
+       each group's lead was decided — a tally over the ranking key's decision levels
+       (photo: `resolution` / `resolution + format` / `resolution + format + size`; video: the
+       bitrate/codec analogues; `path tiebreak` when every key component tied). This exposes how much
+       of the collection the lead rests on resolution alone vs. the finer format/size calls, so the
+       suggestion's confidence is visible before you act on it.
+     - **`--confirm --keep-suggested` (stage 2 only): act on the suggestion in bulk.** Instead of
+       reviewing shortcut-by-shortcut, this **keeps only each group's `_suggested` lead and deletes
+       every other member, ignoring your shortcut edits for the stage**. It is the "I trust packrat's
+       pick" shortcut. **Safety:** a group with **no** suggested lead (an all-external group, or a lead
+       whose `.lnk` failed to stage) is **fully spared** — it never deletes every copy of an asset
+       because packrat couldn't name a keeper. Rejected on stage 1 / stage 3 (no leads there). Deleted
+       non-leads follow the normal perceptual-deletion path (asset → `trashed`/`dedup-perceptual` at
+       zero instances, §Phase 6). Only stage 2 is affected; the run then advances normally.
 
 **Phase 4 — Materialize the current stage's staging folder** *(edge case 5)*
 Create the current stage's folder under `<root>\_packrat_review\` (already in the ignore set, so
@@ -1411,6 +1425,11 @@ can't happen silently.
       target; **present** → keep.
     A renamed shortcut counts as **removed**; extra files dropped in are ignored (only planned names
     consulted). This yields the *intended* delete set; liveness is applied per-file in Phase 6.
+    - **`--keep-suggested` override (stage 2 only):** skip the shortcut-presence read entirely and
+      derive the intended set from the plan — delete every member **except** each group's
+      `_suggested` lead, regardless of what shortcuts the user added/removed. A group with no
+      `_suggested` lead is spared whole (never delete every copy because no keeper was named).
+      Rejected outside stage 2 (stages 1/3 have no leads). Phase 6 liveness still applies.
 
 **Phase 6 — Authoritative liveness + apply this stage's deletions** (backup DB first) *(edge case 5)*
 The authoritative gate — done lazily, one target at a time, right before the irreversible move.
@@ -2071,6 +2090,7 @@ roots; trashed excluded). At most one `pending` run per folder (one run spans al
 ```
 packrat dedup <folder>              # analyze → stage 1 → pending (stage 1)
 packrat dedup <folder> --confirm    # apply current stage, auto-advance to next; last stage → completed
+packrat dedup <folder> --confirm --keep-suggested  # stage 2: keep only each group's suggested lead
 packrat dedup <folder> --cancel     # discard the whole run's staging, delete nothing → cancelled
 packrat dedup <folder> --dry-run    # compute all 3 stages read-only; stage/write nothing
 # (per-root dedup/review state, incl. current stage, is shown by `packrat status`, §11)
@@ -2082,6 +2102,10 @@ Options
   --confirm              Apply the current stage's review (read which shortcuts remain, delete
                          accordingly; typed confirmation; DB backup first) and advance to the next
                          non-empty stage — repeat until the run completes after the last stage.
+  --keep-suggested       With --confirm on STAGE 2 only: keep just each group's `_suggested` lead
+                         and delete every other member, IGNORING your shortcut edits for the stage
+                         ("trust packrat's pick"). A group with no suggested lead is fully spared;
+                         rejected on stage 1 / stage 3 (no leads there).
   --cancel               Discard the run's staging folders (any stage); delete nothing.
   --dry-run              Compute all 3 stages and print the plan (per-stage counts, would-stage
                          list) without creating staging folders or shortcuts.
@@ -2092,7 +2116,8 @@ Conventions differ by stage: `_exact_dup_to_delete\` is default-DELETE (remove a
 Stage 1 keeps oldest-mtime internally / drops all when an external copy exists; stages 2–3 stage
 near-dup members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2,
 packrat marks the least-compressed photo member `_suggested` (resolution → format rank → file size)
-as a keep-hint — advisory only; default still KEEP.
+as a keep-hint — advisory by default (override with `--confirm --keep-suggested`), and the staging
+report tallies how each group's lead was decided (by resolution / +format / +size).
 ```
 
 ### `packrat merge`

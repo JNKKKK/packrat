@@ -82,6 +82,9 @@ _STAGE_LABEL = {
     STAGE_RECOMPRESS: "suspected recompressions",
     STAGE_EDIT: "minor edits",
 }
+#: Marker embedded in a stage-2 keep-lead's shortcut name (§8 B step 9). Both the
+#: staging code and `--keep-suggested` confirm key off this, so keep them in sync.
+_SUGGESTED_MARK = "_suggested"
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +179,14 @@ def _confirm(ctx: JobContext) -> None:
     stage = int(run["stage"])
     audit_dir = review.audit_run_dir("dedup", root["name"], run_id)
 
+    keep_suggested = bool(ctx.params.get("keep_suggested"))
+    if keep_suggested and stage != STAGE_RECOMPRESS:
+        raise ValueError(
+            f"--keep-suggested applies only to stage 2 (recompression); this run is on "
+            f"stage {stage} ({_STAGE_LABEL[stage]}), which has no suggested leads. "
+            f"Confirm it normally: `packrat dedup {root['name']} --confirm`."
+        )
+
     # Resume the apply-then-advance crash window (§8 B Phase 7): if the current stage
     # was already applied (crash before staging the next), skip straight to advancing.
     if run["stage_phase"] != "applied":
@@ -187,7 +198,10 @@ def _confirm(ctx: JobContext) -> None:
             raise ValueError(
                 f"{_STAGE_FOLDER[stage]} staging folder is missing — aborting (did you delete it?)."
             )
-        intended = [a for a in actions if _intends_delete(a, stage, stage_dir)]
+        if keep_suggested:
+            intended = _keep_suggested_intended(ctx, actions)
+        else:
+            intended = [a for a in actions if _intends_delete(a, stage, stage_dir)]
         _backup_db(db, run_id, stage)
         outcomes = _apply_stage(ctx, stage, intended)
         review.write_audit(
@@ -197,6 +211,8 @@ def _confirm(ctx: JobContext) -> None:
         review.remove_tree(stage_dir)
         with db.transaction() as conn:
             conn.execute("UPDATE review_runs SET stage_phase='applied' WHERE id=?", (run_id,))
+        if keep_suggested:
+            ctx.log("  (--keep-suggested: kept each group's suggested lead, ignored shortcut edits.)")
         _report_stage_confirm(ctx, stage, outcomes)
 
     # Advance to the next non-empty stage, or finalize after the last.
@@ -256,10 +272,10 @@ def _dry_run(ctx: JobContext) -> None:
 # stage planning (pure DB + fingerprint math; no stat, no writes)
 # ---------------------------------------------------------------------------
 def _plan_stage(ctx: JobContext, root_id: int, root_path: str, stage: int) -> dict:
-    """Return ``{stage, actions, n_groups, edges}`` for one stage (no I/O, no writes)."""
+    """Return ``{stage, actions, n_groups, lead_levels, edges}`` for one stage (no I/O)."""
     if stage == STAGE_EXACT:
         actions = _plan_exact(ctx, root_id)
-        return {"stage": stage, "actions": actions, "n_groups": 0, "edges": []}
+        return {"stage": stage, "actions": actions, "n_groups": 0, "lead_levels": {}, "edges": []}
     return _plan_perceptual(ctx, root_id, stage)
 
 
@@ -345,14 +361,20 @@ def _plan_perceptual(ctx: JobContext, root_id: int, stage: int) -> dict:
             if e.distance > recompress:
                 banded.append(e)
 
-    actions, n_groups = _group_actions(ctx, db, root_id, stage, banded)
-    return {"stage": stage, "actions": actions, "n_groups": n_groups, "edges": edges}
+    actions, n_groups, lead_levels = _group_actions(ctx, db, root_id, stage, banded)
+    return {"stage": stage, "actions": actions, "n_groups": n_groups,
+            "lead_levels": lead_levels, "edges": edges}
 
 
 def _group_actions(ctx, db, root_id, stage, banded_edges):
-    """Build clusters from this stage's banded edges; return ``(actions, n_groups)``."""
+    """Build clusters from this stage's banded edges.
+
+    Returns ``(actions, n_groups, lead_levels)`` where ``lead_levels`` is a
+    ``{level_label: count}`` tally of *why* each group's keep-lead won (§8 B stage-2
+    lead-pick stats), empty unless this stage suggests leads (stage 2 only).
+    """
     if not banded_edges:
-        return [], 0
+        return [], 0, {}
     adj: dict[int, set[int]] = {}
     dist: dict[tuple[int, int], int] = {}
     for e in banded_edges:
@@ -376,7 +398,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
         if len(comp) >= 2:
             clusters.append(sorted(comp))
     if not clusters:
-        return [], 0
+        return [], 0, {}
 
     all_ids = {aid for c in clusters for aid in c}
     insts = _surviving_instances(db, all_ids, root_id)
@@ -391,12 +413,18 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
     suggest_lead = stage == STAGE_RECOMPRESS
 
     actions: list[dict] = []
+    lead_levels: dict[str, int] = {}
     group_no = 0
     for comp in clusters:
         group_no += 1
         # Members with a live representative instance, in stable order.
         members = [(aid, insts[aid]) for aid in comp if insts.get(aid) is not None]
-        lead_id = _pick_lead(members, rank, ctx.config) if suggest_lead else None
+        if suggest_lead:
+            lead_id, level = _group_lead_and_level(members, rank, ctx.config)
+            if level is not None:
+                lead_levels[level] = lead_levels.get(level, 0) + 1
+        else:
+            lead_id = None
         member_no = 0
         for asset_id, inst in members:
             member_no += 1
@@ -409,7 +437,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
             is_lead = asset_id == lead_id
             # `_suggested` marks packrat's keep recommendation; `_external` marks a file
             # in another root (deleting it reaches cross-root). Both are advisory.
-            suffix = ("_suggested" if is_lead else "") + ("_external" if inst["root_id"] != root_id else "")
+            suffix = (_SUGGESTED_MARK if is_lead else "") + ("_external" if inst["root_id"] != root_id else "")
             r = rank.get(asset_id, {})
             actions.append({
                 "stage": stage, "folder": folder, "kind": "perceptual", "reason": "perceptual",
@@ -423,68 +451,90 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
                 "duration_s": r.get("duration_s"), "codec": r.get("codec"),
                 "shortcut_name": f"group{group_no:04d}_{member_no:04d}{suffix}.lnk",
             })
-    return actions, group_no
+    return actions, group_no, lead_levels
+
+
+# Ranking-key component labels, best-decision first — what the keep-lead was decided
+# by (the leftmost key component where the lead is uniquely ahead). Index i names the
+# level "decided once you consider key[:i+1]"; a full tuple tie falls to the path
+# tiebreak (`_PATH_TIEBREAK`). Reported as stage-2 lead-pick stats (§8 B).
+_PHOTO_LEAD_LEVELS = ("resolution", "resolution + format", "resolution + format + size")
+_VIDEO_LEAD_LEVELS = ("resolution", "resolution + bitrate", "resolution + bitrate + codec")
+_PATH_TIEBREAK = "path tiebreak (identical rank)"
+
+
+def _photo_lead_key(inst, r) -> tuple:
+    """Photo keep-lead ranking key (best = greatest): (pixels, format rank, size). §8 B."""
+    pixels = (r.get("width") or 0) * (r.get("height") or 0)
+    return (pixels, _photo_format_rank(inst["path"]), r.get("size") or 0)
+
+
+def _video_lead_key(r, config) -> tuple:
+    """Video keep-lead ranking key (best = greatest): (pixels, bitrate band, codec weight). §8 B."""
+    pixels = (r.get("width") or 0) * (r.get("height") or 0)
+    weight = config.match.codec_weights.get((r.get("codec") or "").lower(), 1.0)
+    eff = _effective_bitrate(r.get("size"), r.get("duration_s"), weight)
+    return (pixels, _log_band(eff, config.match.video_bitrate_tie_pct), weight)
+
+
+def _group_lead_and_level(members, rank, config) -> tuple:
+    """Pick the keep-lead of a stage-2 group AND *why* it won (§8 B).
+
+    A group is homogeneous (all photo, or all video — a photo never matches a video),
+    so its media type picks the ranking key:
+
+    - **Photo** (best first, all DESC): pixels → **format rank** (`_photo_format_rank`:
+      lossless > efficient-lossy HEIC/AVIF > other-lossy JPEG/WebP) → file **size**.
+      Resolution first (a downscaled re-export loses outright); then format — the primary
+      quality signal at equal resolution, since a modern codec packs more real detail per
+      byte, so an iPhone HEIC original outranks its JPEG export; then, **within one
+      format** (where size is a clean monotonic quality proxy — the encoder's output size
+      *is* the quality dial), the larger file. Size is used only within a format because
+      it lies across them (an efficient HEIC master is smaller than a bloated JPEG export)
+      — exactly what the format rank above handles.
+    - **Video** (best first, all DESC): pixels → effective-bitrate BAND → codec weight.
+      Effective bitrate = `size/duration_s × codec_weight`: a more-efficient codec's bits
+      are worth more, so an HEVC master beats an H.264 re-export at equal
+      resolution+quality. Bitrates within `video_bitrate_tie_pct` share a log-scale band.
+
+    Returns ``(lead_asset_id, level_label)``. ``level_label`` is the leftmost key
+    component that made the lead *uniquely* best (``_PHOTO_LEAD_LEVELS`` /
+    ``_VIDEO_LEAD_LEVELS``), or ``_PATH_TIEBREAK`` if every key component tied and the
+    stable smallest-normcase-path tiebreak decided. Empty group → ``(None, None)``.
+    """
+    if not members:
+        return None, None
+    is_video = any(rank.get(aid, {}).get("media_type") == "video" for aid, _ in members)
+    if is_video:
+        keys = [_video_lead_key(rank.get(aid, {}), config) for aid, _ in members]
+        levels = _VIDEO_LEAD_LEVELS
+    else:
+        keys = [_photo_lead_key(inst, rank.get(aid, {})) for aid, inst in members]
+        levels = _PHOTO_LEAD_LEVELS
+
+    # Lead = greatest key, tiebroken by smallest normcase path (deterministic across runs).
+    best_i = 0
+    for i in range(1, len(members)):
+        if keys[i] > keys[best_i] or (
+            keys[i] == keys[best_i]
+            and os.path.normcase(members[i][1]["path"]) < os.path.normcase(members[best_i][1]["path"])
+        ):
+            best_i = i
+    klead = keys[best_i]
+
+    # Decision level: the shortest key prefix at which the lead's key is unique.
+    label = _PATH_TIEBREAK
+    for depth in range(len(klead)):
+        prefix = klead[: depth + 1]
+        if sum(1 for k in keys if k[: depth + 1] == prefix) == 1:
+            label = levels[depth]
+            break
+    return members[best_i][0], label
 
 
 def _pick_lead(members, rank, config):
-    """Pick the keep-lead asset among a stage-2 group (§8 B).
-
-    A group is homogeneous (all photo, or all video — a photo never matches a video),
-    so the group's media type picks the ranking key. Both keys lead with **resolution**
-    (a downscaled re-export loses outright); a member with no rank row sorts last.
-
-    - **Photo** (best first, all DESC): pixels → **format rank** → file **size**.
-      *Resolution* first — a downscaled re-export loses outright. Then **format rank**
-      (`_photo_format_rank`: lossless > efficient-lossy HEIC/AVIF > other-lossy
-      JPEG/WebP), the primary quality signal at equal resolution — a lossless copy is
-      the master, and among lossy copies a modern codec packs more real detail per byte
-      than JPEG, so an iPhone HEIC original outranks its JPEG export. Finally, **within
-      one format** (where it is a clean monotonic quality proxy — at fixed
-      resolution+format the encoder's output size *is* the quality dial), the larger
-      **file size** wins. Size is used only *within* a format because it lies *across*
-      them (an efficient HEIC master is smaller than a bloated JPEG export), which is
-      exactly what the format rank above it handles. *(A prior residual-entropy
-      `detail_score` was dropped — it cost ~40% of scan CPU yet, banded to tame its
-      high-quality-JPEG noise, only ever agreed with size within a format; §8 B.)*
-    - **Video** (best first, all DESC): pixels → effective-bitrate BAND → codec weight.
-      Effective bitrate = `size/duration_s × codec_weight` (§8 B): a more-efficient
-      codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
-      resolution+quality. Bitrates within `video_bitrate_tie_pct` share a log-scale
-      band (a "tie"), so the codec weight then the path decide — not a coin-flip on a
-      noisy diff. No `duration_s` → fall back to raw size (still ×weight).
-
-    Final stable tiebreak (both): smallest normcase path — deterministic across runs.
-    """
-    def photo_key(item):
-        aid, inst = item
-        r = rank.get(aid, {})
-        pixels = (r.get("width") or 0) * (r.get("height") or 0)
-        fmt = _photo_format_rank(inst["path"])
-        size = r.get("size") or 0
-        return (pixels, fmt, size)
-
-    def video_key(item):
-        aid, _inst = item
-        r = rank.get(aid, {})
-        pixels = (r.get("width") or 0) * (r.get("height") or 0)
-        weight = config.match.codec_weights.get((r.get("codec") or "").lower(), 1.0)
-        eff = _effective_bitrate(r.get("size"), r.get("duration_s"), weight)
-        band = _log_band(eff, config.match.video_bitrate_tie_pct)
-        return (pixels, band, weight)
-
-    # A group is homogeneous; sample any member's media type.
-    is_video = any(rank.get(aid, {}).get("media_type") == "video" for aid, _ in members)
-    key = video_key if is_video else photo_key
-
-    best = None
-    best_key = None
-    for item in members:
-        k = key(item)
-        if best is None or k > best_key or (
-            k == best_key and os.path.normcase(item[1]["path"]) < os.path.normcase(best[1]["path"])
-        ):
-            best, best_key = item, k
-    return best[0] if best else None
+    """Keep-lead asset id for a stage-2 group (§8 B); see :func:`_group_lead_and_level`."""
+    return _group_lead_and_level(members, rank, config)[0]
 
 
 def _effective_bitrate(size, duration_s, weight: float) -> float:
@@ -619,7 +669,7 @@ def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False):
         _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True)
         return
 
-    _report_staged(ctx, root, run_id, stage, staged, skipped, advancing=advancing)
+    _report_staged(ctx, root, run_id, stage, staged, skipped, plan, advancing=advancing)
 
 
 def _materialize(ctx, root_path, run_id, stage, actions):
@@ -775,6 +825,32 @@ def _intends_delete(action: dict, stage: int, stage_dir: str) -> bool:
     return not present            # default-keep: absent shortcut → delete
 
 
+def _keep_suggested_intended(ctx, actions: list[dict]) -> list[dict]:
+    r"""Delete set for ``--confirm --keep-suggested`` (stage 2 only): keep ONLY each
+    group's suggested lead, delete every other member — **ignoring the user's shortcut
+    edits entirely** (the whole point of the flag: "trust packrat's pick").
+
+    A group's suggested lead is the persisted action whose ``shortcut_name`` carries the
+    ``_suggested`` marker (written at staging, §8 B step 9). **Safety:** if a group has
+    **no** suggested lead (e.g. an all-external group, or a lead whose ``.lnk`` failed
+    to stage so its row wasn't persisted), the whole group is **spared** — never delete
+    every copy of an asset because packrat couldn't name a keeper. Logs each such group.
+    """
+    by_group: dict[int, list[dict]] = {}
+    for a in actions:
+        by_group.setdefault(a["group_no"], []).append(a)
+    intended: list[dict] = []
+    for group_no, members in by_group.items():
+        leads = [a for a in members if _SUGGESTED_MARK in (a["shortcut_name"] or "")]
+        if not leads:
+            ctx.log(f"  keep-suggested: group {group_no:04d} has no suggested lead — "
+                    f"sparing all {len(members)} member(s).")
+            continue
+        lead_ids = {a["id"] for a in leads}
+        intended.extend(a for a in members if a["id"] not in lead_ids)
+    return intended
+
+
 def _apply_stage(ctx, stage, intended):
     """Recycle each intended file under the lazy liveness (+ stage-1 survivor) gate (§8 B Phase 6)."""
     db = ctx.db
@@ -893,7 +969,7 @@ def _finalize_completed(ctx, root, run_id) -> None:
     ctx.log(f"dedup complete for {root['name']}: all stages reviewed.")
 
 
-def _report_staged(ctx, root, run_id, stage, staged, skipped, *, advancing) -> None:
+def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing) -> None:
     parent = review.staging_parent(root["path"])
     verb = "advanced to" if advancing else "staged"
     if stage == STAGE_EXACT:
@@ -906,7 +982,29 @@ def _report_staged(ctx, root, run_id, stage, staged, skipped, *, advancing) -> N
         ctx.log("  default KEEP — remove a shortcut to DELETE that file.")
     if skipped:
         ctx.log(f"  {skipped} candidate(s) skipped at staging (already gone / promoted).")
+    _report_lead_stats(ctx, stage, plan.get("lead_levels") or {})
+    if stage == STAGE_RECOMPRESS:
+        ctx.log(f"  tip: `packrat dedup {root['name']} --confirm --keep-suggested` keeps only the "
+                f"suggested lead per group (ignores your shortcut edits this stage).")
     ctx.log(f"review in Explorer, then: `packrat dedup {root['name']} --confirm` (or --cancel).")
+
+
+def _report_lead_stats(ctx, stage, lead_levels: dict) -> None:
+    """Log the stage-2 keep-lead pick breakdown — how each group's lead was decided (§8 B).
+
+    Ordered best-decision-first (resolution, then +format, then +size, then the
+    path tiebreak). Only stage 2 suggests leads, so this is silent elsewhere.
+    """
+    if stage != STAGE_RECOMPRESS or not lead_levels:
+        return
+    total = sum(lead_levels.values())
+    ctx.log(f"  keep-lead picks ({total} group(s)) — decided by:")
+    ordered = list(_PHOTO_LEAD_LEVELS) + list(_VIDEO_LEAD_LEVELS) + [_PATH_TIEBREAK]
+    seen = set()
+    for level in ordered:
+        if level in lead_levels and level not in seen:
+            seen.add(level)
+            ctx.log(f"    {lead_levels[level]:>4} · {level}")
 
 
 def _report_stage_confirm(ctx, stage, out) -> None:

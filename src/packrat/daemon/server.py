@@ -284,6 +284,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
             "confirm": bool(body.get("confirm")),
             "cancel": bool(body.get("cancel")),
             "dry_run": bool(body.get("dry_run")),
+            "keep_suggested": bool(body.get("keep_suggested")),
         }
         try:
             job_id = queue.submit("dedup", params)
