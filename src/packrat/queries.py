@@ -70,8 +70,8 @@ def status_snapshot() -> dict:
         conn.close()
 
 
-def _queued_with_reasons(conn) -> list[dict]:
-    """Backlog rows (oldest-first) + a per-job blocked reason (§3/§12).
+def _annotate_queued_row(conn, row) -> dict:
+    """Add ``label`` + ``blocked`` to a queued ``jobs`` row (§3/§12).
 
     A job is *blocked* when its **owned** root is held by a pending review / open
     merge — the same predicate the queue applies at dequeue. Ownership is narrower
@@ -84,28 +84,39 @@ def _queued_with_reasons(conn) -> list[dict]:
     from .jobs import get_job_spec, job_label
     from .roots import root_holder
 
-    rows = conn.execute(
+    try:
+        params = _json.loads(row["params_json"] or "{}")
+    except (ValueError, TypeError):
+        params = {}
+    blocked = None
+    spec = get_job_spec(row["type"])
+    if spec is not None and spec.owned_root is not None:
+        owned = spec.owned_root(params)
+        if owned is not None:
+            blocked = root_holder(_DBShim(conn), owned)
+    d = dict(row)
+    d["label"] = job_label(row["type"], params, root_name=row["root_name"])
+    d["blocked"] = blocked
+    return d
+
+
+def _queued_with_reasons(conn, root_id: int | None = None) -> list[dict]:
+    """Backlog rows (oldest-first) + a per-job blocked reason (§3/§12).
+
+    With ``root_id`` set, only that root's queued jobs (``jobs.root_id`` = it) — the
+    per-root detail view (§12); without it, the whole backlog (global Queue panel).
+    """
+    sql = (
         "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
         "  r.name AS root_name FROM jobs j LEFT JOIN roots r ON r.id=j.root_id "
-        "WHERE j.status='queued' ORDER BY j.enqueued_at, j.id"
-    ).fetchall()
-    out = []
-    for row in rows:
-        try:
-            params = _json.loads(row["params_json"] or "{}")
-        except (ValueError, TypeError):
-            params = {}
-        blocked = None
-        spec = get_job_spec(row["type"])
-        if spec is not None and spec.owned_root is not None:
-            owned = spec.owned_root(params)
-            if owned is not None:
-                blocked = root_holder(_DBShim(conn), owned)
-        d = dict(row)
-        d["label"] = job_label(row["type"], params, root_name=row["root_name"])
-        d["blocked"] = blocked
-        out.append(d)
-    return out
+        "WHERE j.status='queued'"
+    )
+    args: tuple = ()
+    if root_id is not None:
+        sql += " AND j.root_id=?"
+        args = (root_id,)
+    sql += " ORDER BY j.enqueued_at, j.id"
+    return [_annotate_queued_row(conn, row) for row in conn.execute(sql, args).fetchall()]
 
 
 class _DBShim:
@@ -198,6 +209,17 @@ def root_detail(root_arg: str) -> dict | None:
             pending_dict["counts"] = _review_counts(
                 conn, pending["id"], pending["run_type"], pending["stage"]
             )
+        # The root's live queue view (§12 root detail): the job running ON this root
+        # (if any), plus this root's queued backlog with blocked reasons. Both key off
+        # jobs.root_id, so a `scan --all` (root_id NULL) isn't attributed to any root.
+        running_row = conn.execute(
+            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.started_at, "
+            "  j.params_json, r.name AS root_name FROM jobs j "
+            "LEFT JOIN roots r ON r.id=j.root_id WHERE j.status='running' AND j.root_id=?",
+            (rid,),
+        ).fetchone()
+        running_dict = _job_dict(running_row) if running_row is not None else None
+        queued_here = _queued_with_reasons(conn, root_id=rid)
         # Most-recent persisted scan result for this root + its problem files, so
         # `status <root>` can re-render the last scan's banner + undecodable/error
         # paths (the §scan-results read path). Newest by job_id.
@@ -238,6 +260,8 @@ def root_detail(root_arg: str) -> dict | None:
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
             "pending_review": pending_dict,
+            "running_job": running_dict,
+            "queued_jobs": queued_here,
             "last_scan": dict(last_scan) if last_scan is not None else None,
             # Live current undecodable count (see problem_files above) — the banner shows
             # this, not the stale last-scan number, so count + list agree post-cleanup.

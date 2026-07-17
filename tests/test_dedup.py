@@ -611,6 +611,33 @@ def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
     assert counts["members"] == 1 and counts["groups"] == 1
 
 
+def test_root_detail_shows_pending_review_and_queued_jobs(queue_and_db, tmp_path):
+    """§12 root detail: pending review + this root's queued backlog (blocked reasons)."""
+    q, database = queue_and_db
+    from packrat import queries
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 1)
+    root = register(database, str(lib))
+    # A pending dedup holds the root (no worker slot — analyze finished).
+    database.execute(
+        "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+        "VALUES (?, 'dedup', 'pending', 1, 'staged', 't')",
+        (root["id"],),
+    )
+    # A scan submitted against it enqueues + is held (blocked on the pending dedup).
+    q.submit("scan", {"root_id": root["id"]})
+
+    d = queries.root_detail(str(lib))
+    assert d["pending_review"]["run_type"] == "dedup"
+    assert d["running_job"] is None                 # nothing running on this root
+    assert len(d["queued_jobs"]) == 1
+    qj = d["queued_jobs"][0]
+    assert qj["type"] == "scan"
+    assert qj["blocked"] is not None and qj["blocked"]["run_type"] == "dedup"
+
+
 def test_scan_held_on_root_with_pending_dedup(queue_and_db, tmp_path):
     """§3: a manual scan of a root under review is ENQUEUED + held (not rejected)."""
     q, database = queue_and_db

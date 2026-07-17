@@ -184,6 +184,17 @@ def status(
                        f"{_review_count_summary(pr)}")
             typer.echo(f"    review: {d['path']}\\_packrat_review\\ · "
                        f"`packrat {_review_verb(pr)} {d['name']} --confirm` (or --cancel).")
+        rj = d.get("running_job")
+        if rj:
+            typer.echo(f"  ▶ running: {rj.get('label') or rj['type']} "
+                       f"({rj.get('done', 0)}/{rj.get('total')})")
+        qj = d.get("queued_jobs", [])
+        if qj:
+            typer.echo(f"  queued: {len(qj)} job(s) for this root —")
+            for q in qj:
+                holder = q.get("blocked")
+                why = f"blocked: {holder['what']}" if holder else "waiting for worker"
+                typer.echo(f"    {q.get('label') or q['type']} · {why}")
         _print_last_scan(d)
         return
     snap = client.status()
