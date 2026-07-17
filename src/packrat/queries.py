@@ -32,12 +32,19 @@ def status_snapshot() -> dict:
             "SELECT COUNT(*) c FROM assets WHERE status='trashed'"
         ).fetchone()["c"]
         running = conn.execute(
-            "SELECT id, type, total, done, started_at FROM jobs WHERE status='running'"
+            "SELECT j.id, j.type, j.root_id, j.total, j.done, j.started_at, j.params_json, "
+            "  r.name AS root_name FROM jobs j LEFT JOIN roots r ON r.id=j.root_id "
+            "WHERE j.status='running'"
         ).fetchone()
         interrupted = conn.execute(
             "SELECT id, type, started_at, params_json FROM jobs "
             "WHERE status='interrupted' ORDER BY id DESC LIMIT 20"
         ).fetchall()
+        # The durable FIFO backlog (§3), oldest-first, each annotated with why it
+        # waits: 'blocked' when its owned root is held (read from the catalog via the
+        # shared root_holder), else runnable ('waiting for worker'). Computed here so
+        # `status`/TUI show the same reasons the live queue enforces at dequeue.
+        queued = _queued_with_reasons(conn)
         pending_reviews = conn.execute(
             "SELECT rr.id, rr.root_id, rr.run_type, rr.stage, rr.created_at, r.name root_name "
             "FROM review_runs rr JOIN roots r ON r.id = rr.root_id "
@@ -53,13 +60,63 @@ def status_snapshot() -> dict:
             "photos": photos,
             "videos": videos,
             "trashed": trashed,
-            "running": dict(running) if running else None,
+            "running": _job_dict(running) if running else None,
+            "queued": queued,
             "interrupted": [dict(r) for r in interrupted],
             "pending_reviews": pending_list,
             "roots": roots_snapshot(),
         }
     finally:
         conn.close()
+
+
+def _queued_with_reasons(conn) -> list[dict]:
+    """Backlog rows (oldest-first) + a per-job blocked reason (§3/§12).
+
+    A job is *blocked* when its **owned** root is held by a pending review / open
+    merge — the same predicate the queue applies at dequeue. Ownership is narrower
+    than ``root_id`` (e.g. a dedup ``--confirm`` owns nothing), so we recompute it
+    from ``type`` + ``params`` via each job spec's ``owned_root`` and the shared
+    ``root_holder``. ``blocked`` is the holder dict or None (None → waiting for worker).
+    """
+    import json as _json
+
+    from .jobs import get_job_spec, job_label
+    from .roots import root_holder
+
+    rows = conn.execute(
+        "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
+        "  r.name AS root_name FROM jobs j LEFT JOIN roots r ON r.id=j.root_id "
+        "WHERE j.status='queued' ORDER BY j.enqueued_at, j.id"
+    ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            params = _json.loads(row["params_json"] or "{}")
+        except (ValueError, TypeError):
+            params = {}
+        blocked = None
+        spec = get_job_spec(row["type"])
+        if spec is not None and spec.owned_root is not None:
+            owned = spec.owned_root(params)
+            if owned is not None:
+                blocked = root_holder(_DBShim(conn), owned)
+        d = dict(row)
+        d["label"] = job_label(row["type"], params, root_name=row["root_name"])
+        d["blocked"] = blocked
+        out.append(d)
+    return out
+
+
+class _DBShim:
+    """Adapt a raw read-only ``sqlite3`` connection to the ``.query_one`` interface
+    ``roots.root_holder`` expects (it normally takes the daemon's ``Database``)."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def query_one(self, sql: str, params: tuple = ()):
+        return self._conn.execute(sql, params).fetchone()
 
 
 def roots_snapshot() -> list[dict]:
@@ -275,16 +332,87 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     return {"exact": exact, "perceptual": perceptual}
 
 
+def _job_dict(row) -> dict:
+    """Shape a ``jobs`` row for a client: add a derived display ``label`` (§12).
+
+    The label is computed from ``type`` + ``params_json`` (the params→label rule,
+    :mod:`packrat.jobs.labels`), with the root name resolved from ``root_id`` when set.
+    ``result_json``/``params_json`` are passed through as raw JSON strings (the client
+    decodes what it needs).
+    """
+    import json as _json
+
+    from .jobs import job_label
+
+    d = dict(row)
+    params = {}
+    try:
+        params = _json.loads(d.get("params_json") or "{}")
+    except (ValueError, TypeError):
+        params = {}
+    d["label"] = job_label(d["type"], params, root_name=d.get("root_name"))
+    return d
+
+
 def recent_jobs(limit: int = 20) -> list[dict]:
-    """Recent job runs for the TUI 'recent jobs' list (§12)."""
+    """Recent job runs for the TUI 'recent jobs' list (§12), newest-first.
+
+    Includes ``queued`` rows (the backlog) and terminal history. Each row carries a
+    derived ``label`` and its root name (via ``jobs.root_id``).
+    """
     conn = _ro()
     try:
         rows = conn.execute(
-            "SELECT id, type, status, total, done, started_at, finished_at, error "
-            "FROM jobs ORDER BY id DESC LIMIT ?",
+            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.enqueued_at, "
+            "  j.started_at, j.finished_at, j.error, j.result_json, j.params_json, "
+            "  r.name AS root_name "
+            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
+            "ORDER BY j.id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_job_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def queued_jobs() -> list[dict]:
+    """The durable FIFO backlog (§3/§12), oldest-first — the TUI Queue panel.
+
+    Each queued row is annotated with its display ``label``; the *blocked* reason
+    (owned root held) is computed by the daemon's live queue (:meth:`JobQueue.
+    blocked_reason`), not here, since it depends on in-memory holder state.
+    """
+    conn = _ro()
+    try:
+        rows = conn.execute(
+            "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
+            "  r.name AS root_name "
+            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
+            "WHERE j.status='queued' ORDER BY j.enqueued_at, j.id"
+        ).fetchall()
+        return [_job_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def root_jobs(root_id: int, limit: int = 50) -> list[dict]:
+    """One root's jobs — current (queued/running) + history, newest-first (§12).
+
+    Keys off ``jobs.root_id`` (the root a job concerns). A ``scan --all`` has no
+    ``root_id`` so it doesn't appear here per-root — its per-root outcome lives in
+    ``scan_results`` (§4), surfaced separately by ``status <root>``.
+    """
+    conn = _ro()
+    try:
+        rows = conn.execute(
+            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.enqueued_at, "
+            "  j.started_at, j.finished_at, j.error, j.result_json, j.params_json, "
+            "  r.name AS root_name "
+            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
+            "WHERE j.root_id=? ORDER BY j.id DESC LIMIT ?",
+            (root_id, limit),
+        ).fetchall()
+        return [_job_dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -292,7 +420,11 @@ def recent_jobs(limit: int = 20) -> list[dict]:
 def job_detail(job_id: int) -> dict | None:
     conn = _ro()
     try:
-        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        return dict(row) if row else None
+        row = conn.execute(
+            "SELECT j.*, r.name AS root_name FROM jobs j "
+            "LEFT JOIN roots r ON r.id = j.root_id WHERE j.id=?",
+            (job_id,),
+        ).fetchone()
+        return _job_dict(row) if row else None
     finally:
         conn.close()

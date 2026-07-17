@@ -3,7 +3,7 @@
 Endpoints (all under token auth except ``/health``):
 - ``GET  /health``            — liveness + version (unauthenticated).
 - ``GET  /daemon``            — pid/port/uptime/in-flight job (``daemon status``).
-- ``POST /jobs``              — submit a job; 409 on busy (§3).
+- ``POST /jobs``              — submit a job; always enqueued (§3 durable queue).
 - ``GET  /jobs``              — recent jobs list.
 - ``GET  /jobs/{id}``         — one job's detail.
 - ``GET  /jobs/{id}/stream``  — SSE progress/state stream (§3).
@@ -27,7 +27,7 @@ import json
 import logging
 
 from .. import __version__, build as build_mod, config as config_mod, db as db_mod, paths, queries
-from ..jobs import BusyError, JobQueue
+from ..jobs import JobQueue
 from ..jobs.reconcile import reconcile_on_startup
 from ..util import now_iso
 from . import token as token_mod
@@ -75,7 +75,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
     ``db_file``/``config_path`` override the default locations (tests).
     """
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import StreamingResponse
 
     # Ensure config exists (auto-create with defaults, §9.2) and init the schema.
     config_mod.ensure_config(config_path)
@@ -90,8 +90,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     queue = JobQueue(database, config_loader=_load_config)
 
-    # Startup reconciliation BEFORE serving any request (§3).
+    # Startup reconciliation BEFORE serving any request (§3): flip stale running
+    # rows to interrupted + carve out queued destructive applies, then drain the
+    # durable queued backlog (pump starts the first runnable job).
     reconcile_on_startup(database)
+    queue.pump()
 
     app = FastAPI(title="packrat daemon", version=__version__)
     app.state.token = token
@@ -125,14 +128,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
     # -- jobs --------------------------------------------------------
     @app.post("/jobs", dependencies=[Depends(require_token)])
     def submit_job(body: SubmitJobRequest):
+        # §3: every mutating submission is ENQUEUED (durable backlog) — never rejected
+        # for a busy worker or held root (that is decided at dequeue). Only an unknown
+        # job type is a client error.
         try:
             job_id = queue.submit(body.type, body.params)
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind,
-                         "message": str(exc), "holder": exc.holder},
-            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"job_id": job_id}
@@ -140,6 +140,19 @@ def build_app(token: str, *, db_file=None, config_path=None):
     @app.get("/jobs", dependencies=[Depends(require_token)])
     def list_jobs(limit: int = 20):
         return {"jobs": queries.recent_jobs(limit)}
+
+    # Static /jobs/* routes are declared BEFORE the /jobs/{job_id} catch-all so
+    # FastAPI (first-match order) doesn't route "queued"/"cancel-queued" into the
+    # int path param.
+    @app.get("/jobs/queued", dependencies=[Depends(require_token)])
+    def list_queued():
+        """The durable FIFO backlog (§3/§12), oldest-first, with blocked reasons."""
+        return {"queued": queries.status_snapshot().get("queued", [])}
+
+    @app.post("/jobs/cancel-queued", dependencies=[Depends(require_token)])
+    def cancel_queued():
+        """Drop every queued job from the backlog (TUI ``[x]``); running one untouched."""
+        return {"dropped": queue.cancel_all_queued()}
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(require_token)])
     def get_job(job_id: int):
@@ -153,6 +166,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
         ok = queue.cancel(job_id)
         return {"cancelled": ok}
 
+    @app.get("/roots/{root_id}/jobs", dependencies=[Depends(require_token)])
+    def root_jobs(root_id: int, limit: int = 50):
+        """One root's current + historical jobs, newest-first (§12 per-root panel)."""
+        return {"jobs": queries.root_jobs(root_id, limit)}
+
     @app.get("/jobs/{job_id}/stream", dependencies=[Depends(require_token)])
     async def stream_job(job_id: int):
         detail = queries.job_detail(job_id)
@@ -163,15 +181,22 @@ def build_app(token: str, *, db_file=None, config_path=None):
         loop = asyncio.get_event_loop()
 
         async def event_gen():
-            # If the job is already terminal, emit its final state and close so a
+            # If the job is already TERMINAL, emit its final state and close so a
             # late attach doesn't hang forever (SSE degrades gracefully — §3).
             current = queries.job_detail(job_id)
-            if current and current["status"] not in ("running",):
+            if current and current["status"] not in ("running", "queued"):
                 yield _sse({"job_id": job_id, "type": "state",
                             "status": current["status"],
                             "total": current["total"], "done": current["done"]})
                 queue.unsubscribe(sub)
                 return
+            # A QUEUED job: emit its waiting/blocked state up front (so the client
+            # can render `queued · waiting for worker` / `queued · blocked: …`) and
+            # KEEP the stream open — the queue broadcasts `running` when it starts.
+            if current and current["status"] == "queued":
+                holder = queue.blocked_reason(current["type"], json.loads(current["params_json"] or "{}"))
+                yield _sse({"job_id": job_id, "type": "state", "status": "queued",
+                            "blocked": holder})
             try:
                 while True:
                     ev = await loop.run_in_executor(None, sub.q.get)
@@ -209,16 +234,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
             raise HTTPException(status_code=400, detail=str(exc))
         job_id = None
         if body.scan and row["kind"] == "library":
-            try:
-                job_id = queue.submit(
-                    "scan",
-                    {"root_id": row["id"], "full": body.full, "embed": body.embed},
-                )
-            except BusyError as exc:
-                return JSONResponse(
-                    status_code=200,
-                    content={"root": row, "job_id": None, "scan_busy": str(exc)},
-                )
+            # §3: the scan is enqueued (it drains when the worker frees / the root
+            # clears) — never rejected, so there is no "scan_busy" path anymore.
+            job_id = queue.submit(
+                "scan",
+                {"root_id": row["id"], "full": body.full, "embed": body.embed},
+            )
         return {"root": row, "job_id": job_id}
 
     @app.post("/scan", dependencies=[Depends(require_token)])
@@ -250,14 +271,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
                     detail=f"{row['name']!r} is a trash root; scan never indexes trash folders",
                 )
             params["root_id"] = row["id"]
-        try:
-            job_id = queue.submit("scan", params)
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
-            )
-        return {"job_id": job_id}
+        return {"job_id": queue.submit("scan", params)}
 
     @app.post("/dedup", dependencies=[Depends(require_token)])
     def submit_dedup(body: dict):
@@ -286,14 +300,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
             "dry_run": bool(body.get("dry_run")),
             "keep_suggested": bool(body.get("keep_suggested")),
         }
-        try:
-            job_id = queue.submit("dedup", params)
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
-            )
-        return {"job_id": job_id}
+        return {"job_id": queue.submit("dedup", params)}
 
     @app.post("/cleanup", dependencies=[Depends(require_token)])
     def submit_cleanup(body: dict):
@@ -328,14 +335,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
             "dry_run": bool(body.get("dry_run")),
             "apply": bool(body.get("apply")),
         }
-        try:
-            job_id = queue.submit("cleanup", params)
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
-            )
-        return {"job_id": job_id}
+        return {"job_id": queue.submit("cleanup", params)}
 
     @app.get("/cleanup/preview", dependencies=[Depends(require_token)])
     def cleanup_preview(root: str, mode: str = "exact"):
@@ -348,14 +348,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
     @app.post("/trash/refresh", dependencies=[Depends(require_token)])
     def submit_trash_refresh(body: dict):
         """Submit a ``trash refresh`` job (§6.1) — absorb + empty the trash roots."""
-        try:
-            job_id = queue.submit("trash-refresh", {})
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
-            )
-        return {"job_id": job_id}
+        return {"job_id": queue.submit("trash-refresh", {})}
 
     @app.post("/untrash", dependencies=[Depends(require_token)])
     def submit_untrash(body: dict):
@@ -367,14 +360,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
         if not path:
             raise HTTPException(status_code=400, detail="untrash needs a <path> to hash")
         params = {"path": path, "dry_run": bool(body.get("dry_run"))}
-        try:
-            job_id = queue.submit("untrash", params)
-        except BusyError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={"error": "busy", "kind": exc.kind, "message": str(exc), "holder": exc.holder},
-            )
-        return {"job_id": job_id}
+        return {"job_id": queue.submit("untrash", params)}
 
     # -- dev-only helpers (registered only in a dev build) -----------
     if build_mod.is_dev_build():

@@ -898,6 +898,21 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
     # (Per-file outcomes are surfaced via these log lines + the persisted
     # scan_results/scan_problem_files, which `status <root>` re-renders — §4.)
 
+    # Uniform, human-showable outcome (§4 result_json / §12 TUI result card). The
+    # aggregate counts + a one-line summary, plus the mode flags and any skips.
+    n_read_err = sum(1 for p in collector.problems() if p.problem == "read-error")
+    if dry_run:
+        would = sum(r.get("would_index", 0) for r in reports)
+        summary = f"dry-run: {agg['candidates']} candidates, {would} would be (re)fingerprinted"
+    else:
+        summary = (f"{agg['new']} new · {agg['exact_dup']} exact-dup · "
+                   f"{agg['undecodable']} undecodable · {agg['errors']} errors")
+    ctx.set_result({
+        "op": "scan", "dry_run": dry_run, "full": full, "embed": embed,
+        "roots_scanned": len(reports), "roots_skipped": len(skipped_roots),
+        "read_errors": n_read_err, "summary": summary, **agg,
+    })
+
 
 register_job(
     JobSpec(

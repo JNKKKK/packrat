@@ -68,6 +68,11 @@ def _run_untrash(ctx: JobContext) -> None:
         + (f", {summary['errors']} unreadable" if summary['errors'] else "")
         + ". Nothing on disk changed."
     )
+    ctx.set_result({
+        "op": "untrash", "dry_run": dry_run, **summary,
+        "summary": f"{summary['untrashed']} reactivated · {summary['forgotten']} {verb} · "
+                   f"{summary['already_active']} already active · {summary['unknown']} unknown",
+    })
 
 
 def _resolve_targets(ctx: JobContext, arg: str) -> list[str]:

@@ -52,12 +52,47 @@ def test_submit_and_status(client):
     assert snap["assets"] == 0 and "roots" in snap
 
 
-def test_busy_returns_409(client):
-    client.post("/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h())
-    r = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h())
-    assert r.status_code == 409
-    body = r.json()
-    assert body["error"] == "busy" and body["kind"] == "global"
+def test_second_submit_enqueues_not_rejected(client):
+    """§3: a submission while the worker is busy is QUEUED, not rejected (no 409)."""
+    r1 = client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h()
+    )
+    assert r1.status_code == 200
+    r2 = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h())
+    assert r2.status_code == 200
+    jid2 = r2.json()["job_id"]
+    # The second job is parked in the durable backlog behind the running one.
+    assert client.get(f"/jobs/{jid2}", headers=_h()).json()["status"] == "queued"
+
+
+def test_queued_job_runs_after_predecessor(client):
+    """The backlog drains: the queued job runs once the first finishes (§3)."""
+    r1 = client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 4, "delay_s": 0.02}}, headers=_h()
+    )
+    r2 = client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 2, "delay_s": 0.01}}, headers=_h()
+    )
+    jid1, jid2 = r1.json()["job_id"], r2.json()["job_id"]
+    for _ in range(400):
+        s2 = client.get(f"/jobs/{jid2}", headers=_h()).json()["status"]
+        if s2 == "done":
+            break
+        time.sleep(0.02)
+    assert client.get(f"/jobs/{jid1}", headers=_h()).json()["status"] == "done"
+    assert s2 == "done"
+
+
+def test_cancel_queued_job_drops_it(client):
+    """Cancelling a still-queued job drops it from the backlog (cancelled, never ran)."""
+    client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h()
+    )
+    r2 = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h())
+    jid2 = r2.json()["job_id"]
+    assert client.get(f"/jobs/{jid2}", headers=_h()).json()["status"] == "queued"
+    client.post(f"/jobs/{jid2}/cancel", headers=_h())
+    assert client.get(f"/jobs/{jid2}", headers=_h()).json()["status"] == "cancelled"
 
 
 def test_roots_snapshot_empty(client):

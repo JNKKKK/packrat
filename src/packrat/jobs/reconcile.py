@@ -10,17 +10,22 @@ Actions:
   The daemon does **not** auto-resume/re-enqueue — the durable per-op plan is
   intact, so the user re-runs the command (§3). This avoids a crash-loop and
   never resumes a destructive apply unattended.
+- **Durable ``queued`` backlog → kept, with one carve-out (§3 guarantee 1).** Jobs
+  that were merely *waiting* (never started, nothing touched) are not stale — they
+  stay ``queued`` and the daemon's startup pump drains them in order. **Carve-out:**
+  a queued *destructive apply* (``dedup``/``cleanup --confirm``) is flipped to
+  ``interrupted`` instead of auto-run — a delete-set must never apply unattended,
+  the same stance as a *running* ``--confirm``. Non-destructive queued jobs drain
+  automatically.
 - **Analyze rollback**: a dedup/cleanup *analyze* interrupted mid-staging left a
   ``pending`` review_run with half-built staging. Reconciliation rolls it back —
   delete the partial ``_packrat_review\`` staging and mark the run ``cancelled``
   — so a fresh re-run isn't blocked and a stray ``--confirm`` can't apply a
   partial plan. A **completed** analyze (paused, fully staged, no ``running``
-  job) is left untouched. In M0 no analyze job exists yet, so only the
-  interrupted-job linkage is handled; the staging-folder cleanup hook lands with
-  dedup (M3).
+  job) is left untouched.
 
-Reconciliation performs no file I/O in M0 beyond nothing; it only flips stale
-status flags to unblock re-running.
+Reconciliation performs no file I/O beyond the analyze-rollback staging cleanup;
+it only flips stale status flags to unblock re-running + draining.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ def reconcile_on_startup(db: Database) -> dict:
     Idempotent: on a clean start there are no ``running`` rows and this is a
     no-op.
     """
-    summary = {"interrupted_jobs": [], "rolled_back_runs": []}
+    summary = {"interrupted_jobs": [], "rolled_back_runs": [], "carved_out_queued": []}
 
     # Phase 1 — flip stale running rows to interrupted (in one txn). Capture each
     # job's type/params so the analyze-rollback (Phase 2) can act on the dedup ones.
@@ -57,6 +62,20 @@ def reconcile_on_startup(db: Database) -> dict:
             )
             interrupted.append({"id": row["id"], "type": row["type"], "params_json": row["params_json"]})
             summary["interrupted_jobs"].append({"id": row["id"], "type": row["type"]})
+
+        # Phase 1b — durable queued backlog carve-out (§3 guarantee 1). Queued jobs
+        # never started, so they are KEPT to drain — EXCEPT a destructive apply
+        # (dedup/cleanup --confirm), which must not auto-run unattended → interrupted.
+        for row in conn.execute(
+            "SELECT id, type, params_json FROM jobs WHERE status='queued'"
+        ).fetchall():
+            if _is_destructive_apply(row["type"], _params(row["params_json"])):
+                conn.execute(
+                    "UPDATE jobs SET status='interrupted', finished_at=?, "
+                    "error='daemon restarted (queued --confirm not auto-run)' WHERE id=?",
+                    (now_iso(), row["id"]),
+                )
+                summary["carved_out_queued"].append({"id": row["id"], "type": row["type"]})
 
     # Phase 2 — analyze rollback (§3). A dedup/cleanup *analyze* that died mid-staging
     # left a `pending` review_run with half-built `_packrat_review\` staging and NOTHING
@@ -77,12 +96,28 @@ def reconcile_on_startup(db: Database) -> dict:
         rolled = _rollback_analyze(db, params.get("root_id"))
         summary["rolled_back_runs"].extend(rolled)
 
-    if summary["interrupted_jobs"]:
+    if summary["interrupted_jobs"] or summary["carved_out_queued"]:
         log.info(
-            "reconciled %d orphaned running job(s) -> interrupted; rolled back %d partial analyze(s)",
+            "reconciled %d orphaned running job(s) -> interrupted; rolled back %d partial "
+            "analyze(s); carved out %d queued destructive apply/-ies",
             len(summary["interrupted_jobs"]), len(summary["rolled_back_runs"]),
+            len(summary["carved_out_queued"]),
         )
     return summary
+
+
+def _is_destructive_apply(job_type: str, params: dict) -> bool:
+    """True for a queued job that would DELETE files on run (§3 carve-out).
+
+    The two destructive applies are ``dedup --confirm`` and ``cleanup --confirm``
+    (they recycle files under the review plan). A ``cleanup`` one-shot ``apply``
+    (exact/undecodable delete) is likewise destructive. Analyze/preview/cancel/
+    dry-run/scan/merge/untrash/trash-refresh are not — they drain automatically.
+    (``cancel`` only discards staging; it deletes no library files.)
+    """
+    if job_type not in ("dedup", "cleanup"):
+        return False
+    return bool(params.get("confirm") or params.get("apply"))
 
 
 def _params(params_json) -> dict:

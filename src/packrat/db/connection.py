@@ -182,6 +182,12 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # NOTE: v4's assets.detail_score is intentionally ABSENT — retired in v6 (§8 B).
     # A DB created at v4/v5 keeps the column as harmless dead data (no DROP migration);
     # a fresh v6 DB never creates it. Nothing reads or writes it. Do NOT re-add it here.
+    # v7: durable job queue + result history (§3/§4/§12). These three are plain
+    # additive columns; the sibling 'queued' status value needs the CHECK widened,
+    # which _migrate_jobs_v7 handles by rebuilding the table (runs BEFORE this pass).
+    ("jobs", "root_id", "INTEGER REFERENCES roots(id) ON DELETE SET NULL"),
+    ("jobs", "enqueued_at", "TEXT"),
+    ("jobs", "result_json", "TEXT"),
 )
 
 
@@ -199,16 +205,85 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
 
 
+def _migrate_jobs_v7(conn: sqlite3.Connection) -> None:
+    """One-time REBUILD of the ``jobs`` table for v7 (§4 durable queue).
+
+    v7 adds a ``'queued'`` value to ``jobs.status``'s CHECK constraint. SQLite can't
+    widen a CHECK with ``ALTER``, so we rebuild the table following SQLite's
+    documented recipe (foreign_keys OFF, create-copy-drop-rename in one txn). The
+    three additive v7 columns (``root_id``/``enqueued_at``/``result_json``) are
+    created here too, so ``_migrate_columns`` then finds them present (no-op).
+
+    **Must run BEFORE ``executescript``** — the v7 ``SCHEMA_SQL`` creates
+    ``ix_jobs_root ON jobs(root_id)``, which errors on an old table lacking that
+    column. Idempotent: skipped when ``jobs`` doesn't exist yet (fresh DB — the
+    following ``executescript`` creates it v7-shaped) or already has ``'queued'``.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+    ).fetchone()
+    if row is None or "'queued'" in (row["sql"] or ""):
+        return  # no jobs table yet (fresh DB), or already the v7 shape
+
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    # Guard the copy against a partially-migrated DB (columns added but never rebuilt).
+    root_sel = "root_id" if "root_id" in existing else "NULL"
+    enq_sel = "enqueued_at" if "enqueued_at" in existing else "started_at"
+    res_sel = "result_json" if "result_json" in existing else "NULL"
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN")
+    try:
+        conn.execute(
+            "CREATE TABLE jobs_v7_new ("
+            "  id INTEGER PRIMARY KEY,"
+            "  type TEXT NOT NULL,"
+            "  root_id INTEGER REFERENCES roots(id) ON DELETE SET NULL,"
+            "  status TEXT NOT NULL CHECK (status IN "
+            "    ('queued','running','done','error','cancelled','interrupted')),"
+            "  total INTEGER,"
+            "  done INTEGER NOT NULL DEFAULT 0,"
+            "  enqueued_at TEXT,"
+            "  started_at TEXT,"
+            "  finished_at TEXT,"
+            "  error TEXT,"
+            "  result_json TEXT,"
+            "  params_json TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO jobs_v7_new "
+            "(id, type, root_id, status, total, done, enqueued_at, started_at, "
+            " finished_at, error, result_json, params_json) "
+            f"SELECT id, type, {root_sel}, status, total, done, {enq_sel}, started_at, "
+            f"       finished_at, error, {res_sel}, params_json FROM jobs"
+        )
+        conn.execute("DROP TABLE jobs")
+        conn.execute("ALTER TABLE jobs_v7_new RENAME TO jobs")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_jobs_root ON jobs(root_id)")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        conn.execute("PRAGMA foreign_keys=ON")
+        raise
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     """Create the schema if missing and return an open connection (§4).
 
-    Idempotent — every DDL statement is ``IF NOT EXISTS``, plus an ADD-COLUMN pass
-    for columns added to existing tables after v1 (:func:`_migrate_columns`).
-    Records/updates the ``schema_version`` in ``meta``.
+    Idempotent — every DDL statement is ``IF NOT EXISTS``, plus a one-time v7
+    ``jobs`` rebuild (:func:`_migrate_jobs_v7`, run first — see its docstring) and an
+    ADD-COLUMN pass for columns added to existing tables after v1
+    (:func:`_migrate_columns`). Records/updates the ``schema_version`` in ``meta``.
     """
     conn = connect(db_file)
+    # v7 jobs rebuild runs BEFORE executescript (the v7 DDL indexes jobs.root_id,
+    # absent on an old table) and manages its own txn + FK toggle.
+    _migrate_jobs_v7(conn)
+    conn.executescript(SCHEMA_SQL)
     with transaction(conn):
-        conn.executescript(SCHEMA_SQL)
         _migrate_columns(conn)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "

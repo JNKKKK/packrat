@@ -111,8 +111,9 @@ cancel. This is what makes a job survive the terminal that launched it.
 **Daemon** — single long-running process, auto-spawned detached on first client use (no manual
 "start the server" step). Owns:
 - the **SQLite DB** (single writer — see concurrency below);
-- a **persisted job queue** running **one mutating job at a time**; each job is cooperatively
-  cancellable and checkpointed/resumable (per §8);
+- a **persisted job queue** running **one mutating job at a time**, the rest waiting in a durable
+  FIFO backlog that survives restart (§3 guarantee 1); each job is cooperatively cancellable and
+  checkpointed/resumable (per §8);
 - the **scheduler** for interval scans (submits scan jobs like any client);
 - the review-run state (`review_runs`) and audit trail.
 Exposes a small HTTP API on `127.0.0.1` with a local token (`%APPDATA%\packrat\token`). Reads
@@ -168,10 +169,20 @@ worker exists. On **every** daemon start, before serving any request, it reconci
     plan (`review_actions`) records intended deletions; re-running `--confirm` re-reads shortcut
     presence and re-applies via the per-file lazy-liveness gate (§8 B Phase 6), which is idempotent
     (already-deleted files → "already-gone"). The DB backup taken before apply is the backstop.
+- **Durable `queued` backlog → drained, with one carve-out.** Because the backlog is persisted
+  (§3 guarantee 1, §4 `jobs.status='queued'`), jobs that were merely *waiting* — never started, so
+  nothing on disk or in the DB was touched — are **not** stale and are **kept**: after the running
+  row is reconciled, the daemon resumes draining them in `enqueued_at` order like normal. This is the
+  point of a durable queue — an auto-appended `roots register --scan` (§8 A1) still runs after a
+  crash/restart. **Carve-out (matches the running-job stance):** a queued **destructive apply**
+  (`dedup`/`cleanup --confirm`) is flipped to `interrupted` instead of auto-run — a delete-set must
+  never apply with nobody watching (same reason the daemon won't auto-resume a *running* `--confirm`),
+  so the user re-issues it deliberately. Non-destructive queued jobs (scan, merge, analyze,
+  trash-refresh, untrash) drain automatically.
 - **Idempotency is what makes "just re-run" safe** for every case above — each op either resumes
   from a committed checkpoint/plan or re-derives a no-op for work already done. Reconciliation only
-  *unblocks* re-running by clearing stale `running`/half-staged state; it performs no file I/O
-  except the analyze-rollback staging cleanup.
+  *unblocks* re-running by clearing stale `running`/half-staged state, and drains the intact durable
+  backlog; it performs no file I/O except the analyze-rollback staging cleanup.
 
 **Clean shutdown (`daemon stop`) is a resumable interruption, not a cancel.** A graceful stop
 signals the running job to checkpoint, then exits; its `jobs` row becomes `interrupted` (same as a
@@ -195,11 +206,45 @@ work started elsewhere. (TUI appearance & function: §12; milestone: §13 M6.)
 **Concurrency — two independent guarantees.** packrat serializes work at two levels; a mutating
 job must clear **both** to start.
 
-1. **Global: one mutating job runs at a time.** The single-worker queue is the enforcement point:
-   if a mutating job is running, a second submission is **rejected** with a clear "busy" message
-   naming the in-flight job (e.g. `scan D:\test started 12:03`). No lockfile, no crash-stale lock
-   (a daemon-side worker slot is in-memory and released if a job dies). Read-only queries
-   (`status`, `roots`, TUI stats) run anytime, concurrently.
+1. **Global: one mutating job runs at a time, the rest wait in a durable queue.** The single-worker
+   queue is the enforcement point: exactly one mutating job is ever *running*. **Every** mutating
+   submission is **enqueued** — a `jobs` row with `status='queued'` (§4) — *never rejected at
+   submit*; nothing is turned away. The backlog is **persisted** (durable `jobs` rows, not an
+   in-memory list), so queued work survives a daemon restart and drains on the next start (§ startup
+   reconciliation — with one safety carve-out: a queued destructive apply is *not* auto-run
+   unattended). This is what lets one command line up work behind another (and, later, lets `roots
+   register --scan` append a scan behind whatever is running — §8 A1). The worker *slot* is still
+   in-memory (a live daemon runs at most one job in *this* process, which is what makes reconciliation
+   correct — a `running` row at boot is stale); the **backlog** is durable. No lockfile, no
+   crash-stale lock. Read-only queries (`status`, `roots`, TUI stats) run anytime, concurrently, and
+   never queue.
+   - **Dequeue picks the first *runnable* job in FIFO order — the queue waits on the worker, never on
+     a human.** When the worker frees, it scans the backlog oldest-first (`enqueued_at`, ties by `id`)
+     and runs the first job whose **owned root is free** (or that owns no root). A job whose owned
+     root is currently held by a **pending review / open merge** (guarantee 2) is **skipped, left
+     `queued`, and retried on a later pump** — not failed, not run. So FIFO holds *among runnable
+     jobs* and *among jobs contending for the same root*, but a runnable job legitimately passes a
+     blocked one ahead of it (the "recent jobs" list is therefore ordered by *start* time, not submit
+     time — intended). This is a small runnable-first scheduler, not strict FIFO.
+   - **What wakes a blocked job is just the next pump.** The ops that free a root — `dedup`/`cleanup
+     --confirm` (completes the review), `--cancel`, a resuming `merge` — are **themselves jobs**
+     (§8 B/§6.2: `--confirm`/`--cancel` are separate `jobs` rows of the same type, dispatched by
+     params). So "root freed → re-examine the backlog" needs no separate signal: the queue is pumped
+     after **every** job finishes (which you need anyway to start the next one), and the confirm/cancel
+     job's completion *is* that pump. **Invariant to preserve:** the queue must be pumped whenever a
+     root-holder is released; today that is always a job completion, so pump-on-finish suffices — if a
+     confirm/cancel ever became a non-job API mutation, it too must pump.
+   - **No deadlock; at worst starvation, and it's visible.** A `queued` job holds **no** root until it
+     *runs* (an analyze opens its `review_runs` row only on execution), so a blocked queued job holds
+     nothing and can't be half of a cycle. The only holders are already-pending reviews/open merges,
+     cleared by a human decision or a resume-job. So skip-and-retry cannot deadlock — it can only
+     *starve* a job whose root stays pending indefinitely, which is acceptable because the TUI/CLI
+     show that job as **`blocked: root R has a pending <run> — confirm/cancel to unblock`** (per-job
+     reason, §12), and you can cancel it out of the backlog anytime.
+   - **`--detach` returns the queued job's id immediately**; a foreground CLI submit streams from the
+     moment it's enqueued (showing `queued · waiting for worker`, or `queued · blocked: …` when its
+     root is held, then live progress once it starts). Cancelling a still-`queued` job drops it from
+     the backlog (`cancelled`, never ran) — distinct from cancelling the running one (§ cancellation).
 
 2. **Per-root: one *active* operation owns a root at a time** (running **or** pending). This is the
    general invariant that the per-operation validations (§8 B Phase 0, §6.2, §8 C Phase 0) and the
@@ -211,11 +256,15 @@ job must clear **both** to start.
    > — the root it targets and stages/plans/mutates against: `scan R` owns `R`; `dedup R`/`cleanup R`
    > own `R` (running **or** while their `review_runs` stays `pending`); `merge … --into D` owns the
    > library root containing `D` (running **or** while its `merge_runs` is `planning`/`copying`).
-   > Submitting an op whose owned root already has an active op is **rejected**, naming the holder
-   > (e.g. "root iPhone busy: dedup pending since 12:03 — `--confirm` or `--cancel` it first").
-   > **`scan` is included:** it will not run on a root with a pending review or in-flight merge
-   > (manual `scan <root>` errors; a scheduled / `--all` scan **skips that root and logs it**, so
-   > one under-review root never blocks the sweep).
+   > This is enforced **at dequeue, not at submit** (guarantee 1): an op whose owned root is already
+   > held is enqueued like any other, then **held in the backlog and skipped** until the holder clears
+   > — the TUI shows it `blocked: … — confirm/cancel to unblock`. Ownership is only ever *acquired*
+   > when a job actually runs, so two same-root ops can sit in the queue but never run at once, and the
+   > partial-unique indexes are never violated (the second analyze opens its `review_runs` row only
+   > after the first is confirmed/cancelled). **`scan` is included:** a `scan R` behind a pending
+   > review/open merge waits in the backlog rather than churning the plan's rows (§8 A2 step 1a); a
+   > scheduled / `--all` scan still **skips that root and logs it** (it iterates roots rather than
+   > owning one, so it must not park the whole sweep on one under-review root).
 
    **Owned vs. referenced — what is *not* locked.** Exclusivity is on the **owned** root only, not
    on roots an op merely reads or can reach into: `dedup` compares against **all active assets
@@ -365,14 +414,38 @@ merge_plan_items(   -- the persisted, crash-safe, FROZEN per-source-file plan fo
 -- tags(...) omitted for now — tagging/classification schema is TBD (§7)
 
 jobs(    id, type,
-         status /* running|done|error|cancelled|interrupted */,
-         total, done, started_at, finished_at, error, params_json )
+         root_id /* nullable: the single root this job concerns — `scan <root>`, `dedup`, `cleanup`,
+                    `merge`→dest. NULL for multi-root (`scan --all`) and root-less (`untrash`,
+                    `trash refresh`) jobs. The TUI's per-root job list keys off this column (plus
+                    `scan_results` for the per-root rows a `--all` scan writes); see §12. */,
+         status /* queued|running|done|error|cancelled|interrupted */,
+         total, done, enqueued_at, started_at, finished_at, error,
+         result_json /* nullable: a compact, uniform, human-showable OUTCOME summary written at
+                        terminal time by EVERY job, whatever its type or terminal status — scan
+                        banner counts, dedup/cleanup staged/applied tallies, merge copied/skipped,
+                        trash-refresh absorbed/emptied, untrash untrashed/forgotten. This is the
+                        single surface the TUI renders as a job's "result card" (§12) WITHOUT joining
+                        per-op tables; the richer per-op tables (scan_results/review_runs/merge_runs +
+                        the §8.1 audit) stay authoritative for deep forensics ([Enter] details). A job
+                        that died before finishing may carry a partial or NULL result_json — its
+                        `status` (+ `error`) still records the outcome, so every job is show-able. */,
+         params_json )
+  -- `enqueued_at` = when the row was created (as `queued`); `started_at` = when the worker actually
+  --   BEGAN running it (NULL while still queued); `finished_at` = terminal time. FIFO order =
+  --   enqueued_at (ties by id). A job submitted while the worker is free is enqueued and started in
+  --   the same breath (both stamps ~together); one submitted while busy waits with started_at NULL
+  --   in the durable backlog until it runs (§3 guarantee 1).
   -- `total`/`done` are a PROGRESS-DISPLAY counter only (work units finished / total, drives the
   --   bar + ETA). They are NOT the resume mechanism: on re-run each op recovers from its own
   --   authoritative durable state — scan from the fast-path (path+size+mtime skip) + last_seen_at
   --   (§8 A2), merge from per-item merge_plan_items.progress (§8 C), review from review_actions
   --   (§8 B). `done` may be stale after a crash (last increment uncommitted) and that's harmless,
   --   because the authoritative state — not `done` — decides what re-runs.
+  -- `queued` = submitted while a mutating job was running; waits in the durable FIFO backlog (§3
+  --   guarantee 1). Retained across a daemon restart and drained in order — EXCEPT a queued
+  --   destructive apply (`dedup`/`cleanup --confirm`) is flipped to `interrupted` on restart, never
+  --   auto-run with nobody watching (§3 reconciliation). Cancelling a queued job just drops it from
+  --   the backlog (`cancelled`, never ran).
   -- `interrupted` = the daemon died while this job was `running` (crash/kill/power loss); set by
   --   startup reconciliation (§3), NOT by the worker. It means "the process vanished, the durable
   --   per-op plan is intact, re-run the command to resume." A clean `daemon stop` also lands here
@@ -671,15 +744,16 @@ re-appearances — and, separately, culls files that won't decode at all.
   undecodable problem files, §11.)
 
 **Shared validation & lock (all modes):** `<folder>` must be a registered **library** root —
-reject a `kind='trash'` root (its files are consumed by refresh, not cleaned). Then apply the
-**§3 per-root exclusivity invariant**: reject if this root already has an active operation — a
+reject a `kind='trash'` root (its files are consumed by refresh, not cleaned). Then the
+**§3 per-root exclusivity invariant** applies: if this root already has an active operation — a
 `pending` dedup run, a `pending` perceptual-cleanup run, or an in-flight merge (an open
-`merge_runs` row with `dest_root_id` = this root, §4) — since they may stage `.lnk`s pointing at
-files cleanup would delete, leaving broken shortcuts / a stale plan; conversely, once a
-`--trash-perceptual` cleanup opens its own `pending` `review_runs` row it *owns* the root, so dedup,
-merge, **and scan** (via §8 A2 step 1a) are blocked on it until confirm/cancel. Recommend a fresh
-`scan <folder>` first so newly-arrived files are indexed (run it *before* cleanup, since scan is
-blocked once the pending run opens); cleanup operates on indexed instances.
+`merge_runs` row with `dest_root_id` = this root, §4) — the cleanup job is **held in the queue
+(dequeue gate, §3) until that holder clears**, rather than running against it, since a live plan may
+stage `.lnk`s pointing at files cleanup would delete (broken shortcuts / a stale plan); conversely,
+once a `--trash-perceptual` cleanup opens its own `pending` `review_runs` row it *owns* the root, so
+dedup, merge, **and scan** (via §8 A2 step 1a) queue-and-wait on it until confirm/cancel. Recommend a
+fresh `scan <folder>` first so newly-arrived files are indexed (submit it *before* cleanup — once the
+pending run opens, a scan just waits behind it); cleanup operates on indexed instances.
 
 #### Exact mode — `packrat cleanup <folder> --trash-exact`
 1. **Refresh the trash collection** (§6.1), so the trashed set is fully current.
@@ -979,11 +1053,14 @@ notes exactly what it writes.
    `pending` `review_runs` row (dedup or cleanup) or an open `merge_runs` row
    (`status IN ('planning','copying')`) with this root as `dest_root_id` — **do not scan it**, so
    scan's deletion-detection (Phase 3 step 11) can never churn the `file_instances`/assets that an
-   open review plan references. A **manual `scan <root>`** errors, naming the holder and telling
-   the user to `--confirm`/`--cancel` the review (or let the merge finish) first. A **`--all` or
-   scheduled** scan **skips this root and logs the skip** (one under-review root must not stall the
-   whole sweep); the skipped root is listed in the report. → reads `review_runs`/`merge_runs`; no
-   write.
+   open review plan references. This is the **dequeue gate**, not a submit-time reject (§3
+   guarantee 1): a **manual `scan <root>`** submitted against a held root is *enqueued* and then
+   **held in the backlog** — skipped on each pump, shown as `blocked: root R has a pending <run> —
+   confirm/cancel to unblock`, and run automatically once the holder clears (the confirm/cancel/merge
+   job's completion pumps the queue). It does **not** error at submit. A **`--all` or scheduled**
+   scan is different — it owns no single root (it iterates), so it can't sit blocked without stalling
+   the whole sweep: it **skips this root at run time and logs the skip**, listing the skipped root in
+   the report. → reads `review_runs`/`merge_runs`; no write.
 2. Recursively walk the root, applying the ignore set, to build the candidate worklist.
    → no DB write (in-memory worklist).
 3. Open a job row. → **write** `jobs`: `type='scan'`, `status='running'`, `total`=file count,
@@ -1255,12 +1332,14 @@ registered root. **Survivor** = the one file instance of an asset that stage 1 k
 
 **Phase 0 — Validate & lock**
 1. Resolve `<folder>` to a registered root; it must be a **library** root (error otherwise). → **read** `roots`.
-2. **Per-root exclusivity (§3 guarantee 2).** Reject if this root already has an active operation:
-   a `pending` `review_runs` row (another dedup or a cleanup), or an in-flight merge — an open
-   `merge_runs` row (`status IN ('planning','copying')`) with `dest_root_id` = this root (§4).
-   (A concurrent *scan* can't coexist either: scan's step 1a refuses to start once this run's
-   `review_runs` row exists, and the global single-worker queue blocks a scan and this analyze at
-   the same instant.) Then compute stage 1 (Phase 2). If the whole run would be empty (no stage has
+2. **Per-root exclusivity (§3 guarantee 2).** If this root already has an active operation — a
+   `pending` `review_runs` row (another dedup or a cleanup), or an in-flight merge (an open
+   `merge_runs` row (`status IN ('planning','copying')`) with `dest_root_id` = this root, §4) — this
+   analyze does not run against it: it is **held in the queue (dequeue gate, §3) until the holder
+   clears**, acquiring ownership only when it actually runs (opening its `review_runs` row below).
+   (A concurrent *scan* can't coexist either: scan's step 1a holds it behind this run's `review_runs`
+   row, and the global single-worker slot never runs a scan and this analyze at the same instant.)
+   Then compute stage 1 (Phase 2). If the whole run would be empty (no stage has
    any candidate) it **auto-completes "already clean"** without leaving a `pending` row dangling.
    Otherwise **write** a `review_runs` row (`root_id`, `status='pending'`, `stage=1`,
    `stage_phase='staged'`, `created_at`) — which now *owns* the root until confirmed/cancelled — and
@@ -1574,12 +1653,14 @@ exact hash, and files matching a **trashed** hash are discarded.
    left *uncatalogued* (Phase 3 step 11) and merge warns per ignored subpath (Phase 4 step 13),
    because registering under an ignored path would let the next scan silently forget them. A plain
    note here is enough; the loud warning is at report time once the exact count is known.
-2a. **Per-root exclusivity (§3 guarantee 2), on the dest root.** Reject if the dest library root
-   already has an active operation — a `pending` `review_runs` row (dedup/cleanup) or another open
-   `merge_runs` (its own partial-unique index enforces the latter, §4). A merge stages/copies under
-   this root and its step-4 opportunistic scan would churn it, so it must own the root cleanly
-   before proceeding. (Skip this check for `--dry-run`, which opens no run and writes nothing — but
-   it also then skips step 4's scan, see below.)
+2a. **Per-root exclusivity (§3 guarantee 2), on the dest root.** If the dest library root already
+   has an active operation — a `pending` `review_runs` row (dedup/cleanup) or another open
+   `merge_runs` (its own partial-unique index enforces the latter, §4) — the merge job is **held in
+   the queue (dequeue gate, §3) until that holder clears**, not run against it: a merge stages/copies
+   under this root and its step-4 opportunistic scan would churn it, so it must own the root cleanly
+   before proceeding, and it acquires that ownership only when it actually runs (opening `merge_runs`
+   at step 5). (A `--dry-run` merge opens no run and writes nothing — but it also then skips step 4's
+   scan, see below.)
 3. **Refresh the trash collection** (§6.1) — absorb any files sitting in the registered trash
    roots into the trashed-hash set and empty those folders. Merge discards incoming files that
    match a trashed hash, so the trashed set must be current first. (Runs for real even under
@@ -1590,9 +1671,9 @@ exact hash, and files matching a **trashed** hash are discarded.
 5. Open a `jobs` row (`type='merge'`) and a **`merge_runs`** header (`status='planning'`,
    `dest_root_id`). The `merge_runs` row is the durable **cross-op guard**: its
    partial-unique `(dest_root_id) WHERE status IN ('planning','copying')` is exactly the
-   "in-flight merge plan targeting this root" that dedup (§8 B Phase 0) and cleanup (§6.2) reject
-   against. **Dry-run opens neither `merge_runs` nor `merge_plan_items`** — it must not trip that
-   guard and has no resume need. This plan is internal crash-safety only — merge does not pause
+   "in-flight merge plan targeting this root" that dedup (§8 B Phase 0) and cleanup (§6.2) wait
+   behind (dequeue gate, §3). **Dry-run opens neither `merge_runs` nor `merge_plan_items`** — it must
+   not trip that guard and has no resume need. This plan is internal crash-safety only — merge does not pause
    for the user.
 
 **Phase 1 — Fingerprint source** (read-only w.r.t. source; writes only the frozen plan)
@@ -1998,13 +2079,19 @@ trash is handled by `cleanup`, `trash refresh`, and `untrash` (§6).
 - **Ctrl-C detaches the view; the job keeps running in the daemon.** Re-attach or stop it via the
   `packrat` TUI, or from another terminal.
 - **`--detach`** submits the job and returns immediately without streaming.
-- If a mutating job is already running, submission is **rejected** ("busy: `<job>` started `<time>`")
-  — one mutating operation at a time, globally (§3 guarantee 1). Read-only commands are never blocked.
-- **Per-root exclusivity (§3 guarantee 2):** a submission is also rejected if the root it would
-  *own* already has an active op — a `pending` dedup/cleanup review or an in-flight merge — naming
-  the holder (e.g. "root iPhone busy: dedup pending — `--confirm`/`--cancel` first"). This includes
-  `scan`: a manual `scan <root>` errors on an under-review root; a `--all`/scheduled scan skips it
-  and logs the skip.
+- **Every mutating submission is enqueued — nothing is rejected at submit** (`queued`, §3
+  guarantee 1 / §4). One mutating operation *runs* at a time; the rest wait in the durable backlog
+  and the worker dequeues the first *runnable* one (owned root free) on each pump. A foreground
+  submit streams from `queued · waiting for worker` (or `queued · blocked: …`) into live progress;
+  `--detach` returns the queued id at once. Read-only commands never queue and are never blocked.
+- **Per-root exclusivity (§3 guarantee 2) is a *dequeue* gate, not a submit rejection:** a job whose
+  *owned* root already has an active op — a `pending` dedup/cleanup review or an in-flight merge — is
+  still enqueued, then **held in the backlog** (`blocked: root iPhone has a pending dedup —
+  confirm/cancel to unblock`) and run automatically once the holder clears (the confirm/cancel/merge
+  job pumps the queue). No command errors just because a root is busy — you can line work up behind a
+  paused review and it drains when you resolve it. This includes `scan`: a manual `scan <root>` on an
+  under-review root waits in the backlog; a `--all`/scheduled scan (owns no single root) skips it and
+  logs the skip instead of parking the sweep.
 - `packrat` with **no arguments** opens the TUI (logo, stats, live/recent jobs, operation menu).
 
 **Root argument resolution — path vs. `--name` handle.** Commands that take a registered root
@@ -2094,9 +2181,11 @@ Exit: prints the report (new assets, exact-dup instances, skipped non-media, err
 matches-trashed, embeddings computed vs deferred, plus any roots skipped for being under review).
 Near-dup clustering is `dedup`'s job, not scan's. Resumable if interrupted.
 
-Per-root exclusivity (§3): scan won't run on a root that has a pending dedup/cleanup review or an
-in-flight merge — a manual `scan <root>` errors and names the holder; `--all`/scheduled scans skip
-that root and log it. Confirm/cancel the review (or let the merge finish) to scan it.
+Per-root exclusivity (§3): scan won't *run* on a root that has a pending dedup/cleanup review or an
+in-flight merge — but a manual `scan <root>` is **enqueued and held** (shown `blocked: … —
+confirm/cancel to unblock`), then runs automatically once you confirm/cancel the review (or the
+merge finishes). It is no longer rejected at submit. A `--all`/scheduled scan owns no single root, so
+it skips a held root and logs it rather than parking the whole sweep.
 ```
 
 ### `packrat dedup`
@@ -2274,7 +2363,7 @@ packrat status [<root>] [--json]     # global rollup, or one root's detail
 
 **No arguments — global rollup:** total assets (photo/video split), trashed count, per-root asset
 counts + scan freshness, any `interrupted` jobs (with the command to resume, §3), and the
-currently-running job if any.
+currently-running job plus any `queued` backlog behind it (§3 durable FIFO queue), if any.
 
 **Dedup/cleanup review state — show only what's actionable.** The one state worth surfacing is a
 **`pending` review run** (a paused dedup or cleanup awaiting the user); completed/cancelled runs are
@@ -2282,8 +2371,9 @@ history and live in the §8.1 audit trail, **not** here. Per root:
 - **Pending run present** → highlight it (`⚠`), with everything needed to act: `run_type`, how long
   ago it was staged, a count summary, the `_packrat_review\` path to open in Explorer, and the exact
   `--confirm` / `--cancel` commands. Because a pending run *owns* the root (§3 per-root
-  exclusivity), this line is also the answer to a "busy: root X" rejection — it names what to
-  confirm/cancel to free the root. Count summary is per `run_type` (read from `review_actions`):
+  exclusivity), this line is also the answer to a job showing `blocked: root X …` in the queue — it
+  names what to confirm/cancel to free the root and let the blocked job run. Count summary is per
+  `run_type` (read from `review_actions`):
   - **dedup:** `N to delete (exact)` · `G groups / M members (near-dup, default-keep)` —
     optionally `(K low-confidence)` from the §5.3 photo-quality flag.
   - **cleanup --trash-perceptual:** `X exact-trash (will delete)` · `P perceptual candidates (staged)`.
@@ -2340,19 +2430,29 @@ submits, observes, and cancels, exactly like the CLI.
 │      /   \      · 124,803 assets hoarded ·                                     │
 │                                                                                │
 │  ┌─ Collection ─────────────────┐  ┌─ Roots ──────────────────────────────┐  │
-│  │ Assets      124,803          │  │ iPhone     D:\Backup\iPhone   98,412  │  │
-│  │  photos     111,240          │  │ Camera     E:\Photos          26,150  │  │
-│  │  videos      13,563          │  │ Downloads  D:\dump               241  │  │
-│  │ Trashed       3,904          │  │ _Trash     D:\Backup\_Trash  (trash)  │  │
-│  │ Duplicates*     612 (est)    │  │ …                                     │  │
-│  │ Last scan   2h ago           │  │  ● scanned recently  ○ stale/never    │  │
+│  │ Assets      124,803          │  │ ▸iPhone    D:\Backup\iPhone   98,412  │  │
+│  │  photos     111,240          │  │  Camera    E:\Photos          26,150  │  │
+│  │  videos      13,563          │  │  Downloads D:\dump               241  │  │
+│  │ Trashed       3,904          │  │  _Trash    D:\Backup\_Trash  (trash)  │  │
+│  │ Duplicates*     612 (est)    │  │  …                                    │  │
+│  │ Last scan   2h ago           │  │  ● recent ○ stale  ▸ selected → jobs  │  │
 │  └───────────────────────────────┘  └───────────────────────────────────────┘  │
 │                                                                                │
-│  ┌─ Jobs ─────────────────────────────────────────────────────────────────┐  │
-│  │ ▶ scan  D:\Backup\iPhone   ██████████░░░░░  67%  8,912/13,204  ETA 4m   │  │
-│  │   dedup D:\Photos          done · 2 clusters staged · awaiting review    │  │
-│  │   merge E:\dump→iPhone     done 11:02 · 240 copied, 1 trashed skipped    │  │
-│  │   [c] cancel running   [l] logs   [Enter] details                        │  │
+│  ┌─ Queue ────────────────────────────────────────────────────────────────┐  │
+│  │ ▶ scan  iPhone         ███████████░░░  67%  8,912/13,204  ETA 4m (running)│  │
+│  │ 2 merge dump→Camera    queued · waiting for worker                       │  │
+│  │ 3 scan  Photos         blocked: Photos has a pending dedup (confirm/cancel)│  │
+│  │ 4 dedup Photos (confirm) blocked: Photos has a pending dedup             │  │
+│  │ ↑/↓ select  [c] cancel selected  [x] cancel-all queued  [Enter] detail   │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                                │
+│  ┌─ iPhone — jobs ────────────────────────────────────────────────────────┐  │
+│  │ ▶ scan   running  67%  8,912/13,204                            (see Queue)│  │
+│  │   dedup  ⚠ awaiting review · 240 delete · 18 grp/47 mbr   11:31          │  │
+│  │   scan   done     +412 new · 3 undecodable                    09:04      │  │
+│  │   merge  done     240 copied · 1 trashed skipped              Jul 14     │  │
+│  │   scan   interrupted — re-run to resume                       Jul 13     │  │
+│  │ ↑/↓ select   [Enter] result   [o] open review   [g] confirm  [k] cancel  │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                                │
 │  What do you want to do?                                                       │
@@ -2361,8 +2461,9 @@ submits, observes, and cancels, exactly like the CLI.
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Three stacked regions under the logo: **stats**, **jobs**, **menu**. The header shows version and
-daemon health (auto-spawns it if down).
+Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per-root jobs** list
+(shown when a root is selected), then the **menu**. The header shows version and daemon health
+(auto-spawns it if down).
 
 ### Panels
 
@@ -2374,22 +2475,85 @@ daemon health (auto-spawns it if down).
   an estimated duplicate count (from `similarity_edges`, marked `*` as "since last dedup"), and
   last-scan recency. Refreshes live while jobs run.
 - **Roots** — each registered root with path, asset count, and a freshness dot (scanned recently
-  vs. stale/never); trash roots labelled. This is the read view; **[r] Manage roots** opens the
-  add flow (`roots register`) and lists roots (`roots list`); remove/rename land with the deferred
-  `roots unregister`/`roots rename` verbs (§14 #9).
-- **Jobs** — the heart of the TUI. Lists the **running** job (live progress bar, counts, ETA) and
-  **recent** finished/paused jobs (from the `jobs` / `review_runs` tables). A paused dedup/cleanup
-  shows **"awaiting review"** with the same count summary `packrat status` gives (§11 — e.g.
-  `240 delete · 18 groups/47 members`), a shortcut to open its `_packrat_review\` folder in
-  Explorer, and buttons to run `--confirm` / `--cancel`. A job left **`interrupted`** by a daemon crash/stop (§3) shows as
-  **"interrupted — re-run to resume"** with the command to continue it (e.g. re-run the same
-  `merge`/`scan`), distinguishing "the daemon died, your progress is safe" from a user `cancelled`.
-  `[c]` cancels the running job (cooperative stop at its next checkpoint, §3); `[l]` tails its log;
-  `[Enter]` opens a details view.
-- **Menu** — single-key actions that launch the operations. Because only one mutating job runs at
-  a time, launching while busy shows the "busy" state rather than starting a second (§3). Each
-  action collects its target (a folder picker / path prompt) then submits the job and drops you
-  onto the Jobs panel to watch it.
+  vs. stale/never); trash roots labelled. **`↑/↓` moves a selection cursor (`▸`); selecting a root
+  populates the per-root *jobs* panel below** (this is the "go into a root" flow). **[r] Manage
+  roots** opens the add flow (`roots register`) and lists roots (`roots list`); remove/rename land
+  with the deferred `roots unregister`/`roots rename` verbs (§14 #9).
+- **Queue** — the global work pipeline (§3 guarantee 1): the one **running** mutating job at the top
+  with its live bar/ETA, then the **durable backlog** of `queued` jobs in `enqueued_at` order. This
+  is the direct view of the §3/§4 durable queue. Each queued row shows *why* it waits:
+  - **`queued · waiting for worker`** — runnable, just behind the running job (the common case);
+  - **`blocked: root R has a pending <run> — confirm/cancel to unblock`** — its owned root is held by
+    a pending review / open merge (§3 guarantee 2), so the worker **skips it and runs the next
+    runnable job**, retrying it on each pump until the holder clears (the confirm/cancel/merge job's
+    completion is what pumps it in). Because dequeue is **runnable-first, not strict FIFO**, a
+    runnable job legitimately passes a blocked one ahead of it — so the running order (and the
+    history list) is by *start* time, not submit time.
+  - **Job labels are derived from `type` + `params`, not the type alone** (pure display — no schema
+    field). Many operations submit multiple `jobs` rows of the *same* `type` distinguished only by a
+    param — e.g. `--confirm`/`--cancel`/analyze are all `type='dedup'` (§8 B); a `--trash-exact`
+    cleanup is a `preview` job then an `apply` job, both `type='cleanup'` (§6.2). A bare type would be
+    ambiguous, so the label is **`<verb> <root-name> (<qualifier>)`**, where the qualifier is derived
+    from `params_json` and the lifecycle **status** (`queued`/`running`/`done`/…) is shown
+    *separately* — so the qualifier stays a stable *noun* that reads correctly in every state (a
+    `queued`/`running`/`done` row all read `cleanup iPhone (exact · delete)`, never "Executing
+    deletion"). Two display rules: **(a)** show the root by its **name** (e.g. `iPhone`), not its full
+    path — matching the Roots panel; in the *per-root* jobs panel the root is dropped entirely (the
+    panel header already names it), so rows there read just `(exact · delete)`. `untrash` targets a
+    raw path (owns no root, §6.3), so it shows the path's **leaf**, not a root name. **(b)** a
+    **`(dry-run)`** job is a non-mutating preview — show the qualifier but **dim the row** so previews
+    don't clutter the history visually. The full map:
+
+    | Type · params | Label qualifier |
+    |---|---|
+    | **scan** plain / `full` / `embed` / `full`+`embed` / `dry_run` | *(none)* / `(full)` / `(embed)` / `(full · embed)` / `(dry-run)` |
+    | **scan** `all=True` (owns no root) | `scan all roots` *(± the same flag suffixes)* |
+    | **dedup** analyze / `dry_run` / `confirm` / `confirm`+`keep_suggested` / `cancel` | `(analyze)` / `(dry-run)` / `(confirm)` / `(confirm · keep-suggested)` / `(cancel)` |
+    | **cleanup** mode=exact: preview / `apply` / `dry_run` | `(exact · preview)` / `(exact · delete)` / `(exact · dry-run)` |
+    | **cleanup** mode=undecodable: preview / `apply` / `dry_run` | `(undecodable · preview)` / `(undecodable · delete)` / `(undecodable · dry-run)` |
+    | **cleanup** mode=perceptual: analyze / `dry_run` / `confirm` / `cancel` | `(perceptual · analyze)` / `(perceptual · dry-run)` / `(perceptual · confirm)` / `(perceptual · cancel)` |
+    | **trash-refresh** (owns no root) | `trash refresh` *(no qualifier)* |
+    | **untrash** plain / `dry_run` (shows path leaf) | `untrash <leaf>` / `untrash <leaf> (dry-run)` |
+    | **merge** (M5) plain / `dry_run` (shows `<src-leaf> → <dest-root>`) | `merge <src> → D` / `merge <src> → D (dry-run)` |
+
+    (`scan --profile` is a diagnostics flag, not shown in the label — it surfaces in the detail view.)
+  - **`↑/↓` navigates the queue**; the highlighted job is the target of the action keys. **`[c]`
+    cancels the selected job** — a *queued* selection (runnable or blocked) is dropped from the
+    backlog (`cancelled`, never ran); the *running* selection gets a cooperative stop at its next
+    checkpoint (§3). **`[x]` cancels every queued job** (drains the backlog) but leaves the running
+    one alone. `[Enter]` opens its detail/result view (below).
+  - Empty backlog is the common case (submit-while-idle runs immediately); the panel then shows just
+    the running job, or "idle" when nothing runs. Queued jobs that were carved out on restart
+    (a destructive `--confirm` never auto-run, §3) appear here as `interrupted — re-run to resume`.
+- **Per-root jobs** (`<root> — jobs`) — appears when a root is selected in the Roots panel; **the
+  answer to "go into a root and see its jobs."** Lists that root's **current** job (if any is running
+  or queued for it) and its **job history**, newest-first, from the `jobs` table filtered by
+  `jobs.root_id` (plus the per-root rows a `--all` scan writes to `scan_results`, §4). Each row shows
+  type, terminal status, a one-line outcome from `jobs.result_json`, and age:
+  - a **running** job mirrors the Queue bar (and notes "see Queue");
+  - a paused **dedup/cleanup** shows **`⚠ awaiting review`** with the `packrat status` count summary
+    (§11 — e.g. `240 delete · 18 grp/47 mbr`); `[o]` opens its `_packrat_review\` folder in Explorer,
+    `[g]`/`[k]` run `--confirm`/`--cancel`;
+  - a **done** job shows its result one-liner (scan `+N new · K undecodable`, merge `N copied · M
+    trashed skipped`, etc.);
+  - an **`interrupted`** job (daemon crash/stop, §3) shows **`interrupted — re-run to resume`** with
+    the command to continue it, distinguishing "the daemon died, your progress is safe" from a user
+    `cancelled`.
+  `↑/↓` selects a row; **`[Enter]` opens the result view** for that job (see below). History depth
+  is the retained `jobs`/`scan_results` rows (retention deferred, §14 #10).
+- **Job detail / result view** (`[Enter]` on any Queue or per-root row) — a full-screen card for one
+  job built from `jobs.result_json` (the uniform, always-written outcome summary, §4) plus a link
+  into the richer per-op record: a scan's full banner + `scan_problem_files` (undecodable/read-error
+  paths, §11), a dedup/cleanup run's per-stage plan and the §8.1 audit (`proposed.json`/
+  `applied.json`), a merge's per-item `merge_plan_items` tally. For a terminal job it is pure
+  history (read-only); for a paused review it also carries the confirm/cancel/open-in-Explorer
+  actions. `[l]` tails the job's log; `Esc` returns.
+- **Menu** — single-key actions that launch the operations. **Nothing is refused at submit** (§3):
+  submitting while the worker is busy **enqueues** the job (it appears in the Queue behind the
+  running one), and submitting against a root that's under review enqueues it too — it just shows as
+  `blocked: … — confirm/cancel to unblock` until you resolve the review, then runs automatically.
+  Each action collects its target (a folder picker / path prompt), submits, and drops you onto the
+  Queue (or the root's jobs panel) to watch.
 
 ### Behavior & scope
 
@@ -2397,15 +2561,24 @@ daemon health (auto-spawns it if down).
   Explorer's job (design tenet §1). For dedup/cleanup review it just *links out* to the staging
   folder in Explorer and waits; the actual keep/delete decisions are made by adding/removing
   shortcuts there, then confirmed from the TUI or CLI.
-- **Live.** The Jobs panel subscribes to the running job's **SSE stream** (§3) so a scan started in
-  another terminal appears here with a moving bar; the stat/roots panels poll read-only snapshots on
-  a light timer. Cancelling here stops the job there.
+- **Live.** The Queue/running panel subscribes to the running job's **SSE stream** (§3) so a scan
+  started in another terminal appears here with a moving bar; the stats/roots/history panels poll
+  read-only snapshots on a light timer (queue reorder, a job finishing and the next starting, a new
+  result landing). Cancelling here stops the job there.
+- **Every job is show-able.** Because each job writes a uniform `jobs.result_json` at terminal time
+  whatever its outcome (§4) — `done`, `cancelled`, `interrupted`, `error` — the per-root history and
+  the result view always have something to render, not just for successes. This is the data contract
+  the TUI depends on; the CLI's `status` surfaces the actionable slice of the same rows (§11).
 - **Keyboard-first**, mouse optional (Textual supports both). All actions reachable by single
-  keys shown in brackets.
+  keys shown in brackets; `↑/↓` drives selection in whichever list panel holds focus (Roots →
+  Queue → per-root jobs), `Tab` cycles focus between panels.
 - **Read-safe.** Everything the TUI does maps to an existing CLI verb — it issues no privileged
   operation of its own, so CLI and TUI stay behaviorally identical.
 - **Later milestone** (§13 M6): the CLI + daemon job runtime are the prerequisite; the TUI is a
-  presentation layer on top and can land once jobs are observable.
+  presentation layer on top and can land once jobs are observable. **M6 depends on two M0-runtime
+  additions this section assumes:** the durable FIFO **queue** and per-job **`root_id`/`result_json`**
+  columns (§3/§4). If the queue/result-history work lands as its own step, M6 is a pure presentation
+  layer on top of it.
 
 ---
 
@@ -2422,9 +2595,12 @@ but v1 is considered done when M0–M6 are.)
 
 - **M0 — Skeleton + job runtime + decode smoke test**: repo layout, **`config.toml` (§9.2 —
   auto-create-with-defaults + per-job reload)**, core library, SQLite schema; auto-spawned daemon
-  with the **single-worker job queue** (submit / stream
-  progress / cooperative-cancel / "busy" rejection) and **startup reconciliation** (orphaned
-  `running` → `interrupted`; resume-on-re-run, §3), CLI client with **Ctrl-C-detaches** and
+  with the **single-worker job queue** (submit / stream progress / cooperative-cancel; one job
+  *runs* at a time with the rest waiting in a **durable backlog**, dequeued **runnable-first** so a
+  job whose owned root is under review is held+skipped (not rejected at submit) until the holder
+  clears — §3) and **startup reconciliation** (orphaned `running` → `interrupted`, durable `queued`
+  backlog drained with the destructive-apply carve-out; resume-on-re-run, §3), CLI
+  client with **Ctrl-C-detaches** and
   `--detach`, `daemon start/stop/status`. **Plus the §9.1 smoke test** — one real sample of every
   allowlisted extension (and the RAW group) run through decode→hash→perceptual→embed to resolve
   the ⚠ cells (AVIF, RAW/cr3, `pdqhash` Windows wheel) before building on them.
@@ -2456,9 +2632,14 @@ but v1 is considered done when M0–M6 are.)
   of `new` files with hash-verify + register. No perceptual matching or review folder — simple and
   one-shot (resumable from its plan).
 - **M6 — TUI (`packrat` no-args)**: Textual app — packrat logo, global stats (total indexed
-  assets, per-root counts, trashed count), **live + recent job runs with progress**, cancel a
-  running job, and a menu to launch operations. The default entrypoint; a window onto daemon jobs
-  started from any terminal. (Depends only on the M0 job runtime, so could land earlier.)
+  assets, per-root counts, trashed count), the **global work Queue** (running + durable FIFO
+  backlog, `↑/↓`-navigable, cancel a selected/all queued job, §3), a **per-root jobs list** (current
+  + history, `↑/↓`, selected via the Roots panel) with a **job result/detail view** (`[Enter]`), and
+  a menu to launch operations. The default entrypoint; a window onto daemon jobs started from any
+  terminal. **Assumes two M0-runtime additions** (§3/§4): the durable job **queue** and per-job
+  **`root_id`/`result_json`** columns — build them with M0's runtime (or as a small pre-M6 step) so
+  the TUI stays a pure presentation layer. (Otherwise depends only on the M0 runtime, so could land
+  earlier.)
 - **M7 — Semantic embeddings**: opt-in `scan --embed` CLIP pass writing the `embeddings` table;
   brute-force cosine search scaffold. Tagging/classification behavior on top is **TBD** (§7).
 - **M8 — Hardening**: scheduled interval-scan triggers (APScheduler wiring in the daemon),

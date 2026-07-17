@@ -46,6 +46,12 @@ def stream_job(client: DaemonClient, job_id: int, *, label: str = "") -> str:
                 st = ev.get("status")
                 if st:
                     last_status = st
+                # A queued job: show why it waits, then keep streaming until it starts.
+                if st == "queued":
+                    holder = ev.get("blocked")
+                    note = (f"blocked: {holder['what']}" if holder else "waiting for worker")
+                    sys.stdout.write(f"\r{prefix}queued · {note}".ljust(78))
+                    sys.stdout.flush()
                 if etype in ("done", "error"):
                     break
         # Confirm the final state from the durable record.

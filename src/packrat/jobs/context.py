@@ -69,6 +69,24 @@ class JobContext:
         self._cancel = cancel_event
         self._total: int | None = None
         self._done = 0
+        self._result: dict | None = None
+
+    # -- result ----------------------------------------------------------
+    def set_result(self, result: dict) -> None:
+        """Record this job's uniform, human-showable outcome summary (§4/§12).
+
+        Persisted to ``jobs.result_json`` by the queue at terminal time — the single
+        surface the TUI renders as a job's result card without joining per-op tables.
+        Call it as the job's outcome becomes known (e.g. at the end of a successful
+        run, or with a partial tally before an early return); the LAST value set wins.
+        A job may set nothing (result stays NULL) — its ``status``/``error`` still
+        record the outcome, so every job is show-able.
+        """
+        self._result = result
+
+    @property
+    def result(self) -> dict | None:
+        return self._result
 
     # -- cancellation ----------------------------------------------------
     @property

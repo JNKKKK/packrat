@@ -113,12 +113,50 @@ def _run_dedup(ctx: JobContext) -> None:
     params = ctx.params
     if params.get("confirm"):
         _confirm(ctx)
+        action = "confirm"
     elif params.get("cancel"):
         _cancel(ctx)
+        action = "cancel"
     elif params.get("dry_run"):
         _dry_run(ctx)
+        action = "dry-run"
     else:
         _analyze(ctx)
+        action = "analyze"
+    _set_dedup_result(ctx, action)
+
+
+def _set_dedup_result(ctx: JobContext, action: str) -> None:
+    """Uniform outcome (§4 result_json) derived from the run's durable state.
+
+    Read AFTER the mode ran, so it reflects committed state: a pending run's current
+    stage + count summary (analyze/staged, or confirm that advanced to a next stage),
+    or the terminal disposition (completed/cancelled). Best-effort — never raises.
+    """
+    root_id = ctx.params.get("root_id")
+    run = ctx.db.query_one(
+        "SELECT id, status, stage FROM review_runs WHERE root_id=? AND run_type='dedup' "
+        "ORDER BY id DESC LIMIT 1", (root_id,),
+    )
+    result = {"op": "dedup", "action": action}
+    if run is not None:
+        rows = ctx.db.query(
+            "SELECT kind, group_no FROM review_actions WHERE run_id=? AND stage=?",
+            (int(run["id"]), run["stage"]),
+        )
+        exact = sum(1 for r in rows if r["kind"] == "exact")
+        groups = {r["group_no"] for r in rows if r["kind"] == "perceptual" and r["group_no"] is not None}
+        members = sum(1 for r in rows if r["kind"] == "perceptual")
+        result.update({"review_status": run["status"], "stage": run["stage"],
+                       "to_delete_exact": exact, "groups": len(groups), "members": members})
+        if run["status"] == "pending":
+            result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
+                                 f"{len(groups)} grp/{members} mbr")
+        else:
+            result["summary"] = f"{action}: run {run['status']}"
+    else:
+        result["summary"] = f"{action}: nothing to review (already clean)"
+    ctx.set_result(result)
 
 
 def _resolve_library_root(ctx: JobContext) -> dict:

@@ -28,9 +28,13 @@ from __future__ import annotations
 #: DB no longer creates the column and _ADDED_COLUMNS no longer lists it. There is no
 #: DROP-column migration (SQLite lacks it pre-3.35 and we keep migrations additive), so
 #: an existing DB just keeps an unread dead column — harmless, nothing writes or reads it.
-#: v3/v4/v5 additions to EXISTING tables need an idempotent ADD COLUMN pass in init_db
-#: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns.
-SCHEMA_VERSION = 6
+#: v7 adds the durable job queue + result history (§3/§4/§12): jobs gets root_id,
+#: enqueued_at, result_json (plain ADD COLUMN) AND a new 'queued' status value. The
+#: status CHECK constraint can't be widened by ALTER, so v7 also needs a one-time
+#: jobs-table REBUILD (connection._migrate_jobs_v7) — the only non-additive migration.
+#: v3/v4/v5/v7 additions to EXISTING tables need the migration pass in init_db
+#: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns / _migrate_jobs_v7.
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -230,21 +234,33 @@ CREATE TABLE IF NOT EXISTS merge_plan_items (
 CREATE INDEX IF NOT EXISTS ix_merge_plan_items_run ON merge_plan_items(run_id);
 
 -- ---------------------------------------------------------------------------
--- jobs: the queue + progress-display counter (§4). total/done drive the bar only;
--- resume is from each op's own durable state. status includes 'interrupted'.
+-- jobs: the durable queue + progress-display counter (§4). total/done drive the
+-- bar only; resume is from each op's own durable state.
+--   status: 'queued' (in the durable FIFO backlog, not yet started — §3 guarantee 1),
+--     'running', then a terminal 'done'/'error'/'cancelled'/'interrupted'.
+--   root_id: the single root this job concerns (NULL for scan --all / untrash /
+--     trash-refresh) — the TUI's per-root job list keys off it (§12).
+--   enqueued_at: when the row was created (queued); started_at: when the worker began
+--     it (NULL while queued); FIFO order = enqueued_at (ties by id).
+--   result_json: a uniform, human-showable OUTCOME summary written at terminal time
+--     by EVERY job whatever its status — the single surface the TUI renders (§12).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY,
     type         TEXT NOT NULL,
-    status       TEXT NOT NULL CHECK (status IN ('running','done','error','cancelled','interrupted')),
+    root_id      INTEGER REFERENCES roots(id) ON DELETE SET NULL,
+    status       TEXT NOT NULL CHECK (status IN ('queued','running','done','error','cancelled','interrupted')),
     total        INTEGER,
     done         INTEGER NOT NULL DEFAULT 0,
+    enqueued_at  TEXT,
     started_at   TEXT,
     finished_at  TEXT,
     error        TEXT,
+    result_json  TEXT,
     params_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS ix_jobs_root ON jobs(root_id);
 
 -- ---------------------------------------------------------------------------
 -- scan_results: one row per (scan job, root) — the persisted scan report so a

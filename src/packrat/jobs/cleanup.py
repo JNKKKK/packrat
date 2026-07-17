@@ -88,18 +88,28 @@ def _run_cleanup(ctx: JobContext) -> None:
     mode = p.get("mode") or "exact"
     if p.get("cancel"):
         _cancel(ctx)                       # perceptual run only
+        action = "cancel"
     elif p.get("confirm"):
         _confirm(ctx)                      # perceptual run only
+        action = "confirm"
     elif p.get("apply"):
         if mode == "undecodable":
             _apply_undecodable(ctx)
         else:
             _apply_default_exact(ctx)
+        action = "delete"
     elif mode == "perceptual" and not p.get("dry_run"):
         _analyze_perceptual(ctx)
+        action = "analyze"
     else:
         # preview (a mode's step-1) or any --dry-run: refresh + report, act on nothing.
         _preview(ctx, mode=mode, dry_run=bool(p.get("dry_run")))
+        action = "dry-run" if p.get("dry_run") else "preview"
+    # Uniform outcome (§4). Each leaf sets ctx._cleanup_outcome with its numbers;
+    # fall back to just the action/mode label if a path recorded none.
+    outcome = getattr(ctx, "_cleanup_outcome", None) or {}
+    ctx.set_result({"op": "cleanup", "mode": mode, "action": action,
+                    "summary": outcome.get("summary", f"{mode} · {action}"), **outcome})
 
 
 def _resolve_library_root(ctx: JobContext) -> dict:
@@ -269,6 +279,8 @@ def _preview(ctx: JobContext, *, mode: str, dry_run: bool) -> None:
             f"cleanup --undecodable {tag} for {root['name']}: {len(undec)} undecodable file(s)"
             f"{net} would be deleted + marked trashed. Nothing deleted."
         )
+        ctx._cleanup_outcome = {"would_delete": len(undec),
+                                "summary": f"undecodable · {len(undec)} would delete"}
         return
 
     # exact / perceptual both need the trashed set current → refresh (real even in dry-run, §6.1).
@@ -282,11 +294,15 @@ def _preview(ctx: JobContext, *, mode: str, dry_run: bool) -> None:
             f"cleanup --trash-perceptual {tag} for {root['name']}: {len(exact)} exact-trash match(es)"
             f"{net}, {len(cands)} perceptual candidate(s) — nothing staged or deleted."
         )
+        ctx._cleanup_outcome = {"exact": len(exact), "perceptual": len(cands),
+                                "summary": f"perceptual · {len(exact)} exact, {len(cands)} candidates"}
     else:
         ctx.log(
             f"cleanup --trash-exact {tag} for {root['name']}: {len(exact)} file(s) match trashed "
             f"content (exact hash){net}. Nothing deleted."
         )
+        ctx._cleanup_outcome = {"would_delete": len(exact),
+                                "summary": f"exact · {len(exact)} would delete"}
 
 
 # ===========================================================================
@@ -313,6 +329,8 @@ def _apply_default_exact(ctx: JobContext) -> None:
         f"cleanup {root['name']}: deleted {out['deleted']} exact-trash file(s) "
         f"({out['network']} permanent on network), {out['already_gone']} already gone."
     )
+    ctx._cleanup_outcome = {"deleted": out["deleted"], "already_gone": out["already_gone"],
+                            "summary": f"exact · {out['deleted']} deleted"}
 
 
 # ===========================================================================
@@ -342,6 +360,8 @@ def _apply_undecodable(ctx: JobContext) -> None:
         f"undecodable file(s) ({out['network']} permanent on network), "
         f"{out['already_gone']} already gone — their assets are now trashed."
     )
+    ctx._cleanup_outcome = {"deleted": out["undecodable_deleted"], "already_gone": out["already_gone"],
+                            "summary": f"undecodable · {out['undecodable_deleted']} deleted"}
 
 
 # ===========================================================================
@@ -716,13 +736,13 @@ register_job(
         type="cleanup",
         handler=_run_cleanup,
         mutating=True,
-        # Only the --trash-perceptual ANALYZE owns the root (opens the pending run).
-        # Preview, one-shot applies (exact/undecodable), confirm, cancel, and dry-run
-        # own nothing: preview/apply re-check the holder in-handler; confirm/cancel act
-        # on the already-owned pending run; the global slot serializes them (§3).
-        owned_root=lambda p: p.get("root_id") if (
-            (p.get("mode") or "exact") == "perceptual"
-            and not (p.get("confirm") or p.get("cancel") or p.get("dry_run") or p.get("apply"))
-        ) else None,
+        # owned_root drives the DEQUEUE gate (§3): a cleanup that TOUCHES the root —
+        # analyze, preview, one-shot apply, dry-run — must not run while another op
+        # holds it, so it declares the root and the queue holds it in the backlog
+        # until the holder clears (§6.2). Only confirm/cancel own None: they act on
+        # this run's OWN pending review_run, so gating them on it would deadlock
+        # (the gate would see their own holder). `_reject_if_held` stays as
+        # gate-backed defense (with the single-worker slot it can no longer fire).
+        owned_root=lambda p: None if (p.get("confirm") or p.get("cancel")) else p.get("root_id"),
     )
 )

@@ -25,15 +25,6 @@ class DaemonError(Exception):
     """A non-2xx response from the daemon that isn't a structured 'busy'."""
 
 
-class BusyResponse(Exception):
-    """The daemon rejected a submission because it (or a root) is busy (§3)."""
-
-    def __init__(self, payload: dict):
-        self.kind = payload.get("kind", "global")
-        self.holder = payload.get("holder", {})
-        super().__init__(payload.get("message", "busy"))
-
-
 class DaemonClient:
     def __init__(self, *, port: int = DEFAULT_PORT, token: str | None = None, timeout: float = 30.0):
         self.base = f"http://{HOST}:{port}"
@@ -76,12 +67,7 @@ class DaemonClient:
 
     # -- jobs ------------------------------------------------------------
     def submit(self, job_type: str, params: dict | None = None) -> int:
-        r = self._raw_post("/jobs", {"type": job_type, "params": params or {}})
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        return int(self._post("/jobs", {"type": job_type, "params": params or {}})["job_id"])
 
     def get_job(self, job_id: int) -> dict:
         return self._get(f"/jobs/{job_id}")
@@ -89,8 +75,20 @@ class DaemonClient:
     def list_jobs(self, limit: int = 20) -> list[dict]:
         return self._get(f"/jobs?limit={limit}")["jobs"]
 
+    def queued_jobs(self) -> list[dict]:
+        """The durable FIFO backlog (§3/§12), oldest-first, with blocked reasons."""
+        return self._get("/jobs/queued")["queued"]
+
+    def root_jobs(self, root_id: int, limit: int = 50) -> list[dict]:
+        """One root's current + historical jobs, newest-first (§12 per-root panel)."""
+        return self._get(f"/roots/{root_id}/jobs?limit={limit}")["jobs"]
+
     def cancel_job(self, job_id: int) -> bool:
         return bool(self._post(f"/jobs/{job_id}/cancel", {})["cancelled"])
+
+    def cancel_queued(self) -> int:
+        """Drop every queued job from the backlog (§12 ``[x]``); returns count dropped."""
+        return int(self._post("/jobs/cancel-queued", {})["dropped"])
 
     def stream_job(self, job_id: int) -> Iterator[dict]:
         """Yield SSE progress events until the job reaches a terminal state."""
@@ -119,7 +117,7 @@ class DaemonClient:
         full: bool = False,
         embed: bool = False,
     ) -> dict:
-        """Register a root (§8 A1). Returns ``{root, job_id, scan_busy?}``.
+        """Register a root (§8 A1). Returns ``{root, job_id}`` (``job_id`` set with --scan).
 
         A ``RootError`` from the daemon comes back as HTTP 400 → :class:`DaemonError`
         carrying the validation message.
@@ -143,17 +141,16 @@ class DaemonClient:
         dry_run: bool = False,
         profile: bool = False,
     ) -> int:
-        """Submit a scan job (§8 A2); returns the job id. Raises :class:`BusyResponse`."""
-        r = self._raw_post(
+        """Submit a scan job (§8 A2); returns the job id.
+
+        Always enqueued (§3 durable queue) — a busy worker / held root no longer
+        rejects, so the only failure is a validation error (:class:`DaemonError`).
+        """
+        return int(self._post(
             "/scan",
             {"root": root, "all": all_roots, "full": full, "embed": embed,
              "dry_run": dry_run, "profile": profile},
-        )
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        )["job_id"])
 
     def submit_dedup(
         self,
@@ -164,17 +161,12 @@ class DaemonClient:
         dry_run: bool = False,
         keep_suggested: bool = False,
     ) -> int:
-        """Submit a dedup job (§8 B); returns the job id. Raises :class:`BusyResponse`."""
-        r = self._raw_post(
+        """Submit a dedup job (§8 B); returns the job id (always enqueued, §3)."""
+        return int(self._post(
             "/dedup",
             {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run,
              "keep_suggested": keep_suggested},
-        )
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        )["job_id"])
 
     def submit_cleanup(
         self,
@@ -186,42 +178,27 @@ class DaemonClient:
         dry_run: bool = False,
         apply: bool = False,
     ) -> int:
-        """Submit a cleanup job (§6.2, §9.1); returns the job id. Raises :class:`BusyResponse`.
+        """Submit a cleanup job (§6.2, §9.1); returns the job id (always enqueued, §3).
 
         ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable``.
         """
-        r = self._raw_post(
+        return int(self._post(
             "/cleanup",
             {"root": folder, "mode": mode, "confirm": confirm,
              "cancel": cancel, "dry_run": dry_run, "apply": apply},
-        )
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        )["job_id"])
 
     def cleanup_preview(self, folder: str, mode: str = "exact") -> dict:
         """Read-only count for a one-shot cleanup mode's confirm (§6.2, §9.1)."""
         return self._get(f"/cleanup/preview?root={folder}&mode={mode}")
 
     def submit_trash_refresh(self) -> int:
-        """Submit a ``trash refresh`` job (§6.1); returns the job id."""
-        r = self._raw_post("/trash/refresh", {})
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        """Submit a ``trash refresh`` job (§6.1); returns the job id (always enqueued)."""
+        return int(self._post("/trash/refresh", {})["job_id"])
 
     def submit_untrash(self, path: str, *, dry_run: bool = False) -> int:
-        """Submit an ``untrash`` job (§6.3); returns the job id."""
-        r = self._raw_post("/untrash", {"path": path, "dry_run": dry_run})
-        if r.status_code == 409:
-            raise BusyResponse(r.json())
-        if r.status_code >= 400:
-            raise DaemonError(f"{r.status_code}: {r.text}")
-        return int(r.json()["job_id"])
+        """Submit an ``untrash`` job (§6.3); returns the job id (always enqueued)."""
+        return int(self._post("/untrash", {"path": path, "dry_run": dry_run})["job_id"])
 
     # -- snapshots -------------------------------------------------------
     def status(self, root: str | None = None) -> dict:

@@ -1,4 +1,4 @@
-"""Job queue: submit, progress, busy rejection, cancel, reconciliation (§3)."""
+"""Job queue: submit, progress, durable FIFO queue, cancel, reconciliation (§3)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 import pytest
 
 from packrat import db
-from packrat.jobs import BusyError, JobQueue
+from packrat.jobs import JobQueue
 from packrat.jobs.reconcile import reconcile_on_startup
 from packrat.util import now_iso
 
@@ -34,7 +34,7 @@ def _wait_terminal(database, job_id, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         row = database.query_one("SELECT status FROM jobs WHERE id=?", (job_id,))
-        if row and row["status"] != "running":
+        if row and row["status"] not in ("queued", "running"):
             return row["status"]
         time.sleep(0.02)
     raise AssertionError("job did not terminate")
@@ -57,12 +57,37 @@ def test_submit_runs_and_reports_progress(queue_and_db):
     assert row["done"] == 4 and row["total"] == 4
 
 
-def test_busy_rejection(queue_and_db):
-    q, _ = queue_and_db
+def test_second_submit_enqueues(queue_and_db):
+    """§3 guarantee 1: a submit while busy is QUEUED (durable backlog), not rejected."""
+    q, database = queue_and_db
     q.submit("sleeper", {"steps": 50, "delay_s": 0.05})
-    with pytest.raises(BusyError) as ei:
-        q.submit("sleeper", {"steps": 2})
-    assert ei.value.kind == "global"
+    jid2 = q.submit("sleeper", {"steps": 2})
+    # jid2 waits in the backlog behind the running job.
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid2,))["status"] == "queued"
+
+
+def test_backlog_drains_in_fifo_order(queue_and_db):
+    """Queued jobs run one at a time, oldest-first, as the worker frees (§3)."""
+    q, database = queue_and_db
+    a = q.submit("sleeper", {"steps": 3, "delay_s": 0.02})
+    b = q.submit("sleeper", {"steps": 3, "delay_s": 0.02})
+    c = q.submit("sleeper", {"steps": 3, "delay_s": 0.02})
+    for jid in (a, b, c):
+        assert _wait_terminal(database, jid) == "done"
+    # started_at ordering reflects FIFO drain (a before b before c).
+    rows = {r["id"]: r["started_at"] for r in
+            database.query("SELECT id, started_at FROM jobs WHERE id IN (?,?,?)", (a, b, c))}
+    assert rows[a] <= rows[b] <= rows[c]
+
+
+def test_cancel_queued_drops_from_backlog(queue_and_db):
+    """Cancelling a still-queued job marks it cancelled without ever running it (§3)."""
+    q, database = queue_and_db
+    q.submit("sleeper", {"steps": 50, "delay_s": 0.05})
+    jid2 = q.submit("sleeper", {"steps": 2})
+    assert q.cancel(jid2) is True
+    row = database.query_one("SELECT status, started_at FROM jobs WHERE id=?", (jid2,))
+    assert row["status"] == "cancelled" and row["started_at"] is None
 
 
 def test_cooperative_cancel(queue_and_db):
@@ -91,3 +116,68 @@ def test_unknown_job_type(queue_and_db):
     q, _ = queue_and_db
     with pytest.raises(ValueError):
         q.submit("nonexistent", {})
+
+
+def test_reconcile_keeps_nondestructive_queued(database):
+    """§3: a queued NON-destructive job (scan) survives a restart and stays queued."""
+    database.execute(
+        "INSERT INTO jobs(type,status,enqueued_at,params_json) "
+        "VALUES('scan','queued',?, '{\"root_id\": 1}')",
+        (now_iso(),),
+    )
+    summary = reconcile_on_startup(database)
+    assert summary["carved_out_queued"] == []
+    assert database.query_one("SELECT status FROM jobs")["status"] == "queued"
+
+
+def test_reconcile_carves_out_queued_destructive_apply(database):
+    """§3 carve-out: a queued dedup --confirm is flipped to interrupted, never auto-run."""
+    database.execute(
+        "INSERT INTO jobs(type,status,enqueued_at,params_json) "
+        "VALUES('dedup','queued',?, '{\"root_id\": 1, \"confirm\": true}')",
+        (now_iso(),),
+    )
+    summary = reconcile_on_startup(database)
+    assert len(summary["carved_out_queued"]) == 1
+    row = database.query_one("SELECT status, error FROM jobs")
+    assert row["status"] == "interrupted"
+    assert "not auto-run" in row["error"]
+
+
+def test_config_error_closes_subscribers(packrat_home):
+    """A job that dies on config load must close SSE subscribers (no stream hang)."""
+    db.init_db().close()
+    conn = db.connect(check_same_thread=False)
+    d = db.Database(conn)
+
+    def _bad_config():
+        raise RuntimeError("boom")
+
+    q = JobQueue(d, config_loader=_bad_config)
+    try:
+        jid = q.submit("sleeper", {"steps": 1})
+        sub = q.subscribe(jid)
+        # The sentinel (None) must arrive — else a streaming client blocks forever.
+        seen_sentinel = False
+        for _ in range(200):
+            ev = sub.q.get(timeout=5)
+            if ev is None:
+                seen_sentinel = True
+                break
+        assert seen_sentinel
+        assert _wait_terminal(d, jid) == "error"
+    finally:
+        q.shutdown()
+        d.close()
+
+
+def test_reconcile_carves_out_queued_cleanup_apply(database):
+    """A queued one-shot cleanup apply (exact/undecodable delete) is also carved out."""
+    database.execute(
+        "INSERT INTO jobs(type,status,enqueued_at,params_json) "
+        "VALUES('cleanup','queued',?, '{\"root_id\": 1, \"mode\": \"exact\", \"apply\": true}')",
+        (now_iso(),),
+    )
+    summary = reconcile_on_startup(database)
+    assert len(summary["carved_out_queued"]) == 1
+    assert database.query_one("SELECT status FROM jobs")["status"] == "interrupted"

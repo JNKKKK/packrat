@@ -130,7 +130,12 @@ def test_cleanup_rejects_trash_root(queue_and_db, tmp_path):
     _run(q, database, "cleanup", expect="error", root_id=root["id"])
 
 
-def test_cleanup_blocked_by_pending_dedup(queue_and_db, tmp_path):
+def test_cleanup_held_by_pending_dedup(queue_and_db, tmp_path):
+    """§3/§6.2: a cleanup on a root under a pending dedup is ENQUEUED + held, not rejected.
+
+    Every root-touching cleanup op (perceptual analyze AND exact preview) declares the
+    root, so the dequeue gate holds it in the backlog until the dedup run clears.
+    """
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -141,13 +146,17 @@ def test_cleanup_blocked_by_pending_dedup(queue_and_db, tmp_path):
         "VALUES (?, 'dedup', 'pending', 1, 'staged', 't')",
         (root["id"],),
     )
-    # A --perceptual analyze OWNS the root → the queue rejects it (per-root exclusivity).
-    from packrat.jobs import BusyError
-
-    with pytest.raises(BusyError):
-        q.submit("cleanup", {"root_id": root["id"], "mode": "perceptual"})
-    # A default preview owns nothing but re-checks the holder in-handler → errors.
-    _run(q, database, "cleanup", expect="error", root_id=root["id"])
+    # Perceptual analyze: enqueued + held (its owned root is busy).
+    jid_p = q.submit("cleanup", {"root_id": root["id"], "mode": "perceptual"})
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid_p,))["status"] == "queued"
+    assert q.blocked_reason("cleanup", {"root_id": root["id"], "mode": "perceptual"}) is not None
+    # Default exact preview also touches the root → also held.
+    jid_e = q.submit("cleanup", {"root_id": root["id"], "mode": "exact"})
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid_e,))["status"] == "queued"
+    # confirm/cancel own None (act on their own run) → runnable.
+    assert q.blocked_reason("cleanup", {"root_id": root["id"], "cancel": True}) is None
+    q.cancel(jid_p)
+    q.cancel(jid_e)
 
 
 # ---------------------------------------------------------------------------

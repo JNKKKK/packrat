@@ -23,7 +23,7 @@ from typing import List, Optional
 import typer
 
 from .. import __version__, build
-from ..daemon.client import BusyResponse, DaemonClient, DaemonError, DaemonNotRunning
+from ..daemon.client import DaemonClient, DaemonError, DaemonNotRunning
 from ..daemon.spawn import ensure_daemon
 from ..daemon.state import DEFAULT_PORT, read_state, pid_alive
 from .stream import stream_job
@@ -206,7 +206,14 @@ def status(
         typer.echo("roots: none registered yet — `packrat roots register <path>`.")
     if snap.get("running"):
         rj = snap["running"]
-        typer.echo(f"running: {rj['type']} ({rj['done']}/{rj['total']})")
+        typer.echo(f"running: {rj.get('label') or rj['type']} ({rj['done']}/{rj['total']})")
+    queued = snap.get("queued", [])
+    if queued:
+        typer.echo(f"queued: {len(queued)} job(s) in the backlog —")
+        for q in queued:
+            holder = q.get("blocked")
+            why = f"blocked: {holder['what']}" if holder else "waiting for worker"
+            typer.echo(f"  {q.get('label') or q['type']} · {why}")
     for pr in snap.get("pending_reviews", []):
         typer.echo(f"⚠ {pr['run_type']} pending on {pr['root_name']} — {_review_count_summary(pr)} "
                    f"(`packrat {_review_verb(pr)} {pr['root_name']} --confirm`/--cancel).")
@@ -274,8 +281,6 @@ def roots_register(
         typer.echo(json.dumps(resp, indent=2))
         raise typer.Exit(0)
     typer.echo(f"registered root [{row['id']}] {row['name']}  {row['path']}  ({row['kind']}) — not yet scanned.")
-    if resp.get("scan_busy"):
-        typer.echo(f"  (scan not started — {resp['scan_busy']})")
     job_id = resp.get("job_id")
     if job_id and not detach:
         final = stream_job(client, job_id, label="scan")
@@ -297,8 +302,19 @@ def jobs(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option
         typer.echo("no jobs yet.")
         return
     for j in js:
-        started = (j.get("started_at") or "")[:19].replace("T", " ")
-        line = f"  {started}  {j['type']:8s} {j['status']:11s} {j['done']}/{j['total']}"
+        # Queued jobs have no start yet — show enqueue time so the row isn't blank.
+        stamp = (j.get("started_at") or j.get("enqueued_at") or "")[:19].replace("T", " ")
+        label = j.get("label") or j["type"]
+        line = f"  {stamp}  {label:28s} {j['status']:11s} {j.get('done', 0)}/{j.get('total')}"
+        result = j.get("result_json")
+        if result:
+            import json as _json
+            try:
+                summary = _json.loads(result).get("summary")
+            except (ValueError, TypeError):
+                summary = None
+            if summary:
+                line += f"  · {summary}"
         if j.get("error"):
             line += f"  err: {j['error']}"
         typer.echo(line)
@@ -330,9 +346,6 @@ def scan(
         job_id = client.submit_scan(
             path, all_roots=all_roots, full=full, embed=embed, dry_run=dry_run, profile=profile
         )
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot scan: {_detail(exc)}", err=True)
         raise typer.Exit(1)
@@ -384,9 +397,6 @@ def dedup(
     try:
         job_id = client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run,
                                      keep_suggested=keep_suggested)
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot dedup: {_detail(exc)}", err=True)
         raise typer.Exit(1)
@@ -457,9 +467,6 @@ def cleanup(
             job_id = client.submit_cleanup(
                 folder, mode=mode, confirm=confirm, cancel=cancel, dry_run=dry_run
             )
-        except BusyResponse as exc:
-            _print_busy(exc)
-            raise typer.Exit(1)
         except DaemonError as exc:
             typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
             raise typer.Exit(1)
@@ -477,9 +484,6 @@ def cleanup(
     flag = _mode_flag(mode)
     try:
         prev_job = client.submit_cleanup(folder, mode=mode)  # preview: report, act on nothing
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
         raise typer.Exit(1)
@@ -503,11 +507,7 @@ def cleanup(
         if ans.strip() != str(n):
             typer.echo("count mismatch — aborted, nothing deleted.")
             raise typer.Exit(1)
-    try:
-        apply_job = client.submit_cleanup(folder, mode=mode, apply=True)
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
+    apply_job = client.submit_cleanup(folder, mode=mode, apply=True)
     final = stream_job(client, apply_job, label=f"cleanup --{flag}")
     typer.echo(f"cleanup {final}")
     if json_out:
@@ -539,9 +539,6 @@ def trash_refresh(
     client = _client_or_spawn()
     try:
         job_id = client.submit_trash_refresh()
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot refresh trash: {_detail(exc)}", err=True)
         raise typer.Exit(1)
@@ -574,9 +571,6 @@ def untrash(
     client = _client_or_spawn()
     try:
         job_id = client.submit_untrash(path, dry_run=dry_run)
-    except BusyResponse as exc:
-        _print_busy(exc)
-        raise typer.Exit(1)
     except DaemonError as exc:
         typer.echo(f"cannot untrash: {_detail(exc)}", err=True)
         raise typer.Exit(1)
@@ -773,14 +767,6 @@ def _print_last_scan(d: dict) -> None:
             typer.echo(f"    [{pf['problem']}] {pf['path']}")
             if pf.get("detail"):
                 typer.echo(f"        {pf['detail']}")
-
-
-def _print_busy(exc: BusyResponse) -> None:
-    # ``exc`` already reads "busy: <job>" / "root busy: <holder>" from the daemon.
-    if exc.kind == "root":
-        typer.echo(f"{exc} — confirm/cancel it first (§3).", err=True)
-    else:
-        typer.echo(f"{exc} — one mutating operation at a time (§3).", err=True)
 
 
 def main() -> None:

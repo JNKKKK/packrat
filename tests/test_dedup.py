@@ -49,7 +49,7 @@ def _run(q, database, job_type, expect="done", **params):
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         row = database.query_one("SELECT status, error FROM jobs WHERE id=?", (jid,))
-        if row and row["status"] != "running":
+        if row and row["status"] not in ("queued", "running"):
             assert row["status"] == expect, f"{job_type} -> {row['status']}: {row['error']}"
             return jid
         time.sleep(0.02)
@@ -487,7 +487,12 @@ def test_dedup_confirm_aborts_if_stage_folder_missing(queue_and_db, tmp_path):
 
 
 @win_only
-def test_dedup_second_analyze_rejected_while_pending(queue_and_db, tmp_path):
+def test_dedup_second_analyze_held_while_pending(queue_and_db, tmp_path):
+    """§3: a second analyze on a root with a pending run is ENQUEUED + held, not rejected.
+
+    It is not run (its owned root is held → dequeue-gate skips it), so it sits `queued`
+    and `blocked_reason` names the holder. A confirm/cancel owns no root → runnable.
+    """
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -497,13 +502,78 @@ def test_dedup_second_analyze_rejected_while_pending(queue_and_db, tmp_path):
     shutil.copy(lib / "a.png", lib / "a_copy.png")
     root = register(database, str(lib))
     _scan_root(q, database, root["id"])
-    _run(q, database, "dedup", root_id=root["id"])
-    from packrat.jobs import BusyError
+    _run(q, database, "dedup", root_id=root["id"])  # opens the pending run
 
-    with pytest.raises(BusyError):
-        q.submit("dedup", {"root_id": root["id"]})  # analyze owns the root
-    # confirm/cancel own nothing → not rejected by per-root exclusivity.
-    assert q.submit("dedup", {"root_id": root["id"], "cancel": True})
+    # Second analyze: enqueued (not rejected), and held — its owned root is busy.
+    jid2 = q.submit("dedup", {"root_id": root["id"]})
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid2,))["status"] == "queued"
+    assert q.blocked_reason("dedup", {"root_id": root["id"]}) is not None
+    # confirm/cancel own nothing → runnable (not blocked by per-root exclusivity).
+    assert q.blocked_reason("dedup", {"root_id": root["id"], "cancel": True}) is None
+    # Cancel the held analyze so teardown is clean.
+    q.cancel(jid2)
+
+
+def test_dedup_held_analyze_wakes_after_root_freed(queue_and_db, tmp_path):
+    """A held analyze auto-runs once the pending run it waited on is cancelled (§3 pump).
+
+    Verifies the finish-pump both starts the next job AND unblocks the one that was
+    waiting on the freed root — no separate wake signal.
+    """
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 1)
+    import shutil
+
+    shutil.copy(lib / "a.png", lib / "a_copy.png")
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])  # pending run #1 holds the root
+
+    jid2 = q.submit("dedup", {"root_id": root["id"]})  # held behind #1
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid2,))["status"] == "queued"
+    # Cancelling run #1 frees the root; the finish-pump then starts the held analyze,
+    # so jid2 leaves 'queued' on its own (no new submission).
+    q.submit("dedup", {"root_id": root["id"], "cancel": True})
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        st = database.query_one("SELECT status FROM jobs WHERE id=?", (jid2,))["status"]
+        if st != "queued":
+            break
+        time.sleep(0.02)
+    assert st != "queued"  # the pump woke it once the root was free
+
+
+def test_runnable_job_passes_blocked_head_of_queue(queue_and_db, tmp_path):
+    """§3 runnable-first: a blocked job at the head must NOT stall a runnable one behind it.
+
+    With a pending dedup holding root A, submit `scan A` (blocked) THEN `scan B`
+    (runnable, different root). The blocked scan A stays queued; scan B jumps it and
+    completes — proving dequeue is runnable-first, not strict FIFO head-of-line.
+    """
+    q, database = queue_and_db
+    liba = tmp_path / "liba"; liba.mkdir(); _photo(liba / "a.png", 1)
+    libb = tmp_path / "libb"; libb.mkdir(); _photo(libb / "b.png", 2)
+    ra = register(database, str(liba))
+    rb = register(database, str(libb))
+    # A pending dedup holds root A (no worker slot — analyze finished).
+    database.execute(
+        "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+        "VALUES (?, 'dedup', 'pending', 1, 'staged', 't')",
+        (ra["id"],),
+    )
+    blocked = q.submit("scan", {"root_id": ra["id"]})   # head, blocked on root A
+    runnable = q.submit("scan", {"root_id": rb["id"]})  # behind it, runnable
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        st = database.query_one("SELECT status FROM jobs WHERE id=?", (runnable,))["status"]
+        if st not in ("queued", "running"):
+            break
+        time.sleep(0.02)
+    assert st == "done"  # the runnable scan passed the blocked head
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (blocked,))["status"] == "queued"
+    q.cancel(blocked)  # clean teardown
 
 
 def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
@@ -541,7 +611,8 @@ def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
     assert counts["members"] == 1 and counts["groups"] == 1
 
 
-def test_scan_blocked_on_root_with_pending_dedup(queue_and_db, tmp_path):
+def test_scan_held_on_root_with_pending_dedup(queue_and_db, tmp_path):
+    """§3: a manual scan of a root under review is ENQUEUED + held (not rejected)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -552,10 +623,12 @@ def test_scan_blocked_on_root_with_pending_dedup(queue_and_db, tmp_path):
         "VALUES (?, 'dedup', 'pending', 1, 'staged', '2026-01-01T00:00:00+00:00')",
         (root["id"],),
     )
-    from packrat.jobs import BusyError
-
-    with pytest.raises(BusyError):
-        q.submit("scan", {"root_id": root["id"]})
+    jid = q.submit("scan", {"root_id": root["id"]})
+    # Held in the backlog, not run against the under-review root.
+    assert database.query_one("SELECT status FROM jobs WHERE id=?", (jid,))["status"] == "queued"
+    holder = q.blocked_reason("scan", {"root_id": root["id"]})
+    assert holder is not None and holder["run_type"] == "dedup"
+    q.cancel(jid)  # clean teardown
 
 
 # ---------------------------------------------------------------------------

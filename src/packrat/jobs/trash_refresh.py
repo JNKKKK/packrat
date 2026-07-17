@@ -20,7 +20,12 @@ from .registry import JobSpec, register_job
 
 
 def _run_trash_refresh(ctx: JobContext) -> None:
-    trash.refresh_trash(ctx)
+    summary = trash.refresh_trash(ctx)
+    ctx.set_result({
+        "op": "trash-refresh", **summary,
+        "summary": f"{summary.get('new_trashed', 0)} new trashed · "
+                   f"{summary.get('flipped', 0)} flipped · {summary.get('emptied', 0)} emptied",
+    })
 
 
 register_job(
