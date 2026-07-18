@@ -459,8 +459,8 @@ action maps to an existing CLI verb (design tenet §1.6).
 3. **`Ctrl-C` quit** (since `[q]` = focus Queue). OK, or a different quit key?
 4. **Count-confirm for one-shot cleanup** (exact/undecodable) — lives wherever cleanup launches
    from (depends on Q2); a blocking typed-count modal in the TUI, or route to CLI?
-5. **Window size 80×24** — now a documented requirement (PLAN §12 "Fixed layout": one fixed region,
-   never resized between interfaces). Open sub-question is only the *number*: keep 80×24 (safe
-   minimum) or bump to e.g. 100×30 for more room for long NAS paths/labels? (The "never changes
-   between interfaces" rule holds regardless of which size we pick.)
+5. **Window size 80×24 — DECIDED** (PLAN §12 "Fixed layout": one fixed region, never resized between
+   interfaces). Long NAS paths/labels are handled at 80×24, not by widening: **middle-elide with `…`
+   in compact list rows** (drive + leaf kept visible), **wrap onto multiple lines in detail/card
+   views**, and the full path is always shown in root detail (§3). No open sub-question left here.
 6. **Logo/mascot** — placeholder; final ASCII rat is cosmetic.
