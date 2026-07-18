@@ -1398,7 +1398,9 @@ blowup.
    "never compared" (e.g. an asset scanned/backfilled after the cache was built) — trusting it would
    **silently miss** those, a recall loss the user can't see (against the recall-first tenet, cf.
    §5.3). The matcher is pure DB/CPU and runs in seconds–low-minutes (§5.4), so recomputing is cheap
-   and always correct; the upsert still lets read-only stats (TUI "duplicates (est)") use the table.
+   and always correct. The upsert persists the run's edges as a queryable record (forensics / the
+   §8.1 audit); it is deliberately **not** surfaced as a headline "duplicates (est)" TUI stat, since
+   as a per-run cache it is 0 before any dedup and stale after later scans (§12 Collection stats).
 9. For each cluster of size ≥2 in a stage, assign a 4-digit `group_no` and each member a 4-digit
    `member_no`; plan a shortcut `group{NNNN}_{MMMM}.lnk`, with an `_external` suffix when the
    member's live file is in an external folder. Each member is represented by its single surviving
@@ -2524,8 +2526,8 @@ submits, observes, and cancels, exactly like the CLI.
 │  │  photos     111,240          │  │  Camera    E:\Photos          26,150  │  │
 │  │  videos      13,563          │  │  Downloads D:\dump               241  │  │
 │  │ Trashed       3,904          │  │  _Trash    D:\Backup\_Trash  (trash)  │  │
-│  │ Duplicates*     612 (est)    │  │  …                                    │  │
-│  │ Last scan   2h ago           │  │  ● recent ○ stale  ▸ selected → jobs  │  │
+│  │ Last scan   2h ago           │  │  …                                    │  │
+│  │                              │  │  ● recent ○ stale  ▸ selected → jobs  │  │
 │  └───────────────────────────────┘  └───────────────────────────────────────┘  │
 │                                                                                │
 │  ┌─ Queue ────────────────────────────────────────────────────────────────┐  │
@@ -2561,9 +2563,13 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
   the tagline "hoards everything, keeps a system", and a **live "· N assets hoarded ·" line** that
   reflects the current total-asset count (updates as scans/merges add assets). Cosmetic + a small
   at-a-glance stat; sets the tone.
-- **Collection stats** — read-only DB rollups: total assets (photo/video split), trashed count,
-  an estimated duplicate count (from `similarity_edges`, marked `*` as "since last dedup"), and
-  last-scan recency. Refreshes live while jobs run.
+- **Collection stats** — read-only DB rollups: total assets (photo/video split), trashed count, and
+  last-scan recency. Refreshes live while jobs run. (All fields come straight from
+  `queries.status_snapshot` — §11.) *(A `similarity_edges`-derived "duplicates (est)" stat was
+  considered and **dropped**: `similarity_edges` is a per-run cache that only exists after a `dedup`
+  and is never trusted as a complete count (§8 B), so a headline "est" number would be misleading —
+  0 on a fresh collection, stale after scans. Duplicate state is surfaced where it's real and
+  actionable instead: the per-root `⚠ awaiting review` count on a pending dedup run.)*
 - **Roots** — each registered root with path, asset count, and a freshness dot (scanned recently
   vs. stale/never); trash roots labelled. **`↑/↓` moves a selection cursor (`▸`); selecting a root
   populates the per-root *jobs* panel below** (this is the "go into a root" flow). **[r] Manage
@@ -2637,7 +2643,37 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
   paths, §11), a dedup/cleanup run's per-stage plan and the §8.1 audit (`proposed.json`/
   `applied.json`), a merge's per-item `merge_plan_items` tally. For a terminal job it is pure
   history (read-only); for a paused review it also carries the confirm/cancel/open-in-Explorer
-  actions. `[l]` tails the job's log; `Esc` returns.
+  actions. `Esc` returns.
+  - **No live log tail.** Per-job logs are *not* persisted (a job's `ctx.log()` lines stream as SSE
+    `log` events while it runs and go to the daemon's rotating `daemon.log`, but are not stored
+    per-job and re-queryable). So the result view renders **`result_json`** — which every terminal
+    job writes (below) — not a log. (A running job's live log lines can still be shown from the SSE
+    stream while attached; there is just nothing to *re-read* for a finished job. A per-job persisted
+    log + a tail endpoint is a possible later nicety, deferred — §14.)
+  - **`result_json` rendering — one shape per `op`, always present.** Every job writes a
+    `result_json` with an **`op`** discriminator (`scan` / `dedup` / `cleanup` / `merge` /
+    `trash-refresh` / `untrash`) and a human **`summary`** string, plus op-specific count fields. The
+    TUI switches on `op` to render the card; `summary` is the always-safe one-liner fallback. Verified
+    shapes (fields the card can surface):
+    - **scan** → `{dry_run, full, embed, roots_scanned, roots_skipped, new, exact_dup, backfilled,
+      matches_trashed, undecodable, errors, read_errors, skipped_fastpath, deleted_instances,
+      forgotten_assets, candidates, summary}`.
+    - **merge** → `{dry_run, source, dest_root, new, exact_known, trashed, dup_in_source, collisions,
+      unindexed, errors, summary}`.
+    - **dedup** → `{action ∈ analyze|confirm|cancel|dry-run, review_status, stage, to_delete_exact,
+      groups, members, summary}` (a "already clean" analyze omits the review fields, carries `summary`).
+    - **cleanup** → `{mode ∈ exact|perceptual|undecodable, action ∈ preview|delete|analyze|confirm|
+      cancel|dry-run, summary}` + mode-specific counts (`would_delete`, or `exact`/`perceptual`,
+      or `deleted`/`already_gone`).
+    - **trash-refresh** → `{roots, new_trashed, flipped, already_trashed, emptied, undeletable,
+      errors, summary}`.
+    - **untrash** → `{dry_run, untrashed, forgotten, already_active, unknown, errors, summary}`.
+    - **Terminal `error`/`interrupted`** → `result_json` may be **NULL** (the job died before setting
+      one). The card then renders from `jobs.status` + `jobs.error` — e.g. an `interrupted` job shows
+      `interrupted — re-run to resume`, an `error` shows its message. This is the §4 contract: status
+      + error always describe the outcome even when result_json is absent, so **every job is
+      show-able**. The renderer must therefore treat result_json as *optional* and key off `status`
+      first, `op` second.
 - **Menu** — single-key actions that launch the operations. **Nothing is refused at submit** (§3):
   submitting while the worker is busy **enqueues** the job (it appears in the Queue behind the
   running one), and submitting against a root that's under review enqueues it too — it just shows as
@@ -2655,6 +2691,11 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
   started in another terminal appears here with a moving bar; the stats/roots/history panels poll
   read-only snapshots on a light timer (queue reorder, a job finishing and the next starting, a new
   result landing). Cancelling here stops the job there.
+  - **ETA is computed TUI-side, not by the daemon.** Progress events carry `done`/`total` (and the
+    `ProgressEvent.eta_s` field exists but is left unset — no job computes it). The TUI derives the
+    `ETA 4m` figure itself from the observed rate: `(total − done) / (Δdone/Δt)` over a short trailing
+    window of SSE progress events. So ETA is a pure presentation-layer estimate — no backend change,
+    and it degrades to blank until enough progress has streamed to rate-estimate.
 - **Every job is show-able.** Because each job writes a uniform `jobs.result_json` at terminal time
   whatever its outcome (§4) — `done`, `cancelled`, `interrupted`, `error` — the per-root history and
   the result view always have something to render, not just for successes. This is the data contract
