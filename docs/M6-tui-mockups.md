@@ -5,9 +5,12 @@ Grounded in PLAN §12 and the **actual** shipped data surfaces (M0–M5): the re
 queries (`status_snapshot` / `root_detail` / `recent_jobs` / `root_jobs` /
 `queued_jobs`), the SSE progress stream, and the per-op `jobs.result_json` shapes.
 
-> **These frames are generated** by `docs/_tui_mockup_gen.py`, which renders **every
-> interface into the SAME fixed 80×24 window** — so the doc mechanically proves the
-> requirement "the window size never changes across interfaces." Regenerate with
+> **Fixed window size is a TUI design requirement, not just a mockup property** — see
+> **PLAN §12 "Fixed layout"** (the authoritative statement: every interface renders in the
+> same fixed 80×24 region; navigation swaps content in place, never resizes/reflows the
+> frame; long lists scroll within their panel). **These frames are generated** by
+> `docs/_tui_mockup_gen.py`, which renders every interface into that identical 80×24 frame
+> so the doc *mechanically demonstrates* the requirement. Regenerate with
 > `uv run python docs/_tui_mockup_gen.py`. (The box-drawing + `◉◐○` glyphs are each one
 > terminal cell; they align in a real monospace TUI font even if a proportional preview
 > nudges them.)
@@ -456,6 +459,8 @@ action maps to an existing CLI verb (design tenet §1.6).
 3. **`Ctrl-C` quit** (since `[q]` = focus Queue). OK, or a different quit key?
 4. **Count-confirm for one-shot cleanup** (exact/undecodable) — lives wherever cleanup launches
    from (depends on Q2); a blocking typed-count modal in the TUI, or route to CLI?
-5. **Window size 80×24** — chosen as a safe minimum. Bump to e.g. 100×30 (more room for paths/labels),
-   or keep 80×24 as the floor and let panels use extra space if the terminal is bigger?
+5. **Window size 80×24** — now a documented requirement (PLAN §12 "Fixed layout": one fixed region,
+   never resized between interfaces). Open sub-question is only the *number*: keep 80×24 (safe
+   minimum) or bump to e.g. 100×30 for more room for long NAS paths/labels? (The "never changes
+   between interfaces" rule holds regardless of which size we pick.)
 6. **Logo/mascot** — placeholder; final ASCII rat is cosmetic.

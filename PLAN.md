@@ -2710,6 +2710,18 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
 - **Keyboard-first**, mouse optional (Textual supports both). All actions reachable by single
   keys shown in brackets; `↑/↓` drives selection in whichever list panel holds focus (Roots →
   Queue → per-root jobs), `Tab` cycles focus between panels.
+- **Fixed layout — the window size never changes across interfaces (hard requirement).** Every
+  interface (dashboard, the maximized Roots/Queue views, root detail, and the job result cards)
+  renders inside the **same fixed terminal region** — one screenful the app owns for its whole
+  lifetime. Navigating between interfaces **swaps content in place; it never grows, shrinks, or
+  reflows the outer frame**, so nothing below the app jumps and the layout is stable to read. The
+  target region is a fixed **80×24** floor (the safe-minimum terminal); on a larger terminal the app
+  still presents that same fixed canvas rather than sprawling (extra space is left as margin — a
+  responsive/reflowing layout is explicitly *not* a v1 goal). Each interface is designed to fit 80×24
+  without scrolling the frame itself; long lists (roots, jobs) scroll **within** their panel, not by
+  resizing it. **The `docs/M6-tui-mockups.md` mockups are generated into an identical 80×24 frame to
+  mechanically enforce this** — if a future interface can't fit, that's a design signal to trim it,
+  not to enlarge the window. (Textual: a fixed-size root container / screen, not auto-sizing widgets.)
 - **Read-safe & CLI-complete (design tenet §1.6).** Everything the TUI does maps to an existing CLI
   verb — it issues no privileged operation of its own, so CLI and TUI stay behaviorally identical.
   The reverse also holds: there is **no TUI-only action**. The TUI is the default *face*, but the
