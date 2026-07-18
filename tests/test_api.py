@@ -95,6 +95,34 @@ def test_cancel_queued_job_drops_it(client):
     assert client.get(f"/jobs/{jid2}", headers=_h()).json()["status"] == "cancelled"
 
 
+def test_prioritize_queued_job(client):
+    """POST /jobs/{id}/prioritize bumps a queued job to the front (§11)."""
+    client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h()
+    )
+    a = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h()).json()["job_id"]
+    b = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}}, headers=_h()).json()["job_id"]
+    r = client.post(f"/jobs/{b}/prioritize", headers=_h())
+    assert r.status_code == 200 and r.json()["prioritized"] is True
+    # The backlog snapshot now lists b (prioritized) ahead of a (enqueued earlier).
+    queued = client.get("/jobs/queued", headers=_h()).json()["queued"]
+    ids = [q["id"] for q in queued]
+    assert ids.index(b) < ids.index(a)
+
+
+def test_prioritize_running_job_is_noop(client):
+    """A running (not queued) job can't be prioritized → prioritized:false (§11)."""
+    jid = client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 4, "delay_s": 0.05}}, headers=_h()
+    ).json()["job_id"]
+    for _ in range(50):
+        if client.get(f"/jobs/{jid}", headers=_h()).json()["status"] == "running":
+            break
+        time.sleep(0.02)
+    r = client.post(f"/jobs/{jid}/prioritize", headers=_h())
+    assert r.status_code == 200 and r.json()["prioritized"] is False
+
+
 def test_roots_snapshot_empty(client):
     assert client.get("/roots", headers=_h()).json() == {"roots": []}
 

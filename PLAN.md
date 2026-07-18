@@ -2082,7 +2082,9 @@ Mapping this onto packrat's operations:
 
 Adding a folder is two commands (`roots register` then `scan`); `dedup` de-duplicates one folder via
 Explorer shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot);
-trash is handled by `cleanup`, `trash refresh`, and `untrash` (§6).
+trash is handled by `cleanup`, `trash refresh`, and `untrash` (§6). `status` (read-only) and `jobs`
+(list / cancel / prioritize the work queue) surface runtime state; `daemon` manages the background
+process. (Per design tenet §1.6, every command here is also reachable from the TUI, §12.)
 
 **Shared client semantics** (all job-submitting commands — `scan`, `dedup`, `merge`, `cleanup`,
 `trash refresh`, `untrash`, `scan --embed`): each **submits a job to the daemon** and streams its progress.
@@ -2405,6 +2407,50 @@ CLI shows only the latest.
 `--json` gives the machine-readable form of all the above. Related read-only previews on other
 commands: `scan --dry-run` (would-index preview). All read-only queries run concurrently with any
 job.
+
+### `packrat jobs` — inspect and steer the work queue
+The **noun for the job queue** (§3): list recent runs, and cancel or reorder work. Bare
+`packrat jobs` is an alias for `packrat jobs list`. Every action here is also available in the TUI's
+Queue panel (§12, design tenet §1.6).
+
+```
+packrat jobs [list] [--limit N] [--json]   # recent runs, newest-first (running/queued/terminal)
+packrat jobs cancel <job#>                 # cancel a running (cooperative) or queued (dropped) job
+packrat jobs prioritize <job#>             # move a queued job to the front of the queue
+```
+
+#### `packrat jobs list` — recent job runs (read-only)
+Newest-first: each row shows its **id** (the handle `cancel`/`prioritize` take), display label
+(`<verb> <root> (<qualifier>)`, §12), lifecycle status, progress, and the one-line `result_json`
+outcome (§4). Includes the durable `queued` backlog and terminal history. `--json` for the full rows.
+Read-only — runs anytime, never blocked (§3).
+
+#### `packrat jobs cancel <job#>` — cancel a running or queued job
+The same cancel the TUI `[c]` issues (§3, §12), addressable by id from any terminal:
+- **Running** → a **cooperative** stop at the job's next checkpoint; it lands `cancelled` (terminal,
+  distinct from a `daemon stop`'s `interrupted`). For `merge`/review this discards the resumable
+  plan (a deliberate abort, §8 C / §8 B).
+- **Queued** (runnable *or* blocked) → **dropped** from the backlog immediately (`cancelled`, never
+  ran).
+- A **terminal** job (done/error/cancelled/interrupted) → no-op.
+
+(The bare `packrat cancel` with no id still exists as a convenience — it targets the one *running*
+job, since only one runs at a time. `jobs cancel <id>` is the general form that can also drop a
+specific queued job.)
+
+#### `packrat jobs prioritize <job#>` — jump a queued job to the front
+Bumps a **queued** job ahead of every other queued job, so it is the **next** to run when the worker
+frees. Mechanism: a durable `jobs.priority` (§4) the dequeue sorts by (`priority DESC, enqueued_at,
+id`) — so the bump **survives a daemon restart**, and re-prioritizing another job later moves it
+ahead in turn.
+- If the worker is free and the job is **runnable** (its owned root, if any, is not held), it starts
+  **immediately**.
+- If its owned root is **held** (a pending review / open merge, §3 guarantee 2), it stays pinned to
+  the **front but `blocked`** — and because dequeue is *runnable-first* (§3), a lower-priority
+  *runnable* job legitimately passes it and runs meanwhile. So prioritize **never deadlocks**: it
+  can only advance a job as far as its root allows, exactly like normal dequeue.
+- Only a **queued** job can be prioritized — a running job is already the one running; a terminal
+  job is history (both → no-op).
 
 ### `packrat daemon` — manage the background daemon
 The daemon normally **auto-spawns** on first client use (§3), so these are rarely needed — exposed

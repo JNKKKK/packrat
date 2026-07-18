@@ -32,9 +32,12 @@ from __future__ import annotations
 #: enqueued_at, result_json (plain ADD COLUMN) AND a new 'queued' status value. The
 #: status CHECK constraint can't be widened by ALTER, so v7 also needs a one-time
 #: jobs-table REBUILD (connection._migrate_jobs_v7) — the only non-additive migration.
-#: v3/v4/v5/v7 additions to EXISTING tables need the migration pass in init_db
+#: v8 adds jobs.priority (plain ADD COLUMN): `packrat jobs prioritize <id>` bumps a
+#: queued job to the front of the runnable-first dequeue (ORDER BY priority DESC,
+#: enqueued_at, id — §3/§11). Default 0 = normal FIFO.
+#: v3/v4/v5/v7/v8 additions to EXISTING tables need the migration pass in init_db
 #: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns / _migrate_jobs_v7.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -241,7 +244,10 @@ CREATE INDEX IF NOT EXISTS ix_merge_plan_items_run ON merge_plan_items(run_id);
 --   root_id: the single root this job concerns (NULL for scan --all / untrash /
 --     trash-refresh) — the TUI's per-root job list keys off it (§12).
 --   enqueued_at: when the row was created (queued); started_at: when the worker began
---     it (NULL while queued); FIFO order = enqueued_at (ties by id).
+--     it (NULL while queued); dequeue order = priority DESC, then enqueued_at (ties by id).
+--   priority: 0 = normal FIFO; a higher value jumps the job to the front of the
+--     runnable-first dequeue scan (`packrat jobs prioritize <id>`, §3/§11). Durable, so
+--     a prioritized job stays ahead across a daemon restart.
 --   result_json: a uniform, human-showable OUTCOME summary written at terminal time
 --     by EVERY job whatever its status — the single surface the TUI renders (§12).
 -- ---------------------------------------------------------------------------
@@ -257,6 +263,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at  TEXT,
     error        TEXT,
     result_json  TEXT,
+    priority     INTEGER NOT NULL DEFAULT 0,   -- v8: jobs prioritize (§3/§11); higher = dequeued first
     params_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status);

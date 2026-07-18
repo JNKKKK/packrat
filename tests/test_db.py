@@ -46,6 +46,41 @@ def test_all_tables_created(conn):
     assert db.schema_version(conn) == db.SCHEMA_VERSION
 
 
+def test_jobs_priority_defaults_to_zero(conn):
+    """v8: jobs.priority exists and defaults to 0 (normal FIFO)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    assert "priority" in cols
+    conn.execute("INSERT INTO jobs(type,status) VALUES('scan','queued')")
+    conn.commit()
+    assert conn.execute("SELECT priority FROM jobs").fetchone()["priority"] == 0
+
+
+def test_v8_migration_adds_priority_column(packrat_home, tmp_path):
+    """A pre-v8 DB (jobs without `priority`) gains the column via init_db's ADD-COLUMN pass."""
+    dbfile = tmp_path / "old.db"
+    c = sqlite3.connect(dbfile)
+    # Minimal v7-shaped jobs table (queued status present, but NO priority column).
+    c.execute(
+        "CREATE TABLE jobs (id INTEGER PRIMARY KEY, type TEXT NOT NULL, "
+        "root_id INTEGER, status TEXT NOT NULL CHECK (status IN "
+        "('queued','running','done','error','cancelled','interrupted')), "
+        "total INTEGER, done INTEGER NOT NULL DEFAULT 0, enqueued_at TEXT, "
+        "started_at TEXT, finished_at TEXT, error TEXT, result_json TEXT, params_json TEXT)"
+    )
+    c.execute("INSERT INTO jobs(type,status) VALUES('scan','queued')")
+    c.commit()
+    c.close()
+    # init_db migrates in place; priority appears, defaulting to 0 on the existing row.
+    migrated = db.init_db(dbfile)
+    try:
+        cols = {r["name"] for r in migrated.execute("PRAGMA table_info(jobs)")}
+        assert "priority" in cols
+        assert migrated.execute("SELECT priority FROM jobs").fetchone()["priority"] == 0
+        assert db.schema_version(migrated) == db.SCHEMA_VERSION
+    finally:
+        migrated.close()
+
+
 def test_asset_delete_cascades(conn):
     rid = _mk_root(conn)
     aid = _mk_asset(conn, "h1")

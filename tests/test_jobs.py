@@ -98,6 +98,48 @@ def test_cooperative_cancel(queue_and_db):
     assert _wait_terminal(database, jid) == "cancelled"
 
 
+# ---------------------------------------------------------------------------
+# prioritize (§3/§11) — bump a queued job to the front of the dequeue order
+# ---------------------------------------------------------------------------
+def test_prioritize_runs_next(queue_and_db):
+    """A prioritized queued job jumps ahead of earlier-enqueued jobs and runs next (§3)."""
+    q, database = queue_and_db
+    q.submit("sleeper", {"steps": 30, "delay_s": 0.05})       # running
+    a = q.submit("sleeper", {"steps": 2, "delay_s": 0.01})    # queued first
+    b = q.submit("sleeper", {"steps": 2, "delay_s": 0.01})    # queued second
+    # Bump b ahead of a while both are still queued behind the running job.
+    assert q.prioritize(b) is True
+    for jid in (a, b):
+        assert _wait_terminal(database, jid) == "done"
+    rows = {r["id"]: r["started_at"] for r in
+            database.query("SELECT id, started_at FROM jobs WHERE id IN (?,?)", (a, b))}
+    # b (prioritized) started before a (enqueued earlier) — priority beat FIFO.
+    assert rows[b] <= rows[a]
+
+
+def test_prioritize_is_durable(queue_and_db):
+    """prioritize sets a durable priority column (survives a restart / re-pump)."""
+    q, database = queue_and_db
+    q.submit("sleeper", {"steps": 30, "delay_s": 0.05})       # running
+    a = q.submit("sleeper", {"steps": 2})
+    b = q.submit("sleeper", {"steps": 2})
+    q.prioritize(b)
+    pa = database.query_one("SELECT priority FROM jobs WHERE id=?", (a,))["priority"]
+    pb = database.query_one("SELECT priority FROM jobs WHERE id=?", (b,))["priority"]
+    assert pb > pa == 0
+
+
+def test_prioritize_rejects_running_and_terminal(queue_and_db):
+    """Only a queued job can be prioritized — a running/terminal one returns False (§11)."""
+    q, database = queue_and_db
+    jid = q.submit("sleeper", {"steps": 4, "delay_s": 0.02})  # runs immediately
+    time.sleep(0.05)
+    assert q.prioritize(jid) is False                          # it's running
+    assert _wait_terminal(database, jid) == "done"
+    assert q.prioritize(jid) is False                          # now terminal
+    assert q.prioritize(999999) is False                       # unknown id
+
+
 def test_reconcile_orphaned_running(database):
     database.execute(
         "INSERT INTO jobs(type,status,total,done,started_at) VALUES('scan','running',100,42,?)",

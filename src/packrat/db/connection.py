@@ -188,6 +188,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "root_id", "INTEGER REFERENCES roots(id) ON DELETE SET NULL"),
     ("jobs", "enqueued_at", "TEXT"),
     ("jobs", "result_json", "TEXT"),
+    # v8: `jobs prioritize <id>` — higher priority is dequeued first (§3/§11).
+    ("jobs", "priority", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

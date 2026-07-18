@@ -101,10 +101,13 @@ def _annotate_queued_row(conn, row) -> dict:
 
 
 def _queued_with_reasons(conn, root_id: int | None = None) -> list[dict]:
-    """Backlog rows (oldest-first) + a per-job blocked reason (§3/§12).
+    """Backlog rows (dequeue order) + a per-job blocked reason (§3/§12).
 
-    With ``root_id`` set, only that root's queued jobs (``jobs.root_id`` = it) — the
-    per-root detail view (§12); without it, the whole backlog (global Queue panel).
+    Ordered ``priority DESC, enqueued_at, id`` — the SAME order the queue dequeues in
+    (§3), so the displayed backlog matches what will actually run next (a prioritized
+    job appears at the front). With ``root_id`` set, only that root's queued jobs
+    (``jobs.root_id`` = it) — the per-root detail view (§12); without it, the whole
+    backlog (global Queue panel).
     """
     sql = (
         "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
@@ -115,7 +118,7 @@ def _queued_with_reasons(conn, root_id: int | None = None) -> list[dict]:
     if root_id is not None:
         sql += " AND j.root_id=?"
         args = (root_id,)
-    sql += " ORDER BY j.enqueued_at, j.id"
+    sql += " ORDER BY j.priority DESC, j.enqueued_at, j.id"
     return [_annotate_queued_row(conn, row) for row in conn.execute(sql, args).fetchall()]
 
 
@@ -400,11 +403,13 @@ def recent_jobs(limit: int = 20) -> list[dict]:
 
 
 def queued_jobs() -> list[dict]:
-    """The durable FIFO backlog (§3/§12), oldest-first — the TUI Queue panel.
+    """The durable backlog in dequeue order (§3/§12) — the TUI Queue panel.
 
-    Each queued row is annotated with its display ``label``; the *blocked* reason
-    (owned root held) is computed by the daemon's live queue (:meth:`JobQueue.
-    blocked_reason`), not here, since it depends on in-memory holder state.
+    Ordered ``priority DESC, enqueued_at, id`` (matching the queue's dequeue, §3), so a
+    prioritized job shows at the front. Each queued row is annotated with its display
+    ``label``; the *blocked* reason (owned root held) is computed by the daemon's live
+    queue (:meth:`JobQueue.blocked_reason`), not here, since it depends on in-memory
+    holder state.
     """
     conn = _ro()
     try:
@@ -412,7 +417,7 @@ def queued_jobs() -> list[dict]:
             "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
             "  r.name AS root_name "
             "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
-            "WHERE j.status='queued' ORDER BY j.enqueued_at, j.id"
+            "WHERE j.status='queued' ORDER BY j.priority DESC, j.enqueued_at, j.id"
         ).fetchall()
         return [_job_dict(r) for r in rows]
     finally:

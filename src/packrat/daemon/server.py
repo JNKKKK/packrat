@@ -8,6 +8,7 @@ Endpoints (all under token auth except ``/health``):
 - ``GET  /jobs/{id}``         — one job's detail.
 - ``GET  /jobs/{id}/stream``  — SSE progress/state stream (§3).
 - ``POST /jobs/{id}/cancel``  — cooperative cancel (§3).
+- ``POST /jobs/{id}/prioritize`` — bump a queued job to the front (§11).
 - ``GET  /status``            — global rollup snapshot (§11).
 - ``GET  /roots``             — registered roots snapshot (§11).
 - ``POST /roots``             — register a root; optional ``--scan`` (§8 A1).
@@ -167,6 +168,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
     def cancel_job(job_id: int):
         ok = queue.cancel(job_id)
         return {"cancelled": ok}
+
+    @app.post("/jobs/{job_id}/prioritize", dependencies=[Depends(require_token)])
+    def prioritize_job(job_id: int):
+        """Bump a queued job to the front of the dequeue order (§11 ``jobs prioritize``)."""
+        ok = queue.prioritize(job_id)
+        return {"prioritized": ok}
 
     @app.get("/roots/{root_id}/jobs", dependencies=[Depends(require_token)])
     def root_jobs(root_id: int, limit: int = 50):

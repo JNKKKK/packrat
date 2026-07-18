@@ -11,6 +11,12 @@ Enforces both concurrency guarantees, but as a **durable queue**, not a reject:
    on the worker, never on a human. A job may own no root (``scan --all``,
    ``untrash``, ``trash-refresh``) → never blocked on this account.
 
+Dequeue order is ``priority DESC, enqueued_at, id`` — normal jobs are plain FIFO
+(``priority=0``); ``packrat jobs prioritize <id>`` (:meth:`prioritize`) bumps a queued
+job's ``priority`` so it sorts to the front and runs next when the worker frees (or
+stays at the front but blocked if its owned root is held). ``priority`` is a durable
+column, so a bump survives a daemon restart.
+
 The worker slot is **in-memory** (a live daemon has at most one running job, in
 this process). That is what makes startup reconciliation correct: any ``running``
 row found at boot is stale (§3) — see :mod:`packrat.jobs.reconcile`. The *backlog*,
@@ -114,18 +120,21 @@ class JobQueue:
     def _pump(self) -> None:
         """Start the first runnable queued job if the worker is free (§3).
 
-        Runnable-first, FIFO by ``enqueued_at``: scan the backlog oldest-first and
-        launch the first job whose owned root is free (or that owns no root); skip
-        (leave ``queued``) any whose owned root is held by a pending review / open
-        merge. Called on submit, after every job finishes, and on startup. A no-op
-        while a job is already running (the finishing job re-pumps).
+        Runnable-first, ``priority DESC`` then FIFO by ``enqueued_at``: scan the backlog
+        highest-priority-and-oldest-first and launch the first job whose owned root is
+        free (or that owns no root); skip (leave ``queued``) any whose owned root is held
+        by a pending review / open merge. A prioritized job (``jobs prioritize``, §11)
+        thus runs next when the worker frees — or, if *its* root is held, stays at the
+        front but blocked while a lower-priority runnable job legitimately passes it
+        (runnable-first, never a deadlock). Called on submit, after every job finishes,
+        and on startup. A no-op while a job is already running (the finishing job re-pumps).
         """
         with self._lock:
             if self._running_job_id is not None:
                 return
             queued = self._safe_query(
                 "SELECT id, type, params_json FROM jobs WHERE status='queued' "
-                "ORDER BY enqueued_at, id"
+                "ORDER BY priority DESC, enqueued_at, id"
             )
             for row in queued:
                 spec = get_job_spec(row["type"])
@@ -313,6 +322,31 @@ class JobQueue:
                 self._close_subscribers(job_id)
                 return True
         return False
+
+    def prioritize(self, job_id: int) -> bool:
+        """Bump a **queued** job to the front of the dequeue order (§11 ``jobs prioritize``).
+
+        Sets its ``priority`` to ``max(existing priorities) + 1`` so it sorts ahead of
+        every other queued job (dequeue is ``priority DESC, enqueued_at, id`` — §3). Then
+        pumps: if the worker is free and the job is runnable it starts **next/now**; if its
+        owned root is held it stays at the front but **blocked** (runnable-first means a
+        lower-priority runnable job can still pass it — no deadlock, §3). Only a ``queued``
+        job can be prioritized — a running job is already the one running; a terminal job
+        is history. Returns True if it was queued and bumped.
+        """
+        with self._lock:
+            row = self.db.query_one("SELECT status FROM jobs WHERE id=?", (job_id,))
+            if row is None or row["status"] != "queued":
+                return False
+            top = self.db.query_one(
+                "SELECT COALESCE(MAX(priority), 0) m FROM jobs WHERE status='queued'"
+            )["m"]
+            self.db.execute(
+                "UPDATE jobs SET priority=? WHERE id=?", (int(top) + 1, job_id)
+            )
+            self._broadcast(ProgressEvent(job_id, "log", message="prioritized"))
+        self._pump()
+        return True
 
     def cancel_all_queued(self) -> int:
         """Drop every ``queued`` job from the backlog (TUI ``[x]``, §12).

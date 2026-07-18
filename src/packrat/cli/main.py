@@ -47,6 +47,9 @@ app.add_typer(roots_app, name="roots")
 trash_app = typer.Typer(help="Trash memory: refresh the trash folders (§6.1).")
 app.add_typer(trash_app, name="trash")
 
+jobs_app = typer.Typer(help="Jobs: list, cancel, prioritize (§3, §11).", invoke_without_command=True)
+app.add_typer(jobs_app, name="jobs")
+
 # Dev-only commands are registered ONLY in a dev build (source checkout or
 # $PACKRAT_DEV) — a release/wheel install never sees the `dev` group at all.
 dev_app = typer.Typer(help="Dev-only helpers (hidden in release builds).")
@@ -362,9 +365,24 @@ def roots_register(
         typer.echo("  scan running in the daemon — `packrat jobs` to check.")
 
 
-@app.command("jobs")
-def jobs(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option(False, "--json")):
-    """List recent job runs (read-only)."""
+@jobs_app.callback(invoke_without_command=True)
+def _jobs_root(
+    ctx: typer.Context,
+    limit: int = typer.Option(20, "--limit"),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Bare ``packrat jobs`` lists recent runs (alias for ``packrat jobs list``, §11)."""
+    if ctx.invoked_subcommand is None:
+        _jobs_list(limit=limit, json_out=json_out)
+
+
+@jobs_app.command("list")
+def jobs_list(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option(False, "--json")):
+    """List recent job runs (read-only, §11)."""
+    _jobs_list(limit=limit, json_out=json_out)
+
+
+def _jobs_list(*, limit: int, json_out: bool) -> None:
     client = _client_or_spawn()
     js = client.list_jobs(limit)
     if json_out:
@@ -378,7 +396,7 @@ def jobs(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option
         # Queued jobs have no start yet — show enqueue time so the row isn't blank.
         stamp = (j.get("started_at") or j.get("enqueued_at") or "")[:19].replace("T", " ")
         label = j.get("label") or j["type"]
-        line = f"  {stamp}  {label:28s} {j['status']:11s} {j.get('done', 0)}/{j.get('total')}"
+        line = f"  [{j['id']}] {stamp}  {label:28s} {j['status']:11s} {j.get('done', 0)}/{j.get('total')}"
         result = j.get("result_json")
         if result:
             import json as _json
@@ -391,6 +409,39 @@ def jobs(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option
         if j.get("error"):
             line += f"  err: {j['error']}"
         typer.echo(line)
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(
+    job_id: int = typer.Argument(..., help="Job id to cancel (running → cooperative stop; queued → dropped)."),
+):
+    """Cancel a running or queued job by id (§3, §11).
+
+    A **running** job gets a cooperative stop at its next checkpoint (lands
+    ``cancelled``; for merge/review this discards the resumable plan). A **queued** job
+    is dropped from the backlog (never ran). A terminal job is a no-op.
+    """
+    client = _client_or_spawn()
+    ok = client.cancel_job(job_id)
+    typer.echo(f"job {job_id}: cancel requested." if ok
+               else f"job {job_id} is not running or queued (nothing to cancel).")
+
+
+@jobs_app.command("prioritize")
+def jobs_prioritize(
+    job_id: int = typer.Argument(..., help="Queued job id to move to the front of the queue."),
+):
+    """Move a queued job to the front of the queue (§3, §11).
+
+    Bumps the job ahead of every other queued job, so it runs **next** when the worker
+    frees. If its owned root is held (a pending review / open merge), it stays at the
+    front but **blocked** — a lower-priority *runnable* job can still pass it (dequeue is
+    runnable-first, so this never deadlocks). Only a queued job can be prioritized.
+    """
+    client = _client_or_spawn()
+    ok = client.prioritize_job(job_id)
+    typer.echo(f"job {job_id} moved to the front of the queue." if ok
+               else f"job {job_id} is not queued (only a queued job can be prioritized).")
 
 
 # ---------------------------------------------------------------------------

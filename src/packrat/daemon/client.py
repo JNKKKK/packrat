@@ -86,6 +86,10 @@ class DaemonClient:
     def cancel_job(self, job_id: int) -> bool:
         return bool(self._post(f"/jobs/{job_id}/cancel", {})["cancelled"])
 
+    def prioritize_job(self, job_id: int) -> bool:
+        """Bump a queued job to the front of the dequeue order (§11 ``jobs prioritize``)."""
+        return bool(self._post(f"/jobs/{job_id}/prioritize", {})["prioritized"])
+
     def cancel_queued(self) -> int:
         """Drop every queued job from the backlog (§12 ``[x]``); returns count dropped."""
         return int(self._post("/jobs/cancel-queued", {})["dropped"])
