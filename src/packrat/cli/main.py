@@ -240,7 +240,6 @@ def status(
         typer.echo(f"  assets: {d['photos'] + d['videos']} (photos {d['photos']} · videos {d['videos']})")
         typer.echo(f"  files: {d['instances']}")
         typer.echo(f"  last scan: {_short_ts(d.get('last_scan_at'))}")
-        typer.echo(f"  last full scan: {_short_ts(d['last_full_scan_at']) if d['last_full_scan_at'] else 'never'}")
         if d.get("pending_review"):
             pr = d["pending_review"]
             typer.echo(f"  ⚠ {pr['run_type']} pending since {pr['created_at']} — "
