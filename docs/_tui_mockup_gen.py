@@ -153,9 +153,26 @@ rlines = ["[S]ort: most recent registered  (→ most assets → photos → video
           "  iPhone     D:\\Backup\\iPhone     ◉ 98,412  deduped today",
           "",
           "◉ scanned + deduped   ◐ scanned only   ○ never scanned"]
-block("## 2. Roots interface (maximized — second `[r]`)",
+block("## 2. Roots interface (maximized — second `[r]`)\n\n### 2.1 — Root list",
       screen("Roots", rlines, "daemon ● up",
              footer="↑/↓ select   [Enter]/→ open detail   [s] sort   [a] add root   Esc back"))
+
+# 2.2 add-root form (register). ▸ marks the focused field; [Tab] moves between fields.
+alines = ["Register a new root (metadata-only; scan it after — §8 A1).",
+          "─" * (CW - 4),
+          "  Path   ▸ \\\\tubie_nas\\Res-v2\\NewPhone____________________________",
+          "           (must exist, be a readable directory, not overlap a root)",
+          "",
+          "  Name     [ NewPhone ]   ‹defaults to the folder leaf; must be unique›",
+          "",
+          "  Kind     (•) library    ( ) trash",
+          "",
+          "  [x] scan immediately after registering   ( ) --full   ( ) --embed",
+          "",
+          "  ‹trash roots are never scanned; --full/--embed apply only with scan›"]
+block("### 2.2 — Add a root (`[a]` — the `roots register` flow)",
+      screen("Roots · add", alines, "daemon ● up",
+             footer="[Tab] next field   type to edit   [Enter] register   Esc cancel"))
 
 # ============================ 3. ROOT DETAIL ============================
 d1 = ["assets  98,412  (photos 92,110 · videos 6,302)     files 98,540",

@@ -45,7 +45,6 @@ action maps to an existing CLI verb (design tenet §1.6).
 
 ---
 
-
 ### 1.1 — Idle (nothing running, no box focused)
 ```
 ┌─ packrat ───────────────────────────────────────────────────────────────── v0.1.0 · daemon ● up ─┐
@@ -159,6 +158,8 @@ action maps to an existing CLI verb (design tenet §1.6).
 ```
 
 ## 2. Roots interface (maximized — second `[r]`)
+
+### 2.1 — Root list
 ```
 ┌─ Roots ──────────────────────────────────────────────────────────────────────────── daemon ● up ─┐
 │ [S]ort: most recent registered  (→ most assets → photos → videos)                                │
@@ -183,6 +184,34 @@ action maps to an existing CLI verb (design tenet §1.6).
 │                                                                                                  │
 │                                                                                                  │
 │ ↑/↓ select   [Enter]/→ open detail   [s] sort   [a] add root   Esc back                          │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 — Add a root (`[a]` — the `roots register` flow)
+```
+┌─ Roots · add ────────────────────────────────────────────────────────────────────── daemon ● up ─┐
+│ Register a new root (metadata-only; scan it after — §8 A1).                                      │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────   │
+│   Path   ▸ \\tubie_nas\Res-v2\NewPhone____________________________                               │
+│            (must exist, be a readable directory, not overlap a root)                             │
+│                                                                                                  │
+│   Name     [ NewPhone ]   ‹defaults to the folder leaf; must be unique›                          │
+│                                                                                                  │
+│   Kind     (•) library    ( ) trash                                                              │
+│                                                                                                  │
+│   [x] scan immediately after registering   ( ) --full   ( ) --embed                              │
+│                                                                                                  │
+│   ‹trash roots are never scanned; --full/--embed apply only with scan›                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│ [Tab] next field   type to edit   [Enter] register   Esc cancel                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -424,8 +453,11 @@ action maps to an existing CLI verb (design tenet §1.6).
   in dequeue order, each with its `blocked` reason. `(dry-run)` rows dimmed. `[c]`→`cancel_job`,
   `[p]`→`prioritize_job`, `[x]`→`cancel_queued` (only shown when Queue is focused, so they don't
   clash with Roots-focus keys).
-- **§2 Roots interface** — `roots_snapshot()` + `last_dedup_at`; `[a]`→register flow
-  (unregister/rename deferred, §14 #9, shown disabled). **`[s]` cycles the sort order**, in this
+- **§2 Roots interface** — `roots_snapshot()` + `last_dedup_at`. **`[a]` → the add-root form (2.2)**,
+  which submits `register_root(path, name=, kind=, scan=, full=, embed=)` (the `roots register` flow):
+  validate inline on `[Enter]` (path exists / readable dir / no overlap / unique name — the same
+  `RootError`s the daemon returns, surfaced in the form), then optionally kick off a scan.
+  Unregister/rename stay deferred (§14 #9, shown disabled elsewhere). **`[s]` cycles the sort order**, in this
   fixed cycle (wraps back to the first): **most-recently-registered** (default; `id DESC`) →
   **most assets** (`asset_count DESC`) → **most photos** → **most videos** → (back to registered). The
   header line shows the *current* mode (`[S]ort: most recent registered`, `[S]ort: most assets`, …).
