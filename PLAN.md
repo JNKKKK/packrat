@@ -2078,7 +2078,7 @@ Mapping this onto packrat's operations:
 
 ---
 
-## 11. CLI surface (the core commands)
+## 11. CLI surface (complete command reference)
 
 Adding a folder is two commands (`roots register` then `scan`); `dedup` de-duplicates one folder via
 Explorer shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot);
