@@ -2461,11 +2461,44 @@ for lifecycle control and troubleshooting.
 packrat daemon start        # explicitly spawn the detached daemon (no-op if already up)
 packrat daemon stop         # graceful shutdown: signals the running job to checkpoint, then exits.
                             #   Leaves an in-flight job `interrupted` (resumable), NOT `cancelled` (§3).
+packrat daemon restart      # stop (if up) then start a fresh daemon — picks up new code after an upgrade
 packrat daemon status       # is it running? pid, uptime, bound port, in-flight job — read-only
 ```
 
 `stop` is a **resumable interruption, not a cancel** (§3): re-running the interrupted command
-resumes it. To truly abort work, cancel the job (TUI `[c]` / another terminal), which is distinct.
+resumes it. To truly abort work, cancel the job (`packrat jobs cancel` / TUI `[c]`), which is distinct.
+`restart` is mainly for picking up a new packrat build (config reloads per job, §9.2, but *code*
+changes only on restart); it stops any in-flight job as an `interrupted` (resumable), then spawns
+fresh. **Self-healing:** `stop`/`restart`/`status` recover an *orphaned* daemon whose token no longer
+matches (e.g. one left by a since-deleted `%APPDATA%` during testing) — the daemon binds a fixed
+single-instance port (§3), so if the API answers but rejects our token, they force-stop it by that
+port instead of failing on the 401.
+
+### `packrat smoke-test` — the §9.1 decode setup check (diagnostic, not core workflow)
+A one-time setup diagnostic, not a collection command: it runs the §9.1
+decode→hash→perceptual→embed path over one sample of every allowlisted extension to confirm the
+decode wheels work on *this* Windows/Python (the ⚠ POC cells — AVIF, RAW/cr3, the `pdqhash` wheel).
+Runs **in-process** — it needs no daemon and touches no catalog.
+
+```
+packrat smoke-test [<samples>] [--generate] [--json]
+```
+- **No argument** → report which decode deps are importable (a quick availability check).
+- **`<samples>`** → a folder holding one real file per extension; runs the full path over each.
+- **`--generate` / `-g`** → synthesize the samples first (into `<samples>` or a temp dir) — except
+  RAW, which can't be synthesized (supply real camera files for the RAW group).
+
+Exit code is non-zero if any format fails, so it doubles as a CI/setup gate. (See §9.1 for what each
+⚠ cell verifies; the M0 milestone, §13, expects this run before building on the decode stack.)
+
+### `packrat` (no arguments) — the TUI
+Opens the Textual TUI — the default face of the tool (§12). Every action it offers is also one of
+the CLI commands above (design tenet §1.6); the TUI is a live window onto the same daemon jobs.
+
+### Dev-only commands
+A `packrat dev …` group (currently `dev clear-db`, which empties the catalog) is registered **only in
+a dev build** (a source checkout or `$PACKRAT_DEV`); a release/wheel install never exposes it, so it
+is not part of the user-facing surface documented here.
 
 ---
 
