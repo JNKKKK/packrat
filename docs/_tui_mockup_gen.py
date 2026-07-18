@@ -144,7 +144,7 @@ block("### 1.4 — Queue box focused (one `[q]`): heavy frame, arrow-navigable i
              footer="↑/↓ select  [Enter] detail  [c] cancel  [p] prioritize  [x] all  Esc"))
 
 # ============================ 2. ROOTS INTERFACE ============================
-rlines = ["most-recently-registered first",
+rlines = ["[S]ort: most recent registered  (→ most assets → photos → videos)",
           "─" * (CW - 4),
           "▸ Downloads  D:\\dump              ◐    241  never deduped",
           "  _Trash     D:\\Backup\\_Trash     (trash)  —",
@@ -155,7 +155,7 @@ rlines = ["most-recently-registered first",
           "◉ scanned + deduped   ◐ scanned only   ○ never scanned"]
 block("## 2. Roots interface (maximized — second `[r]`)",
       screen("Roots", rlines, "daemon ● up",
-             footer="↑/↓ select   [Enter]/→ open detail   [a] add root   Esc back"))
+             footer="↑/↓ select   [Enter]/→ open detail   [s] sort   [a] add root   Esc back"))
 
 # ============================ 3. ROOT DETAIL ============================
 d1 = ["assets  98,412  (photos 92,110 · videos 6,302)     files 98,540",

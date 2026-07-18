@@ -46,7 +46,6 @@ action maps to an existing CLI verb (design tenet §1.6).
 ---
 
 
-
 ### 1.1 — Idle (nothing running, no box focused)
 ```
 ┌─ packrat ───────────────────────────────────────────────────────────────── v0.1.0 · daemon ● up ─┐
@@ -162,7 +161,7 @@ action maps to an existing CLI verb (design tenet §1.6).
 ## 2. Roots interface (maximized — second `[r]`)
 ```
 ┌─ Roots ──────────────────────────────────────────────────────────────────────────── daemon ● up ─┐
-│ most-recently-registered first                                                                   │
+│ [S]ort: most recent registered  (→ most assets → photos → videos)                                │
 │ ──────────────────────────────────────────────────────────────────────────────────────────────   │
 │ ▸ Downloads  D:\dump              ◐    241  never deduped                                        │
 │   _Trash     D:\Backup\_Trash     (trash)  —                                                     │
@@ -183,7 +182,7 @@ action maps to an existing CLI verb (design tenet §1.6).
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│ ↑/↓ select   [Enter]/→ open detail   [a] add root   Esc back                                     │
+│ ↑/↓ select   [Enter]/→ open detail   [s] sort   [a] add root   Esc back                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -425,8 +424,15 @@ action maps to an existing CLI verb (design tenet §1.6).
   in dequeue order, each with its `blocked` reason. `(dry-run)` rows dimmed. `[c]`→`cancel_job`,
   `[p]`→`prioritize_job`, `[x]`→`cancel_queued` (only shown when Queue is focused, so they don't
   clash with Roots-focus keys).
-- **§2 Roots interface** — `roots_snapshot()` id-desc + `last_dedup_at`; `[a]`→register flow
-  (unregister/rename deferred, §14 #9, shown disabled).
+- **§2 Roots interface** — `roots_snapshot()` + `last_dedup_at`; `[a]`→register flow
+  (unregister/rename deferred, §14 #9, shown disabled). **`[s]` cycles the sort order**, in this
+  fixed cycle (wraps back to the first): **most-recently-registered** (default; `id DESC`) →
+  **most assets** (`asset_count DESC`) → **most photos** → **most videos** → (back to registered). The
+  header line shows the *current* mode (`[S]ort: most recent registered`, `[S]ort: most assets`, …).
+  Photo/video sort keys need per-root photo/video counts (`root_detail` computes them per root, but
+  `roots_snapshot` currently returns only a combined `asset_count`) — see Open Question #1, which now
+  also covers adding `photos`/`videos` to `roots_snapshot`. All sorting is display-side over the
+  snapshot; no new endpoint.
 - **§3 Root detail** — `root_detail(root)`: counts, `last_scan_at`/`last_full_scan_at`/
   **`last_dedup_at`**/`last_cleanup_at`, `pending_review` (+counts), `last_scan` banner,
   `root_jobs(root_id)` history. `[s]`/`[d]`/`[m]` submit scan/dedup/merge-into; `[o]`/`[g]`/`[k]`
@@ -449,11 +455,13 @@ action maps to an existing CLI verb (design tenet §1.6).
 
 ## Open questions for review
 
-1. **`roots_snapshot()` needs `last_dedup_at` + most-recent-first order** for the dot and the Roots
-   list. `last_dedup_at` is a per-root `_last_completed_at(...,'dedup')` (already used in
-   `root_detail`) — add it to `roots_snapshot`'s SELECT, and sort `id DESC`. Small; but
-   `roots_snapshot` also backs `packrat status`/`roots list` (fine either way — confirm we want the
-   CLI list re-ordered too, or keep the DESC order TUI-side only).
+1. **`roots_snapshot()` needs three additions** for the Roots interface: (a) `last_dedup_at` per root
+   (for the ◉/◐/○ dot — a `_last_completed_at(...,'dedup')`, already used in `root_detail`); (b)
+   per-root `photos`/`videos` counts (for the `[s]` sort cycle — `root_detail` computes these but
+   `roots_snapshot` returns only a combined `asset_count`); (c) most-recently-registered order
+   (`id DESC`) as the default. All small SELECT additions. Note `roots_snapshot` also backs
+   `packrat status`/`roots list` — confirm whether the CLI list should adopt `id DESC` too, or keep
+   the DESC order + sorting TUI-side only (leaning: sort TUI-side; leave the CLI's ascending order).
 2. **Where do collection-level ops launch now that the menu is gone?** Per-root `scan`/`dedup`/
    `merge --into <root>` live on §3. But `merge` (arbitrary source), `trash refresh`, `untrash`
    aren't root-scoped. Options: (a) a few global keys on the dashboard; (b) CLI-only for v1;
