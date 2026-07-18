@@ -140,6 +140,26 @@ def test_prioritize_rejects_running_and_terminal(queue_and_db):
     assert q.prioritize(999999) is False                       # unknown id
 
 
+def test_prioritize_multiple_is_lifo(queue_and_db):
+    """Prioritizing several jobs runs them last-prioritized-first (each `max+1` leapfrogs).
+
+    Bump a, then b, then c → dequeue order is c, b, a (the most recent 'do this next'
+    wins), and un-prioritized jobs stay behind them in FIFO. Locks in the documented
+    multi-prioritize semantics against regression.
+    """
+    q, database = queue_and_db
+    q.submit("sleeper", {"steps": 30, "delay_s": 0.05})       # running, occupies the worker
+    a = q.submit("sleeper", {"steps": 2})
+    b = q.submit("sleeper", {"steps": 2})
+    c = q.submit("sleeper", {"steps": 2})
+    d = q.submit("sleeper", {"steps": 2})                     # left un-prioritized
+    for jid in (a, b, c):
+        assert q.prioritize(jid) is True
+    order = [r["id"] for r in database.query(
+        "SELECT id FROM jobs WHERE status='queued' ORDER BY priority DESC, enqueued_at, id")]
+    assert order == [c, b, a, d]                              # LIFO among bumped, then FIFO
+
+
 def test_reconcile_orphaned_running(database):
     database.execute(
         "INSERT INTO jobs(type,status,total,done,started_at) VALUES('scan','running',100,42,?)",
