@@ -243,6 +243,12 @@ def status(
         typer.echo(f"  assets: {d['photos'] + d['videos']} (photos {d['photos']} · videos {d['videos']})")
         typer.echo(f"  files: {d['instances']}")
         typer.echo(f"  last scan: {_short_ts(d.get('last_scan_at'))}")
+        # Last SUCCESSFUL dedup (all stages, or already-clean) — §11 "deduped <age>".
+        dd = d.get("last_dedup_at")
+        typer.echo(f"  last dedup: {_short_ts(dd)}" if dd else "  last dedup: never")
+        cc = d.get("last_cleanup_at")
+        if cc:
+            typer.echo(f"  last cleanup: {_short_ts(cc)}")
         if d.get("pending_review"):
             pr = d["pending_review"]
             typer.echo(f"  ⚠ {pr['run_type']} pending since {pr['created_at']} — "

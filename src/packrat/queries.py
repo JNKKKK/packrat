@@ -212,6 +212,13 @@ def root_detail(root_arg: str) -> dict | None:
             pending_dict["counts"] = _review_counts(
                 conn, pending["id"], pending["run_type"], pending["stage"]
             )
+        # Recency of the last SUCCESSFUL review per type (§11 "deduped/cleaned <age>"):
+        # the newest `completed` run's confirmed_at. A dedup run is `completed` only after
+        # it went through ALL stages (or was already clean — both land status='completed'
+        # via _finalize_completed / the already-clean path). A `cancelled` run does NOT
+        # count. NULL → never (successfully) deduped/cleaned.
+        last_dedup_at = _last_completed_at(conn, rid, "dedup")
+        last_cleanup_at = _last_completed_at(conn, rid, "cleanup-perceptual")
         # The root's live queue view (§12 root detail): the job running ON this root
         # (if any), plus this root's queued backlog with blocked reasons. Both key off
         # jobs.root_id, so a `scan --all` (root_id NULL) isn't attributed to any root.
@@ -263,6 +270,8 @@ def root_detail(root_arg: str) -> dict | None:
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
             "pending_review": pending_dict,
+            "last_dedup_at": last_dedup_at,       # newest completed dedup (§11 "deduped <age>")
+            "last_cleanup_at": last_cleanup_at,   # newest completed perceptual-cleanup
             "running_job": running_dict,
             "queued_jobs": queued_here,
             "last_scan": dict(last_scan) if last_scan is not None else None,
@@ -324,6 +333,23 @@ def cleanup_exact_preview(root_arg: str, mode: str = "exact") -> dict | None:
                 "count": len(rows), "network": network}
     finally:
         conn.close()
+
+
+def _last_completed_at(conn, root_id: int, run_type: str) -> str | None:
+    """`confirmed_at` of the newest `completed` review run of ``run_type`` for a root (§11).
+
+    "Completed" is the success marker: a dedup run reaches it only after going through
+    all stages (or being already clean); a perceptual-cleanup after its confirm. A
+    ``cancelled`` run is excluded. Returns None if the root was never successfully
+    deduped/cleaned. Used for the "deduped/cleaned <age>" recency stat.
+    """
+    row = conn.execute(
+        "SELECT confirmed_at FROM review_runs "
+        "WHERE root_id=? AND run_type=? AND status='completed' "
+        "ORDER BY confirmed_at DESC, id DESC LIMIT 1",
+        (root_id, run_type),
+    ).fetchone()
+    return row["confirmed_at"] if row is not None else None
 
 
 def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:

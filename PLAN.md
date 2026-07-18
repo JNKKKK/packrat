@@ -2391,9 +2391,16 @@ history and live in the §8.1 audit trail, **not** here. Per root:
   - **dedup:** `N to delete (exact)` · `G groups / M members (near-dup, default-keep)` —
     optionally `(K low-confidence)` from the §5.3 photo-quality flag.
   - **cleanup --trash-perceptual:** `X exact-trash (will delete)` · `P perceptual candidates (staged)`.
-- **No pending run** → a compact **recency** stat only: `deduped <age>` / `cleaned <age>` (from the
-  most recent completed run's `confirmed_at`), or `never deduped`. Mirrors the "last scan"
-  freshness; no run history is listed.
+- **No pending run** → a compact **recency** stat only: `deduped <age>` / `cleaned <age>`, or
+  `never deduped`. Mirrors the "last scan" freshness; no run history is listed. **"Deduped" means the
+  last *successful* dedup** — the `confirmed_at` of the newest `review_runs` row with
+  `run_type='dedup'` **and `status='completed'`**. A run is `completed` only when it went through
+  **all** stages (confirmed stage-by-stage to the end) *or* was **already clean** (no stage had any
+  candidate — recorded as an immediate `completed` run so a clean folder still stamps its dedup
+  time). A `cancelled` run does **not** count (the folder wasn't fully reviewed), and a still-`pending`
+  run isn't "done" yet — it shows as the `⚠ pending` line above instead. `cleaned <age>` is the same,
+  for `run_type='cleanup-perceptual'`. (Surfaced by `queries.root_detail` as `last_dedup_at` /
+  `last_cleanup_at`; NULL → never.)
 
 **With a root path/handle (`packrat status <root>`):** that root's detail — its pending run's full
 plan breakdown (+ the review-folder path and confirm/cancel commands), and the most-recent completed

@@ -152,9 +152,14 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
         if run["status"] == "pending":
             result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
                                  f"{len(groups)} grp/{members} mbr")
+        elif run["status"] == "completed" and action == "analyze":
+            # An analyze that completed immediately = already clean (no stages to review).
+            result["summary"] = f"{action}: already clean (nothing to review)"
         else:
             result["summary"] = f"{action}: run {run['status']}"
     else:
+        # Defensive: no run row at all (shouldn't happen now the already-clean path
+        # records a completed run, but keep a safe fallback).
         result["summary"] = f"{action}: nothing to review (already clean)"
     ctx.set_result(result)
 
@@ -184,6 +189,17 @@ def _analyze(ctx: JobContext) -> None:
     stage1 = _plan_stage(ctx, root_id, root_path, STAGE_EXACT)
     probe = _first_nonempty_stage(ctx, root_id, root_path, start=STAGE_EXACT, precomputed={STAGE_EXACT: stage1})
     if probe is None:
+        # "Already clean" — nothing to review, so the folder IS deduped as of now.
+        # Record a completed dedup run (no pending row, no staging, no review_actions)
+        # so the last-successful-dedup timestamp (§11 "deduped <age>") is set. A run that
+        # went through zero non-empty stages is as "fully reviewed" as one confirmed
+        # through all of them — both leave the folder with no actionable duplicates.
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, "
+                "created_at, confirmed_at) VALUES (?, 'dedup', 'completed', 1, 'applied', ?, ?)",
+                (root_id, now_iso(), now_iso()),
+            )
         ctx.log("already clean: no exact duplicates or near-dup groups to review.")
         return
 

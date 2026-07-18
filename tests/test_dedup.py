@@ -167,6 +167,52 @@ def test_dedup_already_clean_autocompletes(queue_and_db, tmp_path):
     assert _run_row(database, root["id"]) is None  # no dangling pending run
 
 
+def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
+    """An already-clean dedup counts as successful → sets last_dedup_at (§11)."""
+    from packrat import queries
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _distinct(lib / "a.png", 1)
+    _distinct(lib / "b.png", 2)
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+
+    assert queries.root_detail(str(lib))["last_dedup_at"] is None  # never deduped yet
+    _run(q, database, "dedup", root_id=root["id"])                 # already clean → completed
+    # A completed dedup run with confirmed_at exists, and status <root> surfaces it.
+    row = database.query_one(
+        "SELECT status, confirmed_at FROM review_runs WHERE root_id=? AND run_type='dedup'",
+        (root["id"],),
+    )
+    assert row["status"] == "completed" and row["confirmed_at"] is not None
+    assert queries.root_detail(str(lib))["last_dedup_at"] == row["confirmed_at"]
+
+
+def test_dedup_cancel_does_not_count_as_deduped(queue_and_db, tmp_path):
+    """A cancelled dedup run must NOT set last_dedup_at (only completed counts, §11)."""
+    from packrat import queries
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    # Two byte-identical files → a real stage-1 exact dup, so analyze opens a pending run.
+    _distinct(lib / "a.png", 1)
+    import shutil
+    shutil.copy(lib / "a.png", lib / "a_copy.png")
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])          # analyze → pending
+    assert _run_row(database, root["id"]) is not None
+    _run(q, database, "dedup", root_id=root["id"], cancel=True)  # discard
+    assert database.query_one(
+        "SELECT status FROM review_runs WHERE root_id=? ORDER BY id DESC LIMIT 1", (root["id"],)
+    )["status"] == "cancelled"
+    # Cancelled ≠ successful → still "never deduped".
+    assert queries.root_detail(str(lib))["last_dedup_at"] is None
+
+
 # ---------------------------------------------------------------------------
 # the 3-stage sequence (Windows: real .lnk)
 # ---------------------------------------------------------------------------
@@ -210,9 +256,13 @@ def test_dedup_stage1_exact_then_advances_to_stage2(queue_and_db, tmp_path):
     _run(q, database, "dedup", root_id=root["id"], confirm=True)
     assert _run_row(database, root["id"]) is None  # run completed
     run_final = database.query_one(
-        "SELECT status FROM review_runs WHERE root_id=? ORDER BY id DESC LIMIT 1", (root["id"],)
+        "SELECT status, confirmed_at FROM review_runs WHERE root_id=? ORDER BY id DESC LIMIT 1",
+        (root["id"],),
     )
     assert run_final["status"] == "completed"
+    # Went through all stages → recorded as the last successful dedup (§11).
+    from packrat import queries
+    assert queries.root_detail(str(lib))["last_dedup_at"] == run_final["confirmed_at"]
     # The victim's file is gone and its asset is trashed (perceptual discard).
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == 1
     tr = database.query_one("SELECT status, trash_reason FROM assets WHERE id=?", (victim["asset_id"],))
