@@ -2715,11 +2715,11 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
   renders inside the **same fixed terminal region** — one screenful the app owns for its whole
   lifetime. Navigating between interfaces **swaps content in place; it never grows, shrinks, or
   reflows the outer frame**, so nothing below the app jumps and the layout is stable to read. The
-  target region is a fixed **80×24** (the safe-minimum terminal — **decided**, not merely a floor); on
-  a larger terminal the app still presents that same fixed canvas rather than sprawling (extra space is
-  left as margin — a responsive/reflowing layout is explicitly *not* a v1 goal). Each interface is
-  designed to fit 80×24 without scrolling the frame itself; long lists (roots, jobs) scroll **within**
-  their panel, not by resizing it.
+  target region is a fixed **100×24** (**decided**); on a larger terminal the app still presents that
+  same fixed canvas rather than sprawling (extra space is left as margin — a responsive/reflowing
+  layout is explicitly *not* a v1 goal), and 100 wide comfortably fits long NAS paths + a status
+  column. Each interface is designed to fit 100×24 without scrolling the frame itself; long lists
+  (roots, jobs) scroll **within** their panel, not by resizing it.
   - **Long values fit the width; they never widen the window.** A path or label too long for its
     column is handled by **truncation with an ellipsis in compact list rows** (e.g. a root row on the
     dashboard/Roots list — middle-elide so the drive and leaf stay visible, `\\nas\…\清池`), and by
@@ -2727,7 +2727,7 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
     where vertical space is cheaper than horizontal. The full untruncated path is always available in
     the root **detail** interface (§3). So a long NAS UNC path is a display concern, never a reason to
     grow the frame.
-  **The `docs/M6-tui-mockups.md` mockups are generated into an identical 80×24 frame to mechanically
+  **The `docs/M6-tui-mockups.md` mockups are generated into an identical 100×24 frame to mechanically
   enforce this** — if a future interface can't fit, that's a design signal to trim/elide/wrap it, not
   to enlarge the window. (Textual: a fixed-size root container / screen, not auto-sizing widgets.)
 - **Read-safe & CLI-complete (design tenet §1.6).** Everything the TUI does maps to an existing CLI

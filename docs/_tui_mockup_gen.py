@@ -19,7 +19,7 @@ import sys
 
 out = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-W, H = 80, 24            # OUTER window — fixed for EVERY interface
+W, H = 100, 24           # OUTER window — fixed for EVERY interface
 CW = W - 2               # content columns inside the outer border
 
 
@@ -47,14 +47,25 @@ def hjoin(a, b, gap=1):
     return [a[i] + " " * gap + b[i] for i in range(hgt)]
 
 
-def screen(title, content, right=""):
+def screen(title, content, right="", footer=""):
+    r"""Wrap `content` in the fixed W×H frame.
+
+    A `footer` (the key-shortcut hint bar) is pinned to the **last** body row — right
+    above the bottom border, never with blank space below it. Blank filler goes *above*
+    the footer so the content sits at the top and the hints sit at the bottom.
+    """
     lt = f"─ {title} "
     rt = f" {right} ─" if right else "─"
     top = "┌" + pad(lt + "─" * max(0, (CW - len(lt) - len(rt))) + rt, CW) + "┐"
-    body = ["│ " + pad(ln, CW - 2) + " │" for ln in content]
-    while len(body) < H - 2:
-        body.append("│ " + " " * (CW - 2) + " │")
-    body = body[:H - 2]
+    rows = H - 2  # available body rows
+    inner = list(content)
+    if footer:
+        inner = inner[:rows - 1]                 # leave the last row for the footer
+        inner += [""] * (rows - 1 - len(inner))  # fill the gap ABOVE the footer
+        inner.append(footer)                     # pinned to the bottom row
+    else:
+        inner = (inner + [""] * rows)[:rows]
+    body = ["│ " + pad(ln, CW - 2) + " │" for ln in inner]
     return "\n".join([top] + body + ["└" + "─" * CW + "┘"])
 
 
@@ -75,21 +86,31 @@ def collbox(lastscan="2h ago"):
                               f"Last scan {lastscan}"], 29)
 
 
-def rootrows():  # most-recently-registered first
-    return ["  Downloads D:\\dump           ◐    241",
-            "  _Trash    D:\\Backup\\_Trash    (trash)",
-            "  Photos    E:\\Photos2         ◐  8,900",
-            "  Camera    E:\\Photos          ◉ 26,150",
-            "  iPhone    D:\\Backup\\iPhone    ◉ 98,412"]
+# dashboard row = Collection(29) + gap(1) + Roots, and must equal the inner content
+# width screen() pads to (CW-2), or the hjoin overflows and the right border is clipped.
+ROOTS_W = (CW - 2) - 29 - 1
+
+
+def rootrows(cursor=None):  # most-recently-registered first
+    names = [("Downloads", "D:\\dump", "◐", "241"),
+             ("_Trash", "D:\\Backup\\_Trash", " ", "(trash)"),
+             ("Photos", "E:\\Photos2", "◐", "8,900"),
+             ("Camera", "E:\\Photos", "◉", "26,150"),
+             ("iPhone", "D:\\Backup\\iPhone", "◉", "98,412")]
+    rows = []
+    for i, (nm, pth, dot, cnt) in enumerate(names):
+        cur = "▸" if cursor == i else " "
+        rows.append(f"{cur} {nm:<9} {pth:<20} {dot} {cnt:>7}")
+    return rows
 
 
 # ============================ 1. DASHBOARD ============================
 # 1.1 idle
-roots = box("[R]oots", rootrows() + [DOTKEY], 45)
+roots = box("[R]oots", rootrows() + [DOTKEY], ROOTS_W)
 qbox = box("[Q]ueue", ["  idle — no jobs running or queued."], CW - 2)
-c = LOGO + hjoin(collbox(), roots) + [""] + qbox + ["", FOOT_DASH]
+c = LOGO + hjoin(collbox(), roots) + [""] + qbox
 block("### 1.1 — Idle (nothing running, no box focused)",
-      screen("packrat", c, "v0.1.0 · daemon ● up"))
+      screen("packrat", c, "v0.1.0 · daemon ● up", footer=FOOT_DASH))
 
 # 1.2 running
 qrun = box("[Q]ueue", [
@@ -99,21 +120,16 @@ qrun = box("[Q]ueue", [
     "4 dedup Photos (confirm)     blocked: Photos pending dedup",
     "5 ‹merge dump → Camera (dry-run)›  queued · waiting",
 ], CW - 2)
-c = LOGO + hjoin(collbox("now"), roots) + [""] + qrun + ["", FOOT_DASH]
+c = LOGO + hjoin(collbox("now"), roots) + [""] + qrun
 block("### 1.2 — Work in flight (running job + durable backlog; no box focused)",
-      screen("packrat", c, "v0.1.0 · daemon ● up"))
+      screen("packrat", c, "v0.1.0 · daemon ● up", footer=FOOT_DASH))
 
 # 1.3 roots focused (heavy frame, cursor, arrow-navigable in place)
-rootf = box("[R]OOTS", ["▸ Downloads D:\\dump           ◐    241",
-                        "  _Trash    D:\\Backup\\_Trash    (trash)",
-                        "  Photos    E:\\Photos2         ◐  8,900",
-                        "  Camera    E:\\Photos          ◉ 26,150",
-                        "  iPhone    D:\\Backup\\iPhone    ◉ 98,412",
-                        DOTKEY], 45, heavy=True)
-c = LOGO + hjoin(collbox(), rootf) + [""] + qbox + \
-    ["", "↑/↓ select root   [Enter]/→ open detail   [r] maximize   Esc unfocus"]
+rootf = box("[R]OOTS", rootrows(cursor=0) + [DOTKEY], ROOTS_W, heavy=True)
+c = LOGO + hjoin(collbox(), rootf) + [""] + qbox
 block("### 1.3 — Roots box focused (one `[r]`): heavy frame, arrow-navigable in place",
-      screen("packrat", c, "v0.1.0 · daemon ● up"))
+      screen("packrat", c, "v0.1.0 · daemon ● up",
+             footer="↑/↓ select root   [Enter]/→ open detail   [r] maximize   Esc unfocus"))
 
 # 1.4 queue focused
 qf = box("[Q]UEUE", [
@@ -122,10 +138,10 @@ qf = box("[Q]UEUE", [
     "3 scan Photos                blocked: Photos pending dedup",
     "4 dedup Photos (confirm)     blocked: Photos pending dedup",
 ], CW - 2, heavy=True)
-c = LOGO + hjoin(collbox("now"), roots) + [""] + qf + \
-    ["", "↑/↓ select  [Enter] detail  [c] cancel  [p] prioritize  [x] all  Esc"]
+c = LOGO + hjoin(collbox("now"), roots) + [""] + qf
 block("### 1.4 — Queue box focused (one `[q]`): heavy frame, arrow-navigable in place",
-      screen("packrat", c, "v0.1.0 · daemon ● up"))
+      screen("packrat", c, "v0.1.0 · daemon ● up",
+             footer="↑/↓ select  [Enter] detail  [c] cancel  [p] prioritize  [x] all  Esc"))
 
 # ============================ 2. ROOTS INTERFACE ============================
 rlines = ["most-recently-registered first",
@@ -136,11 +152,10 @@ rlines = ["most-recently-registered first",
           "  Camera     E:\\Photos            ◉ 26,150  deduped Jul 12",
           "  iPhone     D:\\Backup\\iPhone     ◉ 98,412  deduped today",
           "",
-          "◉ scanned + deduped   ◐ scanned only   ○ never scanned",
-          "",
-          "↑/↓ select   [Enter]/→ open detail   [a] add root   Esc back"]
+          "◉ scanned + deduped   ◐ scanned only   ○ never scanned"]
 block("## 2. Roots interface (maximized — second `[r]`)",
-      screen("Roots", rlines, "daemon ● up"))
+      screen("Roots", rlines, "daemon ● up",
+             footer="↑/↓ select   [Enter]/→ open detail   [a] add root   Esc back"))
 
 # ============================ 3. ROOT DETAIL ============================
 d1 = ["assets  98,412  (photos 92,110 · videos 6,302)     files 98,540",
@@ -155,12 +170,11 @@ d1 = ["assets  98,412  (photos 92,110 · videos 6,302)     files 98,540",
       " ▸ dedup  ⚠ awaiting review · 240 delete · 18 grp/47 mbr   11:31",
       "   scan   done     +412 new · 3 undecodable                09:04",
       "   merge  done     240 copied · 1 trashed skipped          Jul 14",
-      "   scan   interrupted — re-run to resume                   Jul 13",
-      "",
-      "[s] scan  [d] dedup  [m] merge into…  [Enter] result  ↑/↓ jobs  Esc"]
+      "   scan   interrupted — re-run to resume                   Jul 13"]
 block("## 3. Root detail interface (`[Enter]`/`→` on a root)\n\n"
       "### 3.1 — With a pending dedup/cleanup review (the actionable case)",
-      screen("iPhone", d1, "D:\\Backup\\iPhone · library"))
+      screen("iPhone", d1, "D:\\Backup\\iPhone · library",
+             footer="[s] scan  [d] dedup  [m] merge into…  [Enter] result  ↑/↓ jobs  Esc"))
 
 d2 = ["assets  26,150  (photos 25,900 · videos 250)      files 26,150",
       "scanned 1d ago    last full scan Jul 08    deduped Jul 12",
@@ -171,11 +185,10 @@ d2 = ["assets  26,150  (photos 25,900 · videos 250)      files 26,150",
       "Jobs (newest first):",
       " ▸ scan   done     +26 new                                 Jul 15",
       "   dedup  done     already clean                           Jul 12",
-      "   merge  done     1,204 copied · 12 exact-known           Jul 08",
-      "",
-      "[s] scan  [d] dedup  [m] merge into…  [Enter] result  ↑/↓ jobs  Esc"]
+      "   merge  done     1,204 copied · 12 exact-known           Jul 08"]
 block("### 3.2 — No pending review (clean / normal)",
-      screen("Camera", d2, "E:\\Photos · library"))
+      screen("Camera", d2, "E:\\Photos · library",
+             footer="[s] scan  [d] dedup  [m] merge into…  [Enter] result  ↑/↓ jobs  Esc"))
 
 # ============================ 4. QUEUE INTERFACE ============================
 qlines = ["Running + queued (runs top-down):",
@@ -191,11 +204,10 @@ qlines = ["Running + queued (runs top-down):",
           "   #414 merge dump → iPhone    done   240 copied          Jul 14",
           "   #413 ‹scan iPhone (dry-run)› done  2,110 would index    Jul 14",
           "   #412 dedup iPhone (cancel)  cancelled  —               Jul 13",
-          "   #411 scan Photos            interrupted  re-run        Jul 13",
-          "",
-          "↑/↓ select  [c] cancel  [p] prioritize  [x] all  [Enter] detail  Esc"]
+          "   #411 scan Photos            interrupted  re-run        Jul 13"]
 block("## 4. Queue interface (maximized — second `[q]`)",
-      screen("Queue", qlines, "daemon ● up"))
+      screen("Queue", qlines, "daemon ● up",
+             footer="↑/↓ select  [c] cancel  [p] prioritize  [x] all  [Enter] detail  Esc"))
 
 # ============================ 5. JOB RESULT CARDS ============================
 block("## 5. Job result / detail card (`[Enter]` on any job row)\n\n### 5.1 — scan (done)",
@@ -211,8 +223,8 @@ block("## 5. Job result / detail card (`[Enter]` on any job row)\n\n### 5.1 — 
           "  [undecodable] D:\\Backup\\iPhone\\2019\\IMG_0032.HEIC",
           "       PIL: cannot identify image file",
           "  [undecodable] D:\\Backup\\iPhone\\clips\\old.3gp",
-          "  [undecodable] D:\\Backup\\iPhone\\2018\\IMG_9910.HEIC",
-          "", "Esc back"], "Jul 15 09:04"))
+          "  [undecodable] D:\\Backup\\iPhone\\2018\\IMG_9910.HEIC"],
+          "Jul 15 09:04", footer="Esc back"))
 
 block("### 5.2 — merge (done)",
       screen("Job #421 · merge dump → Camera · done", [
@@ -224,8 +236,8 @@ block("### 5.2 — merge (done)",
           "    6  skipped — dup-in-source (byte-identical siblings)",
           "    2  collisions renamed       0  errors",
           "",
-          "Source unchanged.  Next: `scan Camera` then `dedup Camera`.",
-          "", "Esc back"], "Jul 14 22:10"))
+          "Source unchanged.  Next: `scan Camera` then `dedup Camera`."],
+          "Jul 14 22:10", footer="Esc back"))
 
 block("### 5.3 — dedup (pending — awaiting review; carries actions)",
       screen("Job #430 · dedup Photos (analyze) · ⚠ awaiting review", [
@@ -236,16 +248,16 @@ block("### 5.3 — dedup (pending — awaiting review; carries actions)",
           "  Stage 3 minor-edits    pending",
           "  review: E:\\Photos2\\_packrat_review\\_suspect_recompression\\",
           "",
-          "[o] open review folder   [g] confirm this stage   [k] cancel run",
-          "Esc back"], "today 11:31"))
+          "[o] open review folder   [g] confirm this stage   [k] cancel run"],
+          "today 11:31", footer="Esc back"))
 
 block("### 5.4 — dedup (done) & already-clean",
       screen("Job #430 · dedup Photos (confirm) · done", [
           "All stages reviewed.",
           "52 deleted (12 exact · 40 near-dup) · 9 spared.",
           "Audit: %APPDATA%\\packrat\\audit\\dedup\\Photos\\430\\",
-          "       (proposed.json / applied.json)",
-          "", "Esc back"], "today 11:48"))
+          "       (proposed.json / applied.json)"],
+          "today 11:48", footer="Esc back"))
 
 block("### 5.5 — already-clean · trash-refresh · untrash · error · interrupted",
       screen("Job #451 · dedup iPhone (analyze) · done", [
@@ -262,7 +274,7 @@ block("### 5.5 — already-clean · trash-refresh · untrash · error · interru
           "  ✗ nothing to confirm; run `dedup Photos` first.",
           "  (result_json NULL on error → shown from status + jobs.error)",
           "─" * (CW - 4),
-          "scan iPhone #455 · INTERRUPTED — progress safe, re-run to resume.",
-          "Esc back"], "history"))
+          "scan iPhone #455 · INTERRUPTED — progress safe, re-run to resume."],
+          "history", footer="Esc back"))
 
 out.flush()
