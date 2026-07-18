@@ -7,8 +7,8 @@ Current surface (M1–M5):
 - ``packrat merge`` — copy new files into a folder by exact hash (§8 C).
 - ``packrat cleanup`` / ``trash refresh`` / ``untrash`` — the trash model (§6).
 - ``packrat status`` — global rollup / per-root detail (read-only, never blocked, §11).
-- ``packrat jobs`` — recent job runs.
-- ``packrat cancel`` — cooperatively cancel the running job (§3).
+- ``packrat jobs list|cancel|prioritize`` — inspect/steer the work queue (§3, §11);
+  ``jobs cancel`` with no id cancels the running job.
 - ``packrat daemon start|stop|restart|status`` — lifecycle/troubleshooting (§11).
 - ``packrat smoke-test`` — the §9.1 decode smoke test.
 - ``packrat`` (no args) — the TUI placeholder (full TUI is M6, §12).
@@ -413,15 +413,26 @@ def _jobs_list(*, limit: int, json_out: bool) -> None:
 
 @jobs_app.command("cancel")
 def jobs_cancel(
-    job_id: int = typer.Argument(..., help="Job id to cancel (running → cooperative stop; queued → dropped)."),
+    job_id: Optional[int] = typer.Argument(
+        None, help="Job id to cancel. Omit to cancel the currently-running job."),
 ):
-    """Cancel a running or queued job by id (§3, §11).
+    """Cancel a job (§3, §11). With no id, cancels the currently-running job.
+
+    Only one mutating job runs at a time (§3 guarantee 1), so **no id is needed** to
+    stop the running one — ``packrat jobs cancel`` targets it. Pass an explicit id to
+    cancel a specific job (e.g. a *queued* one).
 
     A **running** job gets a cooperative stop at its next checkpoint (lands
     ``cancelled``; for merge/review this discards the resumable plan). A **queued** job
     is dropped from the backlog (never ran). A terminal job is a no-op.
     """
     client = _client_or_spawn()
+    if job_id is None:
+        rj = client.daemon_status().get("running_job")
+        if not rj:
+            typer.echo("no running job to cancel.")
+            raise typer.Exit(0)
+        job_id = rj["id"]
     ok = client.cancel_job(job_id)
     typer.echo(f"job {job_id}: cancel requested." if ok
                else f"job {job_id} is not running or queued (nothing to cancel).")
@@ -745,26 +756,6 @@ def untrash(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
-
-
-@app.command("cancel")
-def cancel(
-    job_id: Optional[int] = typer.Argument(None, help="Job id (optional; defaults to the running job)."),
-):
-    """Cooperatively cancel the running job (§3).
-
-    Only one mutating job runs at a time (§3 guarantee 1), so no id is needed —
-    ``packrat cancel`` targets that job. An explicit id is still accepted.
-    """
-    client = _client_or_spawn()
-    if job_id is None:
-        rj = client.daemon_status().get("running_job")
-        if not rj:
-            typer.echo("no running job to cancel.")
-            raise typer.Exit(0)
-        job_id = rj["id"]
-    ok = client.cancel_job(job_id)
-    typer.echo("cancel requested." if ok else "that job is not running (nothing to cancel).")
 
 
 # ---------------------------------------------------------------------------

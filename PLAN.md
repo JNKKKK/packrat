@@ -2415,7 +2415,7 @@ Queue panel (§12, design tenet §1.6).
 
 ```
 packrat jobs [list] [--limit N] [--json]   # recent runs, newest-first (running/queued/terminal)
-packrat jobs cancel <job#>                 # cancel a running (cooperative) or queued (dropped) job
+packrat jobs cancel [<job#>]               # cancel a job; no id → the currently-running one
 packrat jobs prioritize <job#>             # move a queued job to the front of the queue
 ```
 
@@ -2425,7 +2425,7 @@ Newest-first: each row shows its **id** (the handle `cancel`/`prioritize` take),
 outcome (§4). Includes the durable `queued` backlog and terminal history. `--json` for the full rows.
 Read-only — runs anytime, never blocked (§3).
 
-#### `packrat jobs cancel <job#>` — cancel a running or queued job
+#### `packrat jobs cancel [<job#>]` — cancel a running or queued job
 The same cancel the TUI `[c]` issues (§3, §12), addressable by id from any terminal:
 - **Running** → a **cooperative** stop at the job's next checkpoint; it lands `cancelled` (terminal,
   distinct from a `daemon stop`'s `interrupted`). For `merge`/review this discards the resumable
@@ -2434,9 +2434,10 @@ The same cancel the TUI `[c]` issues (§3, §12), addressable by id from any ter
   ran).
 - A **terminal** job (done/error/cancelled/interrupted) → no-op.
 
-(The bare `packrat cancel` with no id still exists as a convenience — it targets the one *running*
-job, since only one runs at a time. `jobs cancel <id>` is the general form that can also drop a
-specific queued job.)
+**With no id, `packrat jobs cancel` targets the currently-running job** — since only one mutating job
+runs at a time (§3 guarantee 1), no id is needed to stop "the" running one. Pass an explicit id to
+drop a specific *queued* job (or any other). (There is no separate top-level `packrat cancel`; this
+is the one cancel verb.)
 
 #### `packrat jobs prioritize <job#>` — jump a queued job to the front
 Bumps a **queued** job ahead of every other queued job, so it is the **next** to run when the worker
