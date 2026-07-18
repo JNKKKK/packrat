@@ -46,6 +46,16 @@ Target: Windows 10, single user, RTX GPU available, collection >100K assets.
 4. **Idempotent & resumable.** Any index/merge/tag job can be interrupted and re-run.
 5. **Lazy when safe, thorough on schedule.** Skip re-fingerprinting when `path` + exact `size` +
    near-`mtime` (tolerant) are unchanged; do full sweeps on a fixed interval as the backstop.
+6. **TUI is the default face; the CLI is the complete surface.** The expected way to drive
+   packrat is the **TUI** (`packrat` no-args — the primary, discoverable entrypoint, §12). But the
+   TUI is only a *presentation layer*: **every action it offers must also be a first-class CLI
+   command** (§11), and the TUI issues no privileged operation of its own — each of its actions maps
+   onto an existing CLI verb, so the two stay behaviorally identical (§12 "Read-safe"). This is a
+   hard rule, not a courtesy: it keeps packrat fully scriptable/automatable and headless-usable
+   (SSH, cron, CI), guarantees the TUI can never diverge from or outrun the CLI, and means the CLI
+   is the authoritative contract the TUI (and any future client) is built *on top of* — both are
+   thin clients over the same daemon API (§3). Consequence for every new capability: **add the CLI
+   verb first (or together), never TUI-only.**
 
 ---
 
@@ -2572,8 +2582,12 @@ Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per
 - **Keyboard-first**, mouse optional (Textual supports both). All actions reachable by single
   keys shown in brackets; `↑/↓` drives selection in whichever list panel holds focus (Roots →
   Queue → per-root jobs), `Tab` cycles focus between panels.
-- **Read-safe.** Everything the TUI does maps to an existing CLI verb — it issues no privileged
-  operation of its own, so CLI and TUI stay behaviorally identical.
+- **Read-safe & CLI-complete (design tenet §1.6).** Everything the TUI does maps to an existing CLI
+  verb — it issues no privileged operation of its own, so CLI and TUI stay behaviorally identical.
+  The reverse also holds: there is **no TUI-only action**. The TUI is the default *face*, but the
+  CLI is the complete, authoritative surface every capability must land on first (so packrat stays
+  scriptable/headless and the TUI can never outrun the CLI). Both are thin clients over the same
+  daemon API (§3).
 - **Later milestone** (§13 M6): the CLI + daemon job runtime are the prerequisite; the TUI is a
   presentation layer on top and can land once jobs are observable. **M6 depends on two M0-runtime
   additions this section assumes:** the durable FIFO **queue** and per-job **`root_id`/`result_json`**
