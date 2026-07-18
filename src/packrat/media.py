@@ -386,6 +386,58 @@ def fingerprint(
     return fp
 
 
+def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
+    r"""Best-effort metadata (dims / duration / captured_at / codec) — **no PDQ** (§8 C step 11).
+
+    Used by ``merge`` to fill a ``new`` asset's display columns when it registers a
+    just-copied file, *without* the expensive perceptual pass: a later ``scan``/``dedup``
+    of the dest backfills ``phash``/``vphash`` (and re-derives these metadata columns
+    via the not-yet-fingerprinted backfill exception, §8 A2 step 6). So this is a
+    lightweight header read, not a full decode+hash.
+
+    A merge-created asset is **not-yet-fingerprinted** (``undecodable=0``, no phash yet)
+    — *not* undecodable (§4). So this never sets ``undecodable``: on any probe failure it
+    just leaves the metadata fields ``None`` and returns (the backfill scan sorts out
+    real decodability). Never raises. ``content_hash`` is left blank — the caller supplies
+    the frozen hash from the merge plan.
+    """
+    fp = Fingerprint(media_type=media_type, content_hash="")
+    try:
+        if media_type == "video":
+            import av  # type: ignore
+
+            container = av.open(fsutil.extended(path))
+            try:
+                vs = container.streams.video[0]
+                tb = vs.time_base
+                fp.width = vs.codec_context.width or None
+                fp.height = vs.codec_context.height or None
+                fp.codec = (vs.codec_context.name or None) if vs.codec_context else None
+                if vs.duration and tb:
+                    fp.duration_s = float(vs.duration * tb)
+                elif container.duration:
+                    fp.duration_s = container.duration / av.time_base
+                fp.captured_at = _video_capture_time(container)
+            finally:
+                container.close()
+        elif ext_of(path) in RAW_EXTS:
+            import rawpy  # type: ignore
+
+            with rawpy.imread(fsutil.extended(path)) as raw:
+                s = raw.sizes
+                fp.width, fp.height = int(s.width), int(s.height)
+        else:
+            _register_heif_openers()
+            from PIL import Image
+
+            with Image.open(fsutil.extended(path)) as img:
+                fp.width, fp.height = int(img.size[0]), int(img.size[1])  # PIL: (w, h)
+                fp.captured_at = _exif_capture_time(img)
+    except Exception as exc:  # noqa: BLE001 - metadata is best-effort; scan backfills it
+        log.debug("merge metadata probe failed for %s: %s", path, exc)
+    return fp
+
+
 def fill_perceptual(
     fp: Fingerprint, path: str, config, *, data: bytes | None = None, profiler=NULL_PROFILER
 ) -> Fingerprint:

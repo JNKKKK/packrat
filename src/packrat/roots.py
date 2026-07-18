@@ -8,10 +8,15 @@ any running op).
 
 Also home to:
 - :func:`resolve_root` — the path-vs-``--name`` argument resolution shared by
-  ``scan`` and (later) ``dedup``/``cleanup``/``merge --into`` (§11).
+  ``scan`` and ``dedup``/``cleanup`` (§11).
+- :func:`resolve_dest` — merge's ``--into`` resolution (§8 C Phase 0 step 2): a
+  path/name that must land **inside** a registered library root (the dest may be a
+  *subfolder* of one, unlike ``resolve_root``'s exact/name match).
 - :func:`root_holder` — "who owns this root right now" (pending review / open
-  merge), used by both the queue's per-root reject and ``scan --all``'s skip-and-log
-  (§8 A2 step 1a); centralized so both agree.
+  merge), used by the queue's dequeue gate and ``scan --all``'s skip-and-log
+  (§8 A2 step 1a); centralized so both agree. ``ignore_merge`` lets a *resuming*
+  merge past its own open ``merge_runs`` row (§8 C — else it would deadlock waiting
+  on itself).
 """
 
 from __future__ import annotations
@@ -127,16 +132,63 @@ def resolve_root(db: Database, arg: str) -> dict:
     raise RootError(f"no registered root at path or named {arg!r}; try `packrat roots` to list")
 
 
+def resolve_dest(db: Database, arg: str) -> tuple[dict, str]:
+    r"""Resolve a merge ``--into`` argument to ``(library_root_row, dest_canonical_path)`` (§8 C Phase 0 step 2).
+
+    Unlike :func:`resolve_root` (which matches a root's own path/name), the merge dest
+    may be a **subfolder** of a library root that need not exist yet (created at copy
+    time). Resolution — **path first, then name** (§11: path-match is tried first so an
+    odd handle can't shadow a real path):
+
+    1. Canonicalize ``arg`` as a path and find the root that *contains* it
+       (``is_within``). That root is the dest; ``arg`` (canonical) is the dest path —
+       possibly a not-yet-created subfolder under the root.
+    2. Else, if ``arg`` case-insensitively matches a root's ``name``, that root is the
+       dest and its own path is the dest path (a bare handle means "into this root").
+
+    Raises :class:`RootError` if the resolved dest falls under no library root (offer
+    to ``roots register`` it), or under a **trash** root (merge targets library only).
+    """
+    canon = fsutil.canonicalize(arg)
+    for row in db.query("SELECT * FROM roots"):
+        if fsutil.is_within(canon, row["path"]):
+            root = dict(row)
+            if root["kind"] != "library":
+                raise RootError(
+                    f"{canon} is inside the {root['kind']} root {root['name']!r}; "
+                    "merge --into targets a library root"
+                )
+            return root, canon
+
+    named = db.query_one("SELECT * FROM roots WHERE name = ? COLLATE NOCASE", (arg,))
+    if named is not None:
+        root = dict(named)
+        if root["kind"] != "library":
+            raise RootError(
+                f"root {root['name']!r} is a {root['kind']} root; merge --into targets a library root"
+            )
+        return root, root["path"]
+
+    raise RootError(
+        f"{canon} is under no registered library root; "
+        "`packrat roots register` a library root containing it first"
+    )
+
+
 # ---------------------------------------------------------------------------
 # per-root exclusivity holder (§3 guarantee 2 / §8 A2 step 1a)
 # ---------------------------------------------------------------------------
-def root_holder(db: Database, root_id: int) -> dict | None:
+def root_holder(db: Database, root_id: int, *, ignore_merge: bool = False) -> dict | None:
     """Describe the op currently *owning* ``root_id``, or ``None`` (§3).
 
     The owners are a ``pending`` ``review_runs`` row (dedup/cleanup) or an open
     ``merge_runs`` row (``planning``/``copying``) with this root as dest, per the §4
     partial-unique indexes. Returns a dict with a human ``what`` string so both the
-    queue reject and ``scan --all`` skip-log speak the same language.
+    queue dequeue gate and ``scan --all`` skip-log speak the same language.
+
+    ``ignore_merge`` skips the open-``merge_runs`` check — used by a *resuming* merge,
+    which must not treat *its own* open row as a blocking holder (§8 C: it auto-resumes
+    that very run) or it would deadlock waiting on itself.
     """
     rr = db.query_one(
         "SELECT id, run_type, created_at FROM review_runs WHERE root_id=? AND status='pending'",
@@ -149,6 +201,8 @@ def root_holder(db: Database, root_id: int) -> dict | None:
             "since": rr["created_at"],
             "what": f"{rr['run_type']} pending since {rr['created_at']}",
         }
+    if ignore_merge:
+        return None
     mr = db.query_one(
         "SELECT id, status, created_at FROM merge_runs "
         "WHERE dest_root_id=? AND status IN ('planning','copying')",

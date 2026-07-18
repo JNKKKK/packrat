@@ -150,7 +150,7 @@ class JobQueue:
         root_id = spec.owned_root(params)
         if root_id is None:
             return True
-        return self._root_holder(root_id) is None
+        return self._root_holder(root_id, ignore_merge=spec.ignore_merge_holder) is None
 
     def _start(self, job_id: int, spec, params: dict) -> None:
         """Take the in-memory slot, flip the row to ``running``, launch the worker.
@@ -370,18 +370,19 @@ class JobQueue:
         root_id = spec.owned_root(params)
         if root_id is None:
             return None
-        return self._root_holder(root_id)
+        return self._root_holder(root_id, ignore_merge=spec.ignore_merge_holder)
 
-    def _root_holder(self, root_id: int) -> dict | None:
+    def _root_holder(self, root_id: int, *, ignore_merge: bool = False) -> dict | None:
         """Description of the op currently owning ``root_id``, or None (§3 guarantee 2).
 
         Delegates to the shared :func:`packrat.roots.root_holder` (a pending
         review_run or open merge_run, per §4) so the dequeue gate and the
-        ``scan --all`` skip-log speak identically. Imported lazily to avoid a cycle.
+        ``scan --all`` skip-log speak identically. ``ignore_merge`` lets a resuming
+        merge past its own open ``merge_runs`` row (§8 C). Imported lazily to avoid a cycle.
         """
         from ..roots import root_holder
 
-        return root_holder(self.db, root_id)
+        return root_holder(self.db, root_id, ignore_merge=ignore_merge)
 
     # -- SSE fan-out -----------------------------------------------------
     def subscribe(self, job_id: int) -> _Subscriber:

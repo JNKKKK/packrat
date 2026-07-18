@@ -1,8 +1,11 @@
 """``packrat`` CLI entrypoint (Typer) — thin client onto the daemon (§3, §11).
 
-Current surface (M1/M2 — dedup/merge/trash land M3+):
+Current surface (M1–M5):
 - ``packrat roots register|list`` — declare/list roots (§8 A1, §11).
 - ``packrat scan`` — walk a root and fingerprint it (§8 A2).
+- ``packrat dedup`` — 3-stage dedup of one folder (§8 B).
+- ``packrat merge`` — copy new files into a folder by exact hash (§8 C).
+- ``packrat cleanup`` / ``trash refresh`` / ``untrash`` — the trash model (§6).
 - ``packrat status`` — global rollup / per-root detail (read-only, never blocked, §11).
 - ``packrat jobs`` — recent job runs.
 - ``packrat cancel`` — cooperatively cancel the running job (§3).
@@ -25,7 +28,7 @@ import typer
 from .. import __version__, build
 from ..daemon.client import DaemonClient, DaemonError, DaemonNotRunning
 from ..daemon.spawn import ensure_daemon
-from ..daemon.state import DEFAULT_PORT, read_state, pid_alive
+from ..daemon.state import DEFAULT_PORT, pid_alive, pid_on_port, read_state, terminate_pid
 from .stream import stream_job
 
 app = typer.Typer(
@@ -70,16 +73,50 @@ def daemon_start():
     typer.echo(f"daemon started · pid {info['pid']} · port {info['port']} · v{info['version']}")
 
 
+def _force_kill_orphan(*, reason: str) -> bool:
+    """Force-terminate an orphaned daemon by its fixed port, self-healing a stale token (§3).
+
+    The daemon binds a fixed loopback port as its single-instance lock, so whatever
+    listens there IS the packrat daemon — safe to kill by port when the token no longer
+    matches (e.g. a daemon spawned under a since-deleted ``PACKRAT_HOME`` during testing:
+    ``/health`` answers, but the authed ``stop``/``restart`` gets a 401). Returns True if
+    an orphan was found and terminated. Prints what it did.
+    """
+    pid = pid_on_port(DEFAULT_PORT)
+    if pid is None:
+        return False
+    typer.echo(f"{reason} — force-stopping the daemon on port {DEFAULT_PORT} (pid {pid}).")
+    if terminate_pid(pid):
+        from ..daemon.state import clear_state
+
+        clear_state()  # its state file (if any) is now stale
+        typer.echo("daemon force-stopped.")
+        return True
+    typer.echo(f"could not terminate pid {pid}; stop it manually.", err=True)
+    return False
+
+
 @daemon_app.command("stop")
 def daemon_stop():
-    """Graceful shutdown: an in-flight job is left `interrupted` (resumable), not cancelled (§3)."""
+    """Graceful shutdown: an in-flight job is left `interrupted` (resumable), not cancelled (§3).
+
+    Self-heals a stale token: if the daemon is up but rejects our token (an orphan from
+    a since-deleted PACKRAT_HOME), it is force-stopped by its fixed port instead of
+    failing with a 401.
+    """
     client = DaemonClient()
     if not client.is_up():
         typer.echo("daemon is not running.")
         raise typer.Exit(0)
     try:
         resp = client.shutdown()
-    except (DaemonError, DaemonNotRunning) as exc:
+    except DaemonError as exc:
+        # Up but our token was rejected (401) → orphaned daemon; force-stop by port.
+        if _is_auth_error(exc) and _force_kill_orphan(reason="daemon rejected our token"):
+            raise typer.Exit(0)
+        typer.echo(f"error stopping daemon: {exc}", err=True)
+        raise typer.Exit(1)
+    except DaemonNotRunning as exc:
         typer.echo(f"error stopping daemon: {exc}", err=True)
         raise typer.Exit(1)
     if resp.get("running_job"):
@@ -104,23 +141,35 @@ def daemon_restart():
     """
     client = DaemonClient()
     if client.is_up():
+        forced = False
         try:
             resp = client.shutdown()
-        except (DaemonError, DaemonNotRunning) as exc:
+        except DaemonError as exc:
+            # Up but our token was rejected (401) → orphaned daemon; force-stop by port
+            # so the restart self-heals a stale token rather than dying on the 401.
+            if _is_auth_error(exc) and _force_kill_orphan(reason="daemon rejected our token"):
+                forced = True
+            else:
+                typer.echo(f"error stopping daemon: {exc}", err=True)
+                raise typer.Exit(1)
+        except DaemonNotRunning as exc:
             typer.echo(f"error stopping daemon: {exc}", err=True)
             raise typer.Exit(1)
-        if resp.get("running_job"):
-            typer.echo("stopping daemon — the in-flight job is left interrupted (resumable).")
+        else:
+            if resp.get("running_job"):
+                typer.echo("stopping daemon — the in-flight job is left interrupted (resumable).")
         # Wait for the old daemon to stop serving and free the port; a new spawn
         # can't bind until it does (the port bind is the single-instance lock, §3).
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            if not DaemonClient().is_up():
-                break
-            time.sleep(0.2)
-        else:
-            typer.echo("old daemon did not stop within 15s; not restarting.", err=True)
-            raise typer.Exit(1)
+        # (A force-kill already confirmed the process is gone, so the wait is quick.)
+        if not forced:
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                if not DaemonClient().is_up():
+                    break
+                time.sleep(0.2)
+            else:
+                typer.echo("old daemon did not stop within 15s; not restarting.", err=True)
+                raise typer.Exit(1)
     else:
         typer.echo("daemon was not running.")
     try:
@@ -143,7 +192,21 @@ def daemon_status():
         else:
             typer.echo("daemon is not running.")
         raise typer.Exit(0)
-    info = client.daemon_status()
+    try:
+        info = client.daemon_status()
+    except DaemonError as exc:
+        # Up (/health answered) but our token is rejected → an orphaned daemon from a
+        # since-deleted PACKRAT_HOME. Report it clearly instead of a raw 401 traceback;
+        # `packrat daemon restart` (or stop) self-heals it by force-stopping the port.
+        if _is_auth_error(exc):
+            pid = pid_on_port(DEFAULT_PORT)
+            pid_note = f" (pid {pid})" if pid else ""
+            typer.echo(f"● up on port {DEFAULT_PORT}{pid_note}, but it rejects our token — "
+                       "an orphaned daemon (stale token).")
+            typer.echo("  run `packrat daemon restart` to force-stop it and start a fresh one.")
+            raise typer.Exit(0)
+        typer.echo(f"error querying daemon: {exc}", err=True)
+        raise typer.Exit(1)
     typer.echo(f"● up · pid {info['pid']} · port {info['port']} · v{info['version']} · since {info['started_at']}")
     rj = info.get("running_job")
     if rj:
@@ -410,6 +473,45 @@ def dedup(
                                      keep_suggested=keep_suggested)
     except DaemonError as exc:
         typer.echo(f"cannot dedup: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if detach:
+        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
+        return
+    final = stream_job(client, job_id, label=label)
+    typer.echo(f"{label} {final}")
+    if json_out:
+        import json
+        typer.echo(json.dumps(client.get_job(job_id), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# merge — copy new files into a destination folder (§8 C)
+# ---------------------------------------------------------------------------
+@app.command("merge")
+def merge(
+    source: str = typer.Argument(..., help="Transient temp folder to merge from (never modified)."),
+    into: str = typer.Option(..., "--into", help="Destination folder; must resolve inside a library root."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print classification counts / would-copy list; copy nothing."),
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    r"""Copy into <dest> only the files new to the whole collection, by exact hash (§8 C).
+
+    `merge <source> --into <dest>`: refresh the trash collection → classify each source
+    file by exact hash (dup-in-source / trashed / exact-known / new) → copy the `new`
+    files (hash-verified, structure-mirrored under <dest>) and register them. Source is
+    read-only; dest is copy-only. No near-dup detection or review — that's `dedup`, run
+    afterward. One shot; resumable from its plan on crash.
+
+    `--dry-run` previews the classification counts without copying — but still refreshes
+    and empties the trash collection for real (§6.1).
+    """
+    client = _client_or_spawn()
+    label = "merge --dry-run" if dry_run else "merge"
+    try:
+        job_id = client.submit_merge(source, into, dry_run=dry_run)
+    except DaemonError as exc:
+        typer.echo(f"cannot merge: {_detail(exc)}", err=True)
         raise typer.Exit(1)
     if detach:
         typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
@@ -701,6 +803,16 @@ def _client_or_spawn() -> DaemonClient:
     except TimeoutError as exc:
         typer.echo(f"could not reach or start the daemon: {exc}", err=True)
         raise typer.Exit(1)
+
+
+def _is_auth_error(exc: DaemonError) -> bool:
+    """True if a ``DaemonError`` is a 401 (token rejected) — the orphaned-daemon signal (§3).
+
+    ``DaemonError`` messages are ``"<status>: <body>"`` (see ``client._post``); a leading
+    ``401`` means ``/health`` answered but our token didn't match, i.e. a daemon from a
+    since-deleted ``PACKRAT_HOME``. Callers self-heal by force-stopping it by port.
+    """
+    return str(exc).startswith("401")
 
 
 def _detail(exc: DaemonError) -> str:

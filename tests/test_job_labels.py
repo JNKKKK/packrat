@@ -43,6 +43,17 @@ def test_rootless_labels():
     assert job_label("untrash", {"path": "/x/y/IMG.jpg", "dry_run": True}) == "untrash IMG.jpg (dry-run)"
 
 
+def test_merge_labels():
+    # merge shows "<src-leaf> → <dest-root>" (§12).
+    assert job_label("merge", {"source": r"E:\iphone_dump", "root_id": 1}, root_name="iPhone") \
+        == "merge iphone_dump → iPhone"
+    assert job_label("merge", {"source": "/tmp/dump", "dry_run": True}, root_name="iPhone") \
+        == "merge dump → iPhone (dry-run)"
+    # per-root panel drops the dest root name (header already names it).
+    assert job_label("merge", {"source": r"E:\dump", "root_id": 1}, root_name="iPhone",
+                     include_root=False) == "merge dump →"
+
+
 def test_per_root_panel_drops_root():
     # In the per-root jobs panel the header already names the root → include_root=False.
     assert job_label("cleanup", {"mode": "exact", "apply": True}, root_name="R", include_root=False) \

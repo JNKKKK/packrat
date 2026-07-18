@@ -192,6 +192,17 @@ class DaemonClient:
         """Read-only count for a one-shot cleanup mode's confirm (§6.2, §9.1)."""
         return self._get(f"/cleanup/preview?root={folder}&mode={mode}")
 
+    def submit_merge(self, source: str, into: str, *, dry_run: bool = False) -> int:
+        """Submit a merge job (§8 C); returns the job id (always enqueued, §3).
+
+        ``into`` is the ``--into`` dest (a root name or a subfolder path); the daemon
+        resolves it to the containing library root. A ``RootError`` (dest under no
+        library root / a trash root) comes back as HTTP 400 → :class:`DaemonError`.
+        """
+        return int(self._post(
+            "/merge", {"source": source, "into": into, "dry_run": dry_run},
+        )["job_id"])
+
     def submit_trash_refresh(self) -> int:
         """Submit a ``trash refresh`` job (§6.1); returns the job id (always enqueued)."""
         return int(self._post("/trash/refresh", {})["job_id"])

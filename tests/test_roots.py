@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from packrat import db
-from packrat.roots import RootError, register, resolve_root, root_holder
+from packrat.roots import RootError, register, resolve_dest, resolve_root, root_holder
 
 
 @pytest.fixture()
@@ -139,3 +139,59 @@ def test_root_holder_pending_review(database, tmp_path):
     holder = root_holder(database, row["id"])
     assert holder is not None and holder["type"] == "review_run"
     assert "dedup pending" in holder["what"]
+
+
+def test_root_holder_open_merge_and_ignore_merge(database, tmp_path):
+    """An open merge_run holds the root — but ignore_merge=True (a resuming merge) skips it (§8 C)."""
+    folder = tmp_path / "x"
+    folder.mkdir()
+    row = register(database, str(folder))
+    database.execute(
+        "INSERT INTO merge_runs(source_path, dest_path, dest_root_id, status, created_at) "
+        "VALUES ('s', ?, ?, 'copying', 't')",
+        (str(folder), row["id"]),
+    )
+    holder = root_holder(database, row["id"])
+    assert holder is not None and holder["type"] == "merge_run"
+    # A resuming merge must NOT be blocked by its own open run.
+    assert root_holder(database, row["id"], ignore_merge=True) is None
+    # But a pending review still blocks even with ignore_merge.
+    database.execute(
+        "INSERT INTO review_runs(root_id, run_type, status, created_at) "
+        "VALUES (?, 'dedup', 'pending', 't')",
+        (row["id"],),
+    )
+    assert root_holder(database, row["id"], ignore_merge=True) is not None
+
+
+# ---------------------------------------------------------------------------
+# resolve_dest (merge --into, §8 C Phase 0 step 2) — containment, path-first
+# ---------------------------------------------------------------------------
+def test_resolve_dest_by_name_and_subfolder(database, tmp_path):
+    lib = tmp_path / "Lib"
+    lib.mkdir()
+    row = register(database, str(lib))
+    # By name → the root's own path.
+    r, dest = resolve_dest(database, "Lib")
+    assert r["id"] == row["id"] and dest == row["path"]
+    # By a (not-yet-existing) subfolder path → the containing root + that path.
+    sub = lib / "incoming" / "2024"
+    r2, dest2 = resolve_dest(database, str(sub))
+    assert r2["id"] == row["id"]
+    from packrat import fsutil
+    assert fsutil.paths_equal(dest2, str(sub))
+
+
+def test_resolve_dest_no_library_root(database, tmp_path):
+    with pytest.raises(RootError, match="under no registered library root"):
+        resolve_dest(database, str(tmp_path / "orphan"))
+
+
+def test_resolve_dest_rejects_trash_root(database, tmp_path):
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    register(database, str(trash), kind="trash")
+    with pytest.raises(RootError, match="library root"):
+        resolve_dest(database, "Trash")
+    with pytest.raises(RootError, match="library root"):
+        resolve_dest(database, str(trash / "sub"))

@@ -7,6 +7,10 @@ Each job type declares:
 - ``owned_root``: ``(params) -> root_id | None`` — the root this job *owns* for
   per-root exclusivity (§3 guarantee 2). ``None`` means it owns no root
   (e.g. ``untrash``, or ``scan --all`` which iterates roots rather than owning one).
+- ``ignore_merge_holder``: when the dequeue gate checks the owned root's holder, skip
+  an open ``merge_runs`` row (only a pending review still blocks). Set by ``merge`` so
+  a *resuming* merge is not held by *its own* prior open run (§8 C) — else it would
+  deadlock waiting on itself. Everything else keeps the default (an open merge blocks).
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ class JobSpec:
     handler: Callable[[JobContext], None]
     mutating: bool = True
     owned_root: Callable[[dict], int | None] | None = None
+    ignore_merge_holder: bool = False
 
 
 _REGISTRY: dict[str, JobSpec] = {}

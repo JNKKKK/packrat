@@ -12,6 +12,7 @@ Endpoints (all under token auth except ``/health``):
 - ``GET  /roots``             — registered roots snapshot (§11).
 - ``POST /roots``             — register a root; optional ``--scan`` (§8 A1).
 - ``POST /scan``              — resolve a root arg + submit a scan job (§8 A2).
+- ``POST /merge``             — resolve ``--into`` + submit a merge job (§8 C).
 - ``POST /shutdown``          — graceful stop (§11 ``daemon stop``).
 
 The app is built by :func:`build_app`, which wires the DB, config, queue, and runs
@@ -39,6 +40,7 @@ log = logging.getLogger("packrat.daemon")
 from ..jobs import scan as _scan  # noqa: E402,F401
 from ..jobs import dedup as _dedup  # noqa: E402,F401
 from ..jobs import cleanup as _cleanup  # noqa: E402,F401
+from ..jobs import merge as _merge  # noqa: E402,F401
 from ..jobs import trash_refresh as _trash_refresh  # noqa: E402,F401
 from ..jobs import untrash as _untrash  # noqa: E402,F401
 
@@ -344,6 +346,34 @@ def build_app(token: str, *, db_file=None, config_path=None):
         if prev is None:
             raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
         return prev
+
+    @app.post("/merge", dependencies=[Depends(require_token)])
+    def submit_merge(body: dict):
+        """Resolve ``--into`` to a library root + submit a merge job (§8 C).
+
+        ``--into`` may name a root or a **subfolder** of one (created at copy time), so
+        it uses :func:`roots.resolve_dest` (containment), not exact/name match. The
+        resolved ``root_id`` (owned root, cross-op guard) + canonical ``dest_path`` are
+        frozen into params here so the CLI stays a thin client. A ``--dry-run`` merge is
+        enqueued like any other (owns None, writes nothing).
+        """
+        source = body.get("source")
+        into = body.get("into")
+        if not source:
+            raise HTTPException(status_code=400, detail="merge needs a <source> folder")
+        if not into:
+            raise HTTPException(status_code=400, detail="merge needs --into <dest>")
+        try:
+            root, dest_path = roots_mod.resolve_dest(database, into)
+        except roots_mod.RootError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        params = {
+            "root_id": root["id"],
+            "source": source,
+            "dest_path": dest_path,
+            "dry_run": bool(body.get("dry_run")),
+        }
+        return {"job_id": queue.submit("merge", params)}
 
     @app.post("/trash/refresh", dependencies=[Depends(require_token)])
     def submit_trash_refresh(body: dict):

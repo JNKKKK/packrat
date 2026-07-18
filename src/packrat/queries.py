@@ -93,7 +93,7 @@ def _annotate_queued_row(conn, row) -> dict:
     if spec is not None and spec.owned_root is not None:
         owned = spec.owned_root(params)
         if owned is not None:
-            blocked = root_holder(_DBShim(conn), owned)
+            blocked = root_holder(_DBShim(conn), owned, ignore_merge=spec.ignore_merge_holder)
     d = dict(row)
     d["label"] = job_label(row["type"], params, root_name=row["root_name"])
     d["blocked"] = blocked
