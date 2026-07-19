@@ -93,6 +93,23 @@ def test_plain_scan_sets_scan_recency_not_full(queue_and_db, tiny_photos):
     assert snap2["last_full_scan_at"] is not None
 
 
+def test_roots_snapshot_media_split_and_dedup_recency(queue_and_db, tiny_photos):
+    """roots_snapshot exposes photos/videos + last_dedup_at for the M6 dot & sort (Open Q#1)."""
+    from packrat import queries
+
+    q, database = queue_and_db
+    root = register(database, str(tiny_photos))
+    _run_scan(q, database, root["id"])
+    snap = queries.roots_snapshot()[0]
+    det = queries.root_detail(root["name"])
+    # photos/videos split matches root_detail and sums to asset_count.
+    assert snap["photos"] == det["photos"]
+    assert snap["videos"] == det["videos"]
+    assert snap["photos"] + snap["videos"] == snap["asset_count"]
+    # Never deduped yet → last_dedup_at is NULL (the ◐ "scanned only" dot state).
+    assert snap["last_dedup_at"] is None
+
+
 def test_scan_new_and_exact_dup(queue_and_db, tiny_photos):
     q, database = queue_and_db
     root = register(database, str(tiny_photos))

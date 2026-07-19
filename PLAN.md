@@ -2516,231 +2516,34 @@ is not part of the user-facing surface documented here.
 Typing `packrat` alone opens a full-screen terminal UI (Textual). It is the **default face** of
 the tool and, because jobs live in the daemon, a **live window onto work started from any
 terminal** — open it anytime to watch progress or stop a running job. It never *owns* a job; it
-submits, observes, and cancels, exactly like the CLI.
+submits, observes, and cancels, exactly like the CLI (design tenet §1.6).
 
-### Layout
+**The full TUI design lives in [`docs/M6-tui-mockups.md`](docs/M6-tui-mockups.md)** — the
+authoritative spec, kept there so it can carry ASCII mockups of every interface **generated into an
+identical fixed 100×24 frame** (via `docs/_tui_mockup_gen.py`) that *mechanically demonstrate* the
+fixed-layout requirement. That document covers: every interface (dashboard, maximized Roots/Queue,
+root detail, the merge-from picker, and the job result cards); each panel's data source + interaction;
+the `type` + `params` → **job-label** map; the per-`op` **`result_json`** card shapes; and the
+cross-cutting behavior (live SSE + job-finished refresh, TUI-side ETA, keyboard-first navigation with
+`←/→` paging, observe-and-control, and the fixed-100×24 layout rules).
 
-```
-┌─ packrat ──────────────────────────────────────────────── v0.1 · daemon ● up ─┐
-│                                                                                │
-│       ___                                                                      │
-│      (o.o)      p a c k r a t                                                  │
-│      (>♦<)      "hoards everything, keeps a system"                            │
-│      /   \      · 124,803 assets hoarded ·                                     │
-│                                                                                │
-│  ┌─ Collection ─────────────────┐  ┌─ Roots ──────────────────────────────┐  │
-│  │ Assets      124,803          │  │ ▸iPhone    D:\Backup\iPhone   98,412  │  │
-│  │  photos     111,240          │  │  Camera    E:\Photos          26,150  │  │
-│  │  videos      13,563          │  │  Downloads D:\dump               241  │  │
-│  │ Trashed       3,904          │  │  _Trash    D:\Backup\_Trash  (trash)  │  │
-│  │ Last scan   2h ago           │  │  …                                    │  │
-│  │                              │  │  ● recent ○ stale  ▸ selected → jobs  │  │
-│  └───────────────────────────────┘  └───────────────────────────────────────┘  │
-│                                                                                │
-│  ┌─ Queue ────────────────────────────────────────────────────────────────┐  │
-│  │ ▶ scan  iPhone         ███████████░░░  67%  8,912/13,204  ETA 4m (running)│  │
-│  │ 2 merge dump→Camera    queued · waiting for worker                       │  │
-│  │ 3 scan  Photos         blocked: Photos has a pending dedup (confirm/cancel)│  │
-│  │ 4 dedup Photos (confirm) blocked: Photos has a pending dedup             │  │
-│  │ ↑/↓ select  [c] cancel selected  [x] cancel-all queued  [Enter] detail   │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                                                                │
-│  ┌─ iPhone — jobs ────────────────────────────────────────────────────────┐  │
-│  │ ▶ scan   running  67%  8,912/13,204                            (see Queue)│  │
-│  │   dedup  ⚠ awaiting review · 240 delete · 18 grp/47 mbr   11:31          │  │
-│  │   scan   done     +412 new · 3 undecodable                    09:04      │  │
-│  │   merge  done     240 copied · 1 trashed skipped              Jul 14     │  │
-│  │   scan   interrupted — re-run to resume                       Jul 13     │  │
-│  │ ↑/↓ select   [Enter] result   [o] open review   [g] confirm  [k] cancel  │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                                                                │
-│  What do you want to do?                                                       │
-│   [s] Scan a folder        [d] Dedup a folder      [m] Merge into a folder     │
-│   [t] Refresh / cleanup trash   [r] Manage roots   [q] Quit                    │
-└────────────────────────────────────────────────────────────────────────────────┘
-```
+**Key invariants this section pins (elaborated in the mockups doc):**
+- **Fixed layout (hard requirement).** Every interface renders in the **same fixed 100×24 region**;
+  navigation **swaps content in place — never grows, shrinks, or reflows the outer frame**. Long lists
+  scroll *within* their panel; long paths **middle-elide** in compact rows and **wrap** in detail/card
+  views (full path always shown in root detail). Extra terminal space is margin — no responsive
+  reflow in v1. (Textual: a fixed-size root container, not auto-sizing widgets.)
+- **Read-safe & CLI-complete (§1.6).** Everything the TUI does maps to an existing CLI verb; it issues
+  no privileged operation of its own and there is **no TUI-only action** — both are thin clients over
+  the same daemon API (§3). The CLI is the authoritative surface every capability lands on first.
+- **Every job is show-able.** Each job writes a uniform `jobs.result_json` at terminal time whatever
+  its outcome (§4), so history and the result card always render — the data contract the TUI depends
+  on; the CLI's `status` surfaces the actionable slice of the same rows (§11).
 
-Stacked regions under the logo: **stats + roots**, the **global Queue**, a **per-root jobs** list
-(shown when a root is selected), then the **menu**. The header shows version and daemon health
-(auto-spawns it if down).
-
-### Panels
-
-- **Logo + tagline** — the packrat mascot (ASCII art of a rat clutching a `♦` — its hoard),
-  the tagline "hoards everything, keeps a system", and a **live "· N assets hoarded ·" line** that
-  reflects the current total-asset count (updates as scans/merges add assets). Cosmetic + a small
-  at-a-glance stat; sets the tone.
-- **Collection stats** — read-only DB rollups: total assets (photo/video split), trashed count, and
-  last-scan recency. Refreshes live while jobs run. (All fields come straight from
-  `queries.status_snapshot` — §11.) *(A `similarity_edges`-derived "duplicates (est)" stat was
-  considered and **dropped**: `similarity_edges` is a per-run cache that only exists after a `dedup`
-  and is never trusted as a complete count (§8 B), so a headline "est" number would be misleading —
-  0 on a fresh collection, stale after scans. Duplicate state is surfaced where it's real and
-  actionable instead: the per-root `⚠ awaiting review` count on a pending dedup run.)*
-- **Roots** — each registered root with path, asset count, and a freshness dot (scanned recently
-  vs. stale/never); trash roots labelled. **`↑/↓` moves a selection cursor (`▸`); selecting a root
-  populates the per-root *jobs* panel below** (this is the "go into a root" flow). **[r] Manage
-  roots** opens the add flow (`roots register`) and lists roots (`roots list`); remove/rename land
-  with the deferred `roots unregister`/`roots rename` verbs (§14 #9).
-- **Queue** — the global work pipeline (§3 guarantee 1): the one **running** mutating job at the top
-  with its live bar/ETA, then the **durable backlog** of `queued` jobs in `enqueued_at` order. This
-  is the direct view of the §3/§4 durable queue. Each queued row shows *why* it waits:
-  - **`queued · waiting for worker`** — runnable, just behind the running job (the common case);
-  - **`blocked: root R has a pending <run> — confirm/cancel to unblock`** — its owned root is held by
-    a pending review / open merge (§3 guarantee 2), so the worker **skips it and runs the next
-    runnable job**, retrying it on each pump until the holder clears (the confirm/cancel/merge job's
-    completion is what pumps it in). Because dequeue is **runnable-first, not strict FIFO**, a
-    runnable job legitimately passes a blocked one ahead of it — so the running order (and the
-    history list) is by *start* time, not submit time.
-  - **Job labels are derived from `type` + `params`, not the type alone** (pure display — no schema
-    field). Many operations submit multiple `jobs` rows of the *same* `type` distinguished only by a
-    param — e.g. `--confirm`/`--cancel`/analyze are all `type='dedup'` (§8 B); a `--trash-exact`
-    cleanup is a `preview` job then an `apply` job, both `type='cleanup'` (§6.2). A bare type would be
-    ambiguous, so the label is **`<verb> <root-name> (<qualifier>)`**, where the qualifier is derived
-    from `params_json` and the lifecycle **status** (`queued`/`running`/`done`/…) is shown
-    *separately* — so the qualifier stays a stable *noun* that reads correctly in every state (a
-    `queued`/`running`/`done` row all read `cleanup iPhone (exact · delete)`, never "Executing
-    deletion"). Two display rules: **(a)** show the root by its **name** (e.g. `iPhone`), not its full
-    path — matching the Roots panel; in the *per-root* jobs panel the root is dropped entirely (the
-    panel header already names it), so rows there read just `(exact · delete)`. `untrash` targets a
-    raw path (owns no root, §6.3), so it shows the path's **leaf**, not a root name. **(b)** a
-    **`(dry-run)`** job is a non-mutating preview — show the qualifier but **dim the row** so previews
-    don't clutter the history visually. The full map:
-
-    | Type · params | Label qualifier |
-    |---|---|
-    | **scan** plain / `full` / `embed` / `full`+`embed` / `dry_run` | *(none)* / `(full)` / `(embed)` / `(full · embed)` / `(dry-run)` |
-    | **scan** `all=True` (owns no root) | `scan all roots` *(± the same flag suffixes)* |
-    | **dedup** analyze / `dry_run` / `confirm` / `confirm`+`keep_suggested` / `cancel` | `(analyze)` / `(dry-run)` / `(confirm)` / `(confirm · keep-suggested)` / `(cancel)` |
-    | **cleanup** mode=exact: preview / `apply` / `dry_run` | `(exact · preview)` / `(exact · delete)` / `(exact · dry-run)` |
-    | **cleanup** mode=undecodable: preview / `apply` / `dry_run` | `(undecodable · preview)` / `(undecodable · delete)` / `(undecodable · dry-run)` |
-    | **cleanup** mode=perceptual: analyze / `dry_run` / `confirm` / `cancel` | `(perceptual · analyze)` / `(perceptual · dry-run)` / `(perceptual · confirm)` / `(perceptual · cancel)` |
-    | **trash-refresh** (owns no root) | `trash refresh` *(no qualifier)* |
-    | **untrash** plain / `dry_run` (shows path leaf) | `untrash <leaf>` / `untrash <leaf> (dry-run)` |
-    | **merge** (M5) plain / `dry_run` (shows `<src-leaf> → <dest-root>`) | `merge <src> → D` / `merge <src> → D (dry-run)` |
-
-    (`scan --profile` is a diagnostics flag, not shown in the label — it surfaces in the detail view.)
-  - **`↑/↓` navigates the queue**; the highlighted job is the target of the action keys. **`[c]`
-    cancels the selected job** — a *queued* selection (runnable or blocked) is dropped from the
-    backlog (`cancelled`, never ran); the *running* selection gets a cooperative stop at its next
-    checkpoint (§3). **`[x]` cancels every queued job** (drains the backlog) but leaves the running
-    one alone. `[Enter]` opens its detail/result view (below).
-  - Empty backlog is the common case (submit-while-idle runs immediately); the panel then shows just
-    the running job, or "idle" when nothing runs. Queued jobs that were carved out on restart
-    (a destructive `--confirm` never auto-run, §3) appear here as `interrupted — re-run to resume`.
-- **Per-root jobs** (`<root> — jobs`) — appears when a root is selected in the Roots panel; **the
-  answer to "go into a root and see its jobs."** Lists that root's **current** job (if any is running
-  or queued for it) and its **job history**, newest-first, from the `jobs` table filtered by
-  `jobs.root_id` (plus the per-root rows a `--all` scan writes to `scan_results`, §4). Each row shows
-  type, terminal status, a one-line outcome from `jobs.result_json`, and age:
-  - a **running** job mirrors the Queue bar (and notes "see Queue");
-  - a paused **dedup/cleanup** shows **`⚠ awaiting review`** with the `packrat status` count summary
-    (§11 — e.g. `240 delete · 18 grp/47 mbr`); `[o]` opens its `_packrat_review\` folder in Explorer,
-    `[g]`/`[k]` run `--confirm`/`--cancel`;
-  - a **done** job shows its result one-liner (scan `+N new · K undecodable`, merge `N copied · M
-    trashed skipped`, etc.);
-  - an **`interrupted`** job (daemon crash/stop, §3) shows **`interrupted — re-run to resume`** with
-    the command to continue it, distinguishing "the daemon died, your progress is safe" from a user
-    `cancelled`.
-  `↑/↓` selects a row; **`[Enter]` opens the result view** for that job (see below). History depth
-  is the retained `jobs`/`scan_results` rows (retention deferred, §14 #10).
-- **Job detail / result view** (`[Enter]` on any Queue or per-root row) — a full-screen card for one
-  job built from `jobs.result_json` (the uniform, always-written outcome summary, §4) plus a link
-  into the richer per-op record: a scan's full banner + `scan_problem_files` (undecodable/read-error
-  paths, §11), a dedup/cleanup run's per-stage plan and the §8.1 audit (`proposed.json`/
-  `applied.json`), a merge's per-item `merge_plan_items` tally. For a terminal job it is pure
-  history (read-only); for a paused review it also carries the confirm/cancel/open-in-Explorer
-  actions. `Esc` returns.
-  - **No live log tail.** Per-job logs are *not* persisted (a job's `ctx.log()` lines stream as SSE
-    `log` events while it runs and go to the daemon's rotating `daemon.log`, but are not stored
-    per-job and re-queryable). So the result view renders **`result_json`** — which every terminal
-    job writes (below) — not a log. (A running job's live log lines can still be shown from the SSE
-    stream while attached; there is just nothing to *re-read* for a finished job. A per-job persisted
-    log + a tail endpoint is a possible later nicety, deferred — §14.)
-  - **`result_json` rendering — one shape per `op`, always present.** Every job writes a
-    `result_json` with an **`op`** discriminator (`scan` / `dedup` / `cleanup` / `merge` /
-    `trash-refresh` / `untrash`) and a human **`summary`** string, plus op-specific count fields. The
-    TUI switches on `op` to render the card; `summary` is the always-safe one-liner fallback. Verified
-    shapes (fields the card can surface):
-    - **scan** → `{dry_run, full, embed, roots_scanned, roots_skipped, new, exact_dup, backfilled,
-      matches_trashed, undecodable, errors, read_errors, skipped_fastpath, deleted_instances,
-      forgotten_assets, candidates, summary}`.
-    - **merge** → `{dry_run, source, dest_root, new, exact_known, trashed, dup_in_source, collisions,
-      unindexed, errors, summary}`.
-    - **dedup** → `{action ∈ analyze|confirm|cancel|dry-run, review_status, stage, to_delete_exact,
-      groups, members, summary}` (a "already clean" analyze omits the review fields, carries `summary`).
-    - **cleanup** → `{mode ∈ exact|perceptual|undecodable, action ∈ preview|delete|analyze|confirm|
-      cancel|dry-run, summary}` + mode-specific counts (`would_delete`, or `exact`/`perceptual`,
-      or `deleted`/`already_gone`).
-    - **trash-refresh** → `{roots, new_trashed, flipped, already_trashed, emptied, undeletable,
-      errors, summary}`.
-    - **untrash** → `{dry_run, untrashed, forgotten, already_active, unknown, errors, summary}`.
-    - **Terminal `error`/`interrupted`** → `result_json` may be **NULL** (the job died before setting
-      one). The card then renders from `jobs.status` + `jobs.error` — e.g. an `interrupted` job shows
-      `interrupted — re-run to resume`, an `error` shows its message. This is the §4 contract: status
-      + error always describe the outcome even when result_json is absent, so **every job is
-      show-able**. The renderer must therefore treat result_json as *optional* and key off `status`
-      first, `op` second.
-- **Menu** — single-key actions that launch the operations. **Nothing is refused at submit** (§3):
-  submitting while the worker is busy **enqueues** the job (it appears in the Queue behind the
-  running one), and submitting against a root that's under review enqueues it too — it just shows as
-  `blocked: … — confirm/cancel to unblock` until you resolve the review, then runs automatically.
-  Each action collects its target (a folder picker / path prompt), submits, and drops you onto the
-  Queue (or the root's jobs panel) to watch.
-
-### Behavior & scope
-
-- **Observe-and-control, not a file manager.** The TUI never previews or edits media — that is
-  Explorer's job (design tenet §1). For dedup/cleanup review it just *links out* to the staging
-  folder in Explorer and waits; the actual keep/delete decisions are made by adding/removing
-  shortcuts there, then confirmed from the TUI or CLI.
-- **Live.** The Queue/running panel subscribes to the running job's **SSE stream** (§3) so a scan
-  started in another terminal appears here with a moving bar; the stats/roots/history panels poll
-  read-only snapshots on a light timer (queue reorder, a job finishing and the next starting, a new
-  result landing). Cancelling here stops the job there.
-  - **ETA is computed TUI-side, not by the daemon.** Progress events carry `done`/`total` (and the
-    `ProgressEvent.eta_s` field exists but is left unset — no job computes it). The TUI derives the
-    `ETA 4m` figure itself from the observed rate: `(total − done) / (Δdone/Δt)` over a short trailing
-    window of SSE progress events. So ETA is a pure presentation-layer estimate — no backend change,
-    and it degrades to blank until enough progress has streamed to rate-estimate.
-- **Every job is show-able.** Because each job writes a uniform `jobs.result_json` at terminal time
-  whatever its outcome (§4) — `done`, `cancelled`, `interrupted`, `error` — the per-root history and
-  the result view always have something to render, not just for successes. This is the data contract
-  the TUI depends on; the CLI's `status` surfaces the actionable slice of the same rows (§11).
-- **Keyboard-first**, mouse optional (Textual supports both). All actions reachable by single
-  keys shown in brackets; `↑/↓` drives selection in whichever list panel holds focus (Roots →
-  Queue → per-root jobs), `Tab` cycles focus between panels.
-- **Fixed layout — the window size never changes across interfaces (hard requirement).** Every
-  interface (dashboard, the maximized Roots/Queue views, root detail, and the job result cards)
-  renders inside the **same fixed terminal region** — one screenful the app owns for its whole
-  lifetime. Navigating between interfaces **swaps content in place; it never grows, shrinks, or
-  reflows the outer frame**, so nothing below the app jumps and the layout is stable to read. The
-  target region is a fixed **100×24** (**decided**); on a larger terminal the app still presents that
-  same fixed canvas rather than sprawling (extra space is left as margin — a responsive/reflowing
-  layout is explicitly *not* a v1 goal), and 100 wide comfortably fits long NAS paths + a status
-  column. Each interface is designed to fit 100×24 without scrolling the frame itself; long lists
-  (roots, jobs) scroll **within** their panel, not by resizing it.
-  - **Long values fit the width; they never widen the window.** A path or label too long for its
-    column is handled by **truncation with an ellipsis in compact list rows** (e.g. a root row on the
-    dashboard/Roots list — middle-elide so the drive and leaf stay visible, `\\nas\…\清池`), and by
-    **wrapping onto multiple lines in the roomier detail/card views** (root detail, job result cards),
-    where vertical space is cheaper than horizontal. The full untruncated path is always available in
-    the root **detail** interface (§3). So a long NAS UNC path is a display concern, never a reason to
-    grow the frame.
-  **The `docs/M6-tui-mockups.md` mockups are generated into an identical 100×24 frame to mechanically
-  enforce this** — if a future interface can't fit, that's a design signal to trim/elide/wrap it, not
-  to enlarge the window. (Textual: a fixed-size root container / screen, not auto-sizing widgets.)
-- **Read-safe & CLI-complete (design tenet §1.6).** Everything the TUI does maps to an existing CLI
-  verb — it issues no privileged operation of its own, so CLI and TUI stay behaviorally identical.
-  The reverse also holds: there is **no TUI-only action**. The TUI is the default *face*, but the
-  CLI is the complete, authoritative surface every capability must land on first (so packrat stays
-  scriptable/headless and the TUI can never outrun the CLI). Both are thin clients over the same
-  daemon API (§3).
-- **Later milestone** (§13 M6): the CLI + daemon job runtime are the prerequisite; the TUI is a
-  presentation layer on top and can land once jobs are observable. **M6 depends on two M0-runtime
-  additions this section assumes:** the durable FIFO **queue** and per-job **`root_id`/`result_json`**
-  columns (§3/§4). If the queue/result-history work lands as its own step, M6 is a pure presentation
-  layer on top of it.
+**M6 depends on two M0-runtime additions** this section assumes: the durable FIFO **queue** and
+per-job **`root_id`/`result_json`** columns (§3/§4). If that runtime work lands as its own step, M6 is
+a pure presentation layer on top of it. See also the M6 **component-library plan**
+([`docs/M6-component-plan.md`](docs/M6-component-plan.md)).
 
 ---
 

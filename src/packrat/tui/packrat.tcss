@@ -1,0 +1,59 @@
+/* packrat TUI stylesheet (M6, §12).
+ *
+ * The ONE stylesheet: a fixed root container (§12 — the window size never changes
+ * across interfaces) and text/borders colored by semantic ROLE via CSS variables
+ * that mirror packrat.tui.tokens.DEFAULT_THEME (a color changes in one place).
+ *
+ * The app renders each interface as a single pre-composed 100×24 Static (all
+ * geometry is done in the pure layout layer), so this file's job is only: pin the
+ * canvas size, center it as margin on a larger terminal, and expose the role
+ * colors. It is deliberately minimal (component-plan Non-goals: theming is a
+ * closed role set, not an open framework). */
+
+Screen {
+    align: center middle;    /* extra terminal space is margin (§12), not reflow */
+    background: ansi_default; /* emit NO background escape → the terminal's own
+                              /* background (Windows Terminal acrylic/"glass")
+                              /* shows through. `transparent` does NOT do this —
+                              /* Textual flattens it to opaque black; only the
+                              /* `ansi_default` sentinel (ansi=-1) suppresses the
+                              /* bg code so the real terminal background shows. */
+}
+
+/* The fixed canvas: exactly W×H cells, never resized or reflowed. The box
+ * interior is ansi_default too (full-glass look), so the acrylic shows through
+ * the whole UI, not just the margin. */
+#frame {
+    width: 100;
+    height: 24;
+    content-align: left top;
+    background: ansi_default;
+}
+
+/* Modal overlay (§Modals): a centered inset over a dimmed backdrop — never
+ * resizes/escapes the fixed frame (§12). The inset is an EXPLICIT fixed size that
+ * matches the pre-composed box (packrat.tui.modals MODAL_W×MODAL_H = 60×11).
+ * `auto` collapsed the container to 0×0 (it couldn't measure the plain-text
+ * Static), which made the modal invisible — only the acrylic showed through. */
+ModalScreen {
+    align: center middle;
+    background: ansi_default;   /* dim/glass backdrop, not opaque black */
+}
+
+#modal {
+    width: 60;
+    height: 12;                 /* MODAL_H (11) + 1 for the optional count Input */
+    background: ansi_default;
+}
+
+#modal-frame {
+    width: 60;
+    height: 11;                 /* == MODAL_H; the composed box is exactly this */
+    background: ansi_default;
+}
+
+#count-input {
+    width: 56;
+    margin: 0 2;
+}
+

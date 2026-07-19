@@ -38,16 +38,16 @@ app = typer.Typer(
     add_completion=False,
 )
 
-daemon_app = typer.Typer(help="Manage the background daemon (§11).")
+daemon_app = typer.Typer(help="Manage the background daemon.")
 app.add_typer(daemon_app, name="daemon")
 
-roots_app = typer.Typer(help="Manage roots: register + list (§8 A1, §11).", invoke_without_command=True)
+roots_app = typer.Typer(help="Manage roots: register + list.", invoke_without_command=True)
 app.add_typer(roots_app, name="roots")
 
-trash_app = typer.Typer(help="Trash memory: refresh the trash folders (§6.1).")
+trash_app = typer.Typer(help="Trash memory: refresh the trash folders.")
 app.add_typer(trash_app, name="trash")
 
-jobs_app = typer.Typer(help="Jobs: list, cancel, prioritize (§3, §11).", invoke_without_command=True)
+jobs_app = typer.Typer(help="Jobs: list, cancel, prioritize.", invoke_without_command=True)
 app.add_typer(jobs_app, name="jobs")
 
 # Dev-only commands are registered ONLY in a dev build (source checkout or
@@ -101,7 +101,7 @@ def _force_kill_orphan(*, reason: str) -> bool:
 
 @daemon_app.command("stop")
 def daemon_stop():
-    """Graceful shutdown: an in-flight job is left `interrupted` (resumable), not cancelled (§3).
+    """Graceful shutdown: an in-flight job is left `interrupted` (resumable), not cancelled.
 
     Self-heals a stale token: if the daemon is up but rejects our token (an orphan from
     a since-deleted PACKRAT_HOME), it is force-stopped by its fixed port instead of
@@ -135,12 +135,12 @@ def daemon_stop():
 def daemon_restart():
     """Stop the running daemon (if any) and start a fresh one.
 
-    Useful after upgrading packrat so the daemon picks up new code (§9.2 config is
+    Useful after upgrading packrat so the daemon picks up new code (config is
     reloaded per job, but the *code* only changes on restart). A graceful stop
     leaves any in-flight job `interrupted` (resumable) — re-run its command to
-    resume it (§3). Because the daemon holds a fixed-port single-instance lock
-    (§3), we wait for the old one to release the port before spawning the new one,
-    so the replacement can bind.
+    resume it. Because the daemon holds a fixed-port single-instance lock, we wait
+    for the old one to release the port before spawning the new one, so the
+    replacement can bind.
     """
     client = DaemonClient()
     if client.is_up():
@@ -226,7 +226,7 @@ def status(
     root: Optional[str] = typer.Argument(None, help="A registered root (path/--name) for its detail."),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ):
-    """Print collection state (read-only, never blocked by a running job, §11)."""
+    """Print collection state (read-only, never blocked by a running job)."""
     client = _client_or_spawn()
     if root:
         try:
@@ -305,14 +305,14 @@ def status(
 
 @roots_app.callback(invoke_without_command=True)
 def _roots_root(ctx: typer.Context):
-    """Bare ``packrat roots`` is an alias for ``packrat roots list`` (§11)."""
+    """Bare ``packrat roots`` is an alias for ``packrat roots list``."""
     if ctx.invoked_subcommand is None:
         _roots_list(json_out=False)
 
 
 @roots_app.command("list")
 def roots_list(json_out: bool = typer.Option(False, "--json")):
-    """List registered roots (read-only, §11)."""
+    """List registered roots (read-only)."""
     _roots_list(json_out=json_out)
 
 
@@ -339,14 +339,14 @@ def roots_register(
     path: str = typer.Argument(..., help="Folder to register as a root."),
     name: Optional[str] = typer.Option(None, "--name", help="Root handle; must be globally unique."),
     kind: str = typer.Option("library", "--kind", help="library|trash."),
-    ignore: List[str] = typer.Option([], "--ignore", help="Extra ignore glob (repeatable, §8 A1)."),
+    ignore: List[str] = typer.Option([], "--ignore", help="Extra ignore glob (repeatable)."),
     scan: bool = typer.Option(False, "--scan", help="After registering, immediately scan the root."),
     full: bool = typer.Option(False, "--full", help="With --scan, do a full (re-fingerprint) scan."),
     embed: bool = typer.Option(False, "--embed", help="With --scan, also run the CLIP pass (implies --scan; M7)."),
     detach: bool = typer.Option(False, "--detach", help="With --scan, submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Declare a folder as a root (metadata-only, instantaneous, §8 A1)."""
+    """Declare a folder as a root (metadata-only, instantaneous)."""
     client = _client_or_spawn()
     do_scan = scan or embed  # --embed implies --scan (§8 A1)
     try:
@@ -377,14 +377,14 @@ def _jobs_root(
     limit: int = typer.Option(20, "--limit"),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Bare ``packrat jobs`` lists recent runs (alias for ``packrat jobs list``, §11)."""
+    """Bare ``packrat jobs`` lists recent runs (alias for ``packrat jobs list``)."""
     if ctx.invoked_subcommand is None:
         _jobs_list(limit=limit, json_out=json_out)
 
 
 @jobs_app.command("list")
 def jobs_list(limit: int = typer.Option(20, "--limit"), json_out: bool = typer.Option(False, "--json")):
-    """List recent job runs (read-only, §11)."""
+    """List recent job runs (read-only)."""
     _jobs_list(limit=limit, json_out=json_out)
 
 
@@ -422,11 +422,11 @@ def jobs_cancel(
     job_id: Optional[int] = typer.Argument(
         None, help="Job id to cancel. Omit to cancel the currently-running job."),
 ):
-    """Cancel a job (§3, §11). With no id, cancels the currently-running job.
+    """Cancel a job. With no id, cancels the currently-running job.
 
-    Only one mutating job runs at a time (§3 guarantee 1), so **no id is needed** to
-    stop the running one — ``packrat jobs cancel`` targets it. Pass an explicit id to
-    cancel a specific job (e.g. a *queued* one).
+    Only one mutating job runs at a time, so **no id is needed** to stop the running
+    one — ``packrat jobs cancel`` targets it. Pass an explicit id to cancel a specific
+    job (e.g. a *queued* one).
 
     A **running** job gets a cooperative stop at its next checkpoint (lands
     ``cancelled``; for merge/review this discards the resumable plan). A **queued** job
@@ -448,7 +448,7 @@ def jobs_cancel(
 def jobs_prioritize(
     job_id: int = typer.Argument(..., help="Queued job id to move to the front of the queue."),
 ):
-    """Move a queued job to the front of the queue (§3, §11).
+    """Move a queued job to the front of the queue.
 
     Bumps the job ahead of every other queued job, so it runs **next** when the worker
     frees. If its owned root is held (a pending review / open merge), it stays at the
@@ -469,13 +469,13 @@ def scan(
     path: Optional[str] = typer.Argument(None, help="A registered root (path or --name). Omit with --all."),
     all_roots: bool = typer.Option(False, "--all", help="Scan every enabled root."),
     full: bool = typer.Option(False, "--full", help="Ignore the fast-path; re-fingerprint everything."),
-    embed: bool = typer.Option(False, "--embed", help="Also compute CLIP embeddings (§7; deferred to M7)."),
+    embed: bool = typer.Option(False, "--embed", help="Also compute CLIP embeddings (deferred to M7)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Enumerate + report what would be indexed; write nothing."),
-    profile: bool = typer.Option(False, "--profile", help="Report where time went: NAS transfer vs CPU vs decode (§10.1)."),
+    profile: bool = typer.Option(False, "--profile", help="Report where time went: NAS transfer vs CPU vs decode."),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Walk a registered root and fingerprint new/changed files (resumable, §8 A2)."""
+    """Walk a registered root and fingerprint new/changed files (resumable)."""
     if not all_roots and not path:
         typer.echo("scan needs a <root> path/name, or --all.", err=True)
         raise typer.Exit(2)
@@ -517,7 +517,7 @@ def dedup(
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Dedup one folder as a 3-stage sequence: analyze → --confirm (auto-advances) (§8 B).
+    """Dedup one folder as a 3-stage sequence: analyze → --confirm (auto-advances).
 
     Stages, one at a time under `<root>\\_packrat_review\\`: 1 `_exact_dup_to_delete\\`
     (default DELETE — remove a shortcut to SPARE), 2 `_suspect_recompression\\` and
@@ -562,7 +562,7 @@ def merge(
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    r"""Copy into <dest> only the files new to the whole collection, by exact hash (§8 C).
+    r"""Copy into <dest> only the files new to the whole collection, by exact hash.
 
     `merge <source> --into <dest>`: refresh the trash collection → classify each source
     file by exact hash (dup-in-source / trashed / exact-known / new) → copy the `new`
@@ -571,7 +571,7 @@ def merge(
     afterward. One shot; resumable from its plan on crash.
 
     `--dry-run` previews the classification counts without copying — but still refreshes
-    and empties the trash collection for real (§6.1).
+    and empties the trash collection for real.
     """
     client = _client_or_spawn()
     label = "merge --dry-run" if dry_run else "merge"
@@ -596,9 +596,9 @@ def merge(
 @app.command("cleanup")
 def cleanup(
     folder: str = typer.Argument(..., help="A registered library root to clean (path or --name)."),
-    trash_exact: bool = typer.Option(False, "--trash-exact", help="Delete files that are byte-identical to trashed content (§6.2)."),
-    trash_perceptual: bool = typer.Option(False, "--trash-perceptual", help="Stage recompressed-trash matches for review; also deletes exact matches (§6.2)."),
-    undecodable: bool = typer.Option(False, "--undecodable", help="Delete the folder's undecodable files + mark them trashed (§9.1)."),
+    trash_exact: bool = typer.Option(False, "--trash-exact", help="Delete files that are byte-identical to trashed content."),
+    trash_perceptual: bool = typer.Option(False, "--trash-perceptual", help="Stage recompressed-trash matches for review; also deletes exact matches."),
+    undecodable: bool = typer.Option(False, "--undecodable", help="Delete the folder's undecodable files + mark them trashed."),
     confirm: bool = typer.Option(False, "--confirm", help="Apply a pending --trash-perceptual run (exact + still-staged perceptual)."),
     cancel: bool = typer.Option(False, "--cancel", help="Discard the pending --trash-perceptual run; delete nothing."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be deleted/staged; delete nothing (trash modes still refresh trash)."),
@@ -614,10 +614,10 @@ def cleanup(
       `<root>\_packrat_review\_perceptually_identified_trash\` for review (delete-default:
       a staged shortcut WILL be deleted — remove it to spare), then `--confirm`/`--cancel`.
       Deletes exact matches too, at confirm.
-    - `--undecodable`: files whose pixels won't decode (§9.1); deletes them and marks each
+    - `--undecodable`: files whose pixels won't decode; deletes them and marks each
       asset trashed. Count → typed confirm → delete. Does not touch the trashed set.
 
-    Trash modes refresh the trash collection for real, even under `--dry-run` (§6.1).
+    Trash modes refresh the trash collection for real, even under `--dry-run`.
     """
     # --confirm/--cancel act on the pending perceptual run (no mode needed, like dedup).
     if confirm and cancel:
@@ -709,11 +709,11 @@ def trash_refresh(
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    r"""Absorb whatever is in the registered trash folders into trash memory, then empty them (§6.1).
+    r"""Absorb whatever is in the registered trash folders into trash memory, then empty them.
 
     Fingerprints each trash-folder file, records/flips its asset to `trashed` (kept
-    forever), and moves the file to the Recycle Bin (permanent on NAS/SMB, §10). No
-    `--dry-run` — refresh is never a no-op (§6.1); browse the folders in Explorer first
+    forever), and moves the file to the Recycle Bin (permanent on NAS/SMB). No
+    `--dry-run` — refresh is never a no-op; browse the folders in Explorer first
     to preview.
     """
     client = _client_or_spawn()
@@ -742,7 +742,7 @@ def untrash(
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Forget content from the trashed-hash set so it's no longer excluded from merges (§6.3).
+    """Forget content from the trashed-hash set so it's no longer excluded from merges.
 
     You present the file (packrat stores no pixels to preview); untrash hashes it and
     matches by exact content hash. It does NOT restore bytes (that's the Recycle Bin)
@@ -805,7 +805,7 @@ def smoke_test(
     ),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Run the §9.1 decode→hash→perceptual→embed smoke test over sample files.
+    """Run the decode→hash→perceptual→embed smoke test over sample files.
 
     With no argument, reports which deps are available. Pass a folder of samples
     to run the full path, or --generate to synthesize samples first (RAW formats
@@ -818,27 +818,27 @@ def smoke_test(
 
 
 # ---------------------------------------------------------------------------
-# no-args → TUI (M6). For M0, print a status-y placeholder.
+# no-args → TUI (M6, §12) — the default face of the tool.
 # ---------------------------------------------------------------------------
 @app.callback(invoke_without_command=True)
-def _root(ctx: typer.Context, version: bool = typer.Option(False, "--version")):
+def _root(
+    ctx: typer.Context,
+    version: bool = typer.Option(False, "--version"),
+    offline: bool = typer.Option(
+        False, "--offline",
+        help="Run the TUI on sample data (no daemon) — a demo/preview mode."),
+):
     if version:
         typer.echo(f"packrat {__version__}")
         raise typer.Exit(0)
     if ctx.invoked_subcommand is not None:
         return
-    # No subcommand: the full TUI is M6 (§12). Until then, show a quick status.
-    typer.echo(f"packrat {__version__} — the TUI (no-args entrypoint) lands in M6.")
-    typer.echo("meanwhile: `packrat roots`, `packrat scan <root>`, `packrat status`, `packrat jobs`.")
-    try:
-        client = DaemonClient()
-        if client.is_up():
-            snap = client.status()
-            typer.echo(f"\n· {snap['assets']} assets hoarded · daemon ● up ·")
-        else:
-            typer.echo("\n· daemon ○ down (auto-spawns on first use) ·")
-    except DaemonNotRunning:
-        pass
+    # No subcommand → launch the TUI (§12). It auto-spawns the daemon (like every
+    # other verb) and renders a `daemon ○ down` state rather than crashing if it
+    # can't reach one; `--offline` renders bundled sample data with no daemon.
+    from ..tui.app import run as run_tui
+
+    run_tui(offline=offline)
 
 
 # ---------------------------------------------------------------------------

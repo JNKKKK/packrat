@@ -187,21 +187,21 @@ DEFAULT_CONFIG_TOML = """\
 # Missing keys fall back to the built-in default; unknown keys are ignored (logged).
 
 [allowlist]
-# Media extensions that become assets (§8 A1). Photo + video are the fixed default set.
+# Media extensions that become assets. Photo + video are the fixed default set.
 raw = false            # include the RAW group (dng cr2 cr3 nef arw raf orf rw2 pef srw); needs rawpy
-# photo/video extension lists are editable here too, but default to the §8 A1 closed sets.
+# photo/video extension lists are editable here too, but default to the closed sets.
 
 [fastpath]
-mtime_tolerance_s = 2  # tolerant-mtime skip window (§8 A2 step 4); 0 = strict path+size+mtime
+mtime_tolerance_s = 2  # tolerant-mtime skip window; 0 = strict path+size+mtime
 
 [match]
-t_photo_recompress = 10  # photo PDQ cutoff for dedup stage 2 (recompression band, §5.3/§8 B); tight
-t_photo_edit       = 32  # photo PDQ match cutoff (§5.3); recompress < d ≤ edit → dedup stage 3 (minor edit)
-t_match_video      = 90  # per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision
+t_photo_recompress = 10  # photo PDQ cutoff for dedup stage 2 (recompression band); tight
+t_photo_edit       = 32  # photo PDQ match cutoff; recompress < d ≤ edit → dedup stage 3 (minor edit)
+t_match_video      = 90  # per-frame PDQ cutoff for video; looser, the frame vote reclaims precision
 pdq_max_edge       = 512 # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
-video_bitrate_tie_pct = 10.0  # video keep-lead (§8 B): effective-bitrates within this % tie → codec then path decide
+video_bitrate_tie_pct = 10.0  # video keep-lead: effective-bitrates within this % tie → codec then path decide
 
-# Codec-efficiency weights for the video keep-lead's effective bitrate (§8 B): size/duration × weight.
+# Codec-efficiency weights for the video keep-lead's effective bitrate: size/duration × weight.
 # A more-efficient codec's bits are worth more (higher weight), so an HEVC master beats an H.264
 # re-export at equal resolution. Unknown/missing codec → 1.0. Override only the ones you care about;
 # unlisted codecs keep their built-in default. (H.265 == HEVC.)
@@ -213,25 +213,25 @@ vp9  = 1.5
 mpeg4 = 0.5
 
 [video]
-sample_frames        = 12    # frames sampled per video, at segment midpoints (§5.3)
-duration_tol_s       = 1.0   # duration pre-filter: absolute floor (§5.3)
+sample_frames        = 12    # frames sampled per video, at segment midpoints
+duration_tol_s       = 1.0   # duration pre-filter: absolute floor
 duration_tol_pct     = 5.0   # duration pre-filter: relative part (percent)
 frame_match_fraction = 0.60  # >= this fraction of comparable frame-pairs must match
 min_frame_quality    = 50    # PDQ quality gate; frames below are excluded from the vote
 min_comparable_frames = 5    # fewer comparable pairs than this -> no match (insufficient evidence)
 
 [review]
-low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_confidence (§5.3, annotate-only)
+low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_confidence (annotate-only)
 
 [smb]
-scan_workers = 6       # video-path + fallback concurrency (§10.1); 4-8 typical
-io_workers   = 0        # PHOTO pipeline: file-reader threads (0 = auto 4-8, SMB sweet spot §10.1)
+scan_workers = 6       # video-path + fallback concurrency; 4-8 typical
+io_workers   = 0        # PHOTO pipeline: file-reader threads (0 = auto 4-8, SMB sweet spot)
 cpu_workers  = 0        # PHOTO pipeline: hash+decode+pdq threads (0 = auto cores-2)
 photo_buffer_budget_bytes = 1073741824  # RAM budget for in-flight photo buffers (1 GB)
 photo_buffer_max_bytes    = 134217728   # photos above this bypass buffering (stream, 128 MB)
 
 [audit]
-retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune older (deferred knob, §14 #5)
+retention_days = 0     # 0 = keep review audits forever; >0 = prune older (deferred knob)
 """
 
 

@@ -137,11 +137,20 @@ def roots_snapshot() -> list[dict]:
     """Per-root list (§11): id, name, path, kind, enabled, asset count, scan recency.
 
     ``instance_count`` counts physical files; ``asset_count`` distinct content in
-    the root. ``last_full_scan_at`` is stamped only by ``scan --full`` (§8 A2 step
-    11); a plain incremental scan does not move it. ``last_scan_at`` is the general
-    scan recency — ``MAX(file_instances.last_seen_at)``, bumped by *every* scan
-    (incremental or full) on every present file (§8 A2 step 4/9), so it answers
-    "when was this root last scanned" without a schema column.
+    the root. ``photos``/``videos`` split ``asset_count`` by media type (distinct
+    assets, same as ``root_detail``) — they back the M6 Roots ``[s]`` sort cycle.
+    ``last_full_scan_at`` is stamped only by ``scan --full`` (§8 A2 step 11); a plain
+    incremental scan does not move it. ``last_scan_at`` is the general scan recency —
+    ``MAX(file_instances.last_seen_at)``, bumped by *every* scan (incremental or full)
+    on every present file (§8 A2 step 4/9), so it answers "when was this root last
+    scanned" without a schema column. ``last_dedup_at`` is the newest *successful*
+    dedup (the same all-stages-or-already-clean ``completed`` rule as ``root_detail``
+    / §11, via :func:`_last_completed_at`) — it drives the M6 ◉/◐/○ status dot
+    (``last_scan_at`` + ``last_dedup_at`` → deduped / scanned-only / never).
+
+    Order is ``r.id`` ascending (registration order) — unchanged, since this also
+    backs ``packrat status``/``roots list``; the TUI sorts client-side over the
+    snapshot (M6 Roots §2), so no server-side reorder is needed.
     """
     conn = _ro()
     try:
@@ -149,13 +158,27 @@ def roots_snapshot() -> list[dict]:
             "SELECT r.id, r.name, r.path, r.kind, r.enabled, r.last_full_scan_at, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
             "   WHERE fi.root_id = r.id) AS asset_count, "
+            "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
+            "   JOIN assets a ON a.id = fi.asset_id "
+            "   WHERE fi.root_id = r.id AND a.media_type='photo') AS photos, "
+            "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
+            "   JOIN assets a ON a.id = fi.asset_id "
+            "   WHERE fi.root_id = r.id AND a.media_type='video') AS videos, "
             "  (SELECT COUNT(*) FROM file_instances fi WHERE fi.root_id = r.id) "
             "   AS instance_count, "
             "  (SELECT MAX(fi.last_seen_at) FROM file_instances fi "
             "   WHERE fi.root_id = r.id) AS last_scan_at "
             "FROM roots r ORDER BY r.id"
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            # Newest successful dedup — same 'completed' success rule as root_detail
+            # (§11), so the TUI dot never disagrees with the detail view. Trash roots
+            # are never deduped, so this stays NULL for them (→ they render no dot).
+            d["last_dedup_at"] = _last_completed_at(conn, r["id"], "dedup")
+            out.append(d)
+        return out
     finally:
         conn.close()
 
