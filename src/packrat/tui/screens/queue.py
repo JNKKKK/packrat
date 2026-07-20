@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from .. import render
 from ..data import reltime
-from ..layout import fit, pager_line
-from ..tokens import CURSOR, CW, RUNNING
+from ..geometry import REFERENCE, Geometry
+from ..layout import Cell, fit, pager_line, row
+from ..tokens import CURSOR, RUNNING
 
-# Per-section content-row budgets (fit the fixed frame: 1+1 running, 1+6+1 queued,
-# 1+6+1 recent, + blanks = 20 rows, ≤ the 21 content rows screen() allows).
+# Reference per-section budgets (fit the 24-row frame: 1+1 running, 1+6+1 queued,
+# 1+6+1 recent, + blanks = 20 rows, ≤ the 21 content rows). Live budgets come from
+# Geometry (split the vertical surplus between Queued and Recent).
 QUEUED_ROWS = 6
 RECENT_ROWS = 6
 
@@ -49,11 +51,16 @@ def _header(label: str, key: str, focused: bool) -> str:
 
 
 def queue_body(running: dict | None, queued: list[dict], recent: list[dict],
-               *, now: str, focus: str = "queued",
+               *, now: str, geo: Geometry = REFERENCE, focus: str = "queued",
                queued_cursor: int = 0, queued_page: int = 0,
                recent_cursor: int = 0, recent_page: int = 0,
                running_cursor: int = 0) -> list[str]:
-    """Build the §4 body — three fixed-height sections, each independently paged."""
+    """Build the §4 body — three fixed-height sections, each independently paged.
+
+    ``geo`` sizes each section's window (Queued/Recent grow on a taller terminal)
+    and the paginator width. Rows lay out to ``geo``'s content width."""
+    q_rows, r_rows = geo.queued_rows, geo.recent_rows
+    w = geo.content_w
     lines: list[str] = []
 
     # -- Running (≤1 job; no paging) --
@@ -61,28 +68,35 @@ def queue_body(running: dict | None, queued: list[dict], recent: list[dict],
     lines.append(_header("[R]unning:", "r", run_focused))
     if running:
         cur = CURSOR if run_focused else " "
-        lines.append(_running_line(running, cur))
+        lines.append(_running_line(running, cur, w))
     else:
         lines.append("  (nothing running)")
     lines.append("")
 
-    # -- Queued (own window + paginator) --
+    # -- Queued (paginator sits on the header line, right-aligned) --
     q_focused = focus == "queued"
-    lines.append(_header("[Q]ueued (runs top-down):", "q", q_focused))
-    lines += _window(queued, QUEUED_ROWS, queued_page, queued_cursor, q_focused,
-                     lambda j, c: _queued_line(j, c), empty="  (backlog empty)")
-    lines.append(pager_line(CW - 2, min(queued_page, section_pages(len(queued), QUEUED_ROWS) - 1) + 1,
-                            section_pages(len(queued), QUEUED_ROWS)))
+    q_pages = section_pages(len(queued), q_rows)
+    lines.append(_header_line("[Q]ueued (runs top-down):", q_focused, w,
+                              min(queued_page, q_pages - 1) + 1, q_pages))
+    lines += _window(queued, q_rows, queued_page, queued_cursor, q_focused,
+                     lambda j, c: _queued_line(j, c, w), empty="  (backlog empty)")
     lines.append("")
 
-    # -- Recent (own window + paginator) --
+    # -- Recent (paginator sits on the header line, right-aligned) --
     r_focused = focus == "recent"
-    lines.append(_header("Rec[e]nt:", "e", r_focused))
-    lines += _window(recent, RECENT_ROWS, recent_page, recent_cursor, r_focused,
-                     lambda j, c: _recent_line(j, now, c), empty="  (no recent jobs)")
-    lines.append(pager_line(CW - 2, min(recent_page, section_pages(len(recent), RECENT_ROWS) - 1) + 1,
-                            section_pages(len(recent), RECENT_ROWS)))
+    r_pages = section_pages(len(recent), r_rows)
+    lines.append(_header_line("Rec[e]nt:", r_focused, w,
+                              min(recent_page, r_pages - 1) + 1, r_pages))
+    lines += _window(recent, r_rows, recent_page, recent_cursor, r_focused,
+                     lambda j, c: _recent_line(j, now, c, w), empty="  (no recent jobs)")
     return lines
+
+
+def _header_line(label: str, focused: bool, width: int, cur_page: int, total: int) -> str:
+    """A section header with its ``page i/N`` right-aligned on the same line (§4)."""
+    header = _header(label, "", focused)
+    return row(width, [Cell(header, grow=1), Cell(f"page {cur_page}/{total}", align="right")],
+               gap=2)
 
 
 def _window(jobs, budget, page, cursor, focused, line_fn, *, empty):
@@ -103,28 +117,38 @@ def focused_header_text(focus: str) -> str:
     }.get(focus, "")
 
 
-def _running_line(job: dict, cur: str = " ") -> str:
-    # Percent/counts/ETA inline (no bar glyphs — the bar is the dashboard/card).
+def _running_line(job: dict, cur: str = " ", width: int = 96) -> str:
+    # Label grows; percent/counts/ETA + "running" sit at the right end.
     pct = ""
     if job.get("total"):
         pct = f"{int(100 * (job.get('done') or 0) / job['total'])}% {job['done']:,}/{job['total']:,}"
         eta = render.fmt_eta(job.get("_eta_s"))
         pct = f"{pct} {eta}".strip()
-    return f"{cur}{RUNNING} #{job['id']} {job.get('label', job['type'])}   {pct}  running"
+    left = f"{cur}{RUNNING} #{job['id']} {job.get('label', job['type'])}"
+    right = f"{pct}  running".strip()
+    return row(width, [Cell(left, grow=1, elide="end"),
+                       Cell(right, align="right", style="running")], gap=2).rstrip()
 
 
-def _queued_line(job: dict, cur: str = " ") -> str:
+def _queued_line(job: dict, cur: str = " ", width: int = 96) -> str:
     note = render.job_status_note(job)
-    return f"{cur} #{job['id']} {job.get('label', job['type']):<28} {note}"
+    left = f"{cur} #{job['id']} {job.get('label', job['type'])}"
+    return row(width, [Cell(left, grow=1, elide="end"),
+                       Cell(note, align="right", style="dim")], gap=2).rstrip()
 
 
-def _recent_line(job: dict, now: str, cur: str = " ") -> str:
+def _recent_line(job: dict, now: str, cur: str = " ", width: int = 96) -> str:
     when = reltime(job.get("finished_at") or job.get("started_at"), now,
                    clock=(job.get("finished_at") or "")[:10] == (now or "")[:10])
     summ = _summary(job)
     status = job.get("status", "")
-    tail = f"{status}   {summ}".strip()
-    return f"{cur} #{job['id']} {job.get('label', job['type']):<26} {tail}  {when}"
+    left = f"{cur} #{job['id']} {job.get('label', job['type'])}"
+    mid = f"{status}   {summ}".strip()
+    # label grows; outcome summary + age pinned to the right (age last, 13 cells so
+    # "today HH:MM" fits without eliding to "today 11:...").
+    return row(width, [Cell(left, grow=2, elide="end"),
+                       Cell(mid, grow=3, elide="end"),
+                       Cell(when, width=13, align="right", style="dim")], gap=2).rstrip()
 
 
 def _summary(job: dict) -> str:

@@ -1,17 +1,12 @@
-/* packrat TUI stylesheet (M6, §12).
+/* packrat TUI stylesheet (M6).
  *
- * The ONE stylesheet: a fixed root container (§12 — the window size never changes
- * across interfaces) and text/borders colored by semantic ROLE via CSS variables
- * that mirror packrat.tui.tokens.DEFAULT_THEME (a color changes in one place).
- *
- * The app renders each interface as a single pre-composed 100×24 Static (all
- * geometry is done in the pure layout layer), so this file's job is only: pin the
- * canvas size, center it as margin on a larger terminal, and expose the role
- * colors. It is deliberately minimal (component-plan Non-goals: theming is a
- * closed role set, not an open framework). */
+ * The ONE stylesheet: the app frame now fills the whole terminal (responsive,
+ * Level B) and text/borders are colored by semantic ROLE. The frame is a single
+ * pre-composed Static whose text is laid out (by packrat.tui.geometry) to the live
+ * terminal size, so this file just makes the Static fill the screen and exposes the
+ * background. Deliberately minimal (component-plan Non-goals: closed role set). */
 
 Screen {
-    align: center middle;    /* extra terminal space is margin (§12), not reflow */
     background: ansi_default; /* emit NO background escape → the terminal's own
                               /* background (Windows Terminal acrylic/"glass")
                               /* shows through. `transparent` does NOT do this —
@@ -20,12 +15,11 @@ Screen {
                               /* bg code so the real terminal background shows. */
 }
 
-/* The fixed canvas: exactly W×H cells, never resized or reflowed. The box
- * interior is ansi_default too (full-glass look), so the acrylic shows through
- * the whole UI, not just the margin. */
+/* The canvas fills the whole terminal (responsive); the composed frame text is
+ * sized to that by Geometry, so the border always hugs the terminal edges. */
 #frame {
-    width: 100;
-    height: 24;
+    width: 100%;
+    height: 100%;
     content-align: left top;
     background: ansi_default;
 }

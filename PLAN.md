@@ -2513,52 +2513,83 @@ is not part of the user-facing surface documented here.
 
 ## 12. TUI (`packrat` with no arguments)
 
-Typing `packrat` alone opens a full-screen terminal UI (Textual). It is the **default face** of
-the tool and, because jobs live in the daemon, a **live window onto work started from any
-terminal** — open it anytime to watch progress or stop a running job. It never *owns* a job; it
-submits, observes, and cancels, exactly like the CLI (design tenet §1.6).
+Typing `packrat` alone opens a full-terminal UI (Textual). It is the **default face** of the tool
+and, because jobs live in the daemon, a **live window onto work started from any terminal** — open it
+anytime to watch progress or stop a running job. It never *owns* a job; it submits, observes, and
+cancels, exactly like the CLI (design tenet §1.6). `packrat --offline` runs the same UI on a bundled
+sample dataset (no daemon) for demoing/development.
 
-**The full TUI design lives in [`docs/M6-tui-mockups.md`](docs/M6-tui-mockups.md)** — the
-authoritative spec, kept there so it can carry ASCII mockups of every interface **generated into an
-identical fixed 100×24 frame** (via `docs/_tui_mockup_gen.py`) that *mechanically demonstrate* the
-fixed-layout requirement. That document covers: every interface (dashboard, maximized Roots/Queue,
-root detail, the merge-from picker, and the job result cards); each panel's data source + interaction;
-the `type` + `params` → **job-label** map; the per-`op` **`result_json`** card shapes; and the
-cross-cutting behavior (live SSE + job-finished refresh, TUI-side ETA, keyboard-first navigation with
-`←/→` paging, observe-and-control, and the fixed-100×24 layout rules).
+### 12.1 Interfaces
 
-**Key invariants this section pins (elaborated in the mockups doc):**
-- **Fixed layout (hard requirement).** Every interface renders in the **same fixed 100×24 region**;
-  navigation **swaps content in place — never grows, shrinks, or reflows the outer frame**. Long lists
-  scroll *within* their panel; long paths **middle-elide** in compact rows and **wrap** in detail/card
-  views (full path always shown in root detail). Extra terminal space is margin — no responsive
-  reflow in v1. (Textual: a fixed-size root container, not auto-sizing widgets.)
-- **Read-safe & CLI-complete (§1.6).** Everything the TUI does maps to an existing CLI verb; it issues
-  no privileged operation of its own and there is **no TUI-only action** — both are thin clients over
-  the same daemon API (§3). The CLI is the authoritative surface every capability lands on first.
+- **Dashboard** (default): three stacked full-width sections — the packrat logo + live "N assets
+  hoarded" line beside the **Collection** stats box (total/photo/video/trashed + last-scan recency);
+  the **Roots** box (name, path, `◉/◐/○` freshness dot, asset count); and the **Queue** box (the
+  running job's live bar + the queued backlog preview). `[r]`/`[q]` focus the Roots/Queue box (heavy
+  accent-colored frame + `▸` cursor); pressing the same key again **maximizes** into the full Roots /
+  Queue interface.
+- **Roots interface** (maximized): the full root list with a `[s]` **sort cycle** (recent /
+  most-assets / photos / videos, client-side over the id-ascending snapshot), `[a]` **add-root form**
+  (§2.2 register flow — Tab between fields, radios/checkboxes, paste-aware path input), `[Enter]` opens
+  root detail. Dot legend + `page i/N` share the header line.
+- **Root detail** (§3): counts + scan/dedup recency, the pending-review banner (⚠ awaiting review, or
+  "No pending review"), and the per-root **jobs history** (paginated, pager on the "Jobs" header line).
+  Actions map to CLI verbs: `[s]` scan, `[d]` dedup, `[m]` **merge-from picker** (§3.3 — radio between
+  a paginated registered-root list and a typed external-folder path, `Ctrl+D` dry-run toggle),
+  `[c]` cleanup (choice modal: exact / perceptual / undecodable), and `[o]`/`[g]`/`[k]` on a pending
+  review (open Explorer / `--confirm` / `--cancel`).
+- **Queue interface** (§4): three independently-paged sections — **Running**, **Queued** (with blocked
+  reasons), **Recent** — with per-section focus (`[r]`/`[q]`/`[e]`), `[c]` cancel, `[p]` prioritize,
+  `[x]` cancel-all, `[Enter]` result card.
+- **Job result/detail card** (§5): renders from `jobs.result_json`, keyed off `status` first then `op`;
+  a running job shows the live SSE bar and swaps to its terminal card on completion; error/interrupted
+  render from `status` + `error` (NULL `result_json` tolerated).
+
+### 12.2 Architecture (how it's built)
+
+A **pure render core + thin Textual widgets** (`src/packrat/tui/`): `tokens` (sizes, glyphs, color
+roles, `Theme`), `layout` (CJK-aware `row`/`fit`/`middle_elide` with a `cell_width(row)==width`
+invariant), `geometry` (terminal size → layout budgets), `framing` (frame/box composition), `render` +
+`screens/*` (pure `dict → line` builders), `data` (the `DataSource` liveness seam), `nav`, `colorize`,
+`modals`. The pure layers import **without** Textual and are tested as plain strings; the Textual
+screens each display one pre-composed frame and own only key routing / focus / liveness.
+
+**Key invariants:**
+- **Full-terminal responsive layout.** The frame fills the whole terminal and reflows via a **surplus
+  model** — every width/height budget is `reference + surplus` over a 100×24 minimum, so flexible
+  columns and lists grow on a larger terminal (assumes ≥100×24; no min-size handling). Long paths
+  **middle-elide** in compact rows (drive + leaf kept) and grow when there's room; hint bars **wrap**
+  to a second line rather than truncate. CJK/wide characters are measured as 2 cells so alignment holds.
+- **Read-safe & CLI-complete (§1.6).** Every TUI action maps to an existing CLI verb / daemon submit;
+  it issues no privileged operation of its own and there is **no TUI-only action** — both are thin
+  clients over the same daemon API (§3). The CLI is the authoritative surface every capability lands on
+  first.
 - **Every job is show-able.** Each job writes a uniform `jobs.result_json` at terminal time whatever
-  its outcome (§4), so history and the result card always render — the data contract the TUI depends
-  on; the CLI's `status` surfaces the actionable slice of the same rows (§11).
+  its outcome (§4), so history and the result card always render; the CLI's `status` surfaces the
+  actionable slice of the same rows (§11).
+- **Live.** Queue/running views subscribe to the running job's **SSE stream**; snapshots poll on a
+  light timer and re-fetch immediately on the job-finished event. **ETA is computed TUI-side** from the
+  observed rate. Keyboard-first: `↑/↓` select, `←/→` page, `Enter` drills in, `Esc` backs out (and
+  quits at the dashboard), `Ctrl+Q` quits anywhere. `Ctrl+C` is left unbound so the terminal's
+  copy shortcut works.
 
-**M6 depends on two M0-runtime additions** this section assumes: the durable FIFO **queue** and
-per-job **`root_id`/`result_json`** columns (§3/§4). If that runtime work lands as its own step, M6 is
-a pure presentation layer on top of it. See also the M6 **component-library plan**
-([`docs/M6-component-plan.md`](docs/M6-component-plan.md)).
+M6 depends on two M0-runtime pieces (§3/§4): the durable FIFO **queue** and per-job
+**`root_id`/`result_json`** columns — so the TUI is a pure presentation layer on top of the runtime.
 
 ---
 
 ## 13. Build milestones (each independently useful)
 
-**What "v1" means (resolves the scope ambiguity):** **v1 = M0–M6** — the complete
-register/scan/dedup/trash/merge workflow plus the TUI, i.e. everything needed to hoard, dedup, and
-merge a real collection through Explorer. The "**(v1)**" qualifiers elsewhere (non-goals §1, the
-schema's deferred knobs §4) refer to this scope. **M7 (semantic embeddings) and M8 (hardening —
-scheduled scans, hnswlib, watchdog) are post-v1**; embeddings are opt-in infrastructure whose
-tagging behavior is still TBD (§7), and M8 is polish/scale, not core function. (Milestones are
-independently useful and need not ship strictly in order — e.g. M6 depends only on the M0 runtime —
-but v1 is considered done when M0–M6 are.)
+**Status: v1 (M0–M6) is DONE.** ✅ The complete register/scan/dedup/trash/merge workflow plus the
+TUI — everything needed to hoard, dedup, and merge a real collection through Explorer — is
+implemented. **M7 (semantic embeddings) and M8 (hardening) remain post-v1** and are not yet built.
 
-- **M0 — Skeleton + job runtime + decode smoke test**: repo layout, **`config.toml` (§9.2 —
+**What "v1" means (resolves the scope ambiguity):** **v1 = M0–M6**. The "**(v1)**" qualifiers
+elsewhere (non-goals §1, the schema's deferred knobs §4) refer to this scope. **M7 (semantic
+embeddings) and M8 (hardening — scheduled scans, hnswlib, watchdog) are post-v1**; embeddings are
+opt-in infrastructure whose tagging behavior is still TBD (§7), and M8 is polish/scale, not core
+function.
+
+- ✅ **M0 — Skeleton + job runtime + decode smoke test**: repo layout, **`config.toml` (§9.2 —
   auto-create-with-defaults + per-job reload)**, core library, SQLite schema; auto-spawned daemon
   with the **single-worker job queue** (submit / stream progress / cooperative-cancel; one job
   *runs* at a time with the rest waiting in a **durable backlog**, dequeued **runnable-first** so a
@@ -2569,14 +2600,14 @@ but v1 is considered done when M0–M6 are.)
   `--detach`, `daemon start/stop/status`. **Plus the §9.1 smoke test** — one real sample of every
   allowlisted extension (and the RAW group) run through decode→hash→perceptual→embed to resolve
   the ⚠ cells (AVIF, RAW/cr3, `pdqhash` Windows wheel) before building on them.
-- **M1 — Register + scan (exact identity)**: `roots register` (metadata-only root creation) and
+- ✅ **M1 — Register + scan (exact identity)**: `roots register` (metadata-only root creation) and
   `roots list`, then the `scan` job — walker, fast-path, BLAKE3, metadata, asset/file-instance
   model, exact byte-identity resolution (attach instances), deletion detection — plus `status`. No
   embeddings, no perceptual. Now the collection is known by exact hash.
-- **M2 — Perceptual signatures (scan)**: PDQ for both photos and video frames (+ quality) written
+- ✅ **M2 — Perceptual signatures (scan)**: PDQ for both photos and video frames (+ quality) written
   to `phash`/`vphash` during scan, with the §5.3 sampling/quality parameters. No pairwise matching
   yet — just the inputs. No GPU/CLIP. No `imagehash` dependency.
-- **M3 — Dedup operation**: single-folder `dedup` as a **3-stage sequence** — §5 matching engine
+- ✅ **M3 — Dedup operation**: single-folder `dedup` as a **3-stage sequence** — §5 matching engine
   over DB fingerprints + lazy liveness, `similarity_edges`/`review_runs`(+`stage`/`stage_phase`)/
   `review_actions`(+`stage`) tables, exact-dup resolution (stage 1: oldest-mtime internal /
   drop-on-external), perceptual banding into recompression (stage 2, + all video) and minor-edit
@@ -2585,26 +2616,26 @@ but v1 is considered done when M0–M6 are.)
   `--confirm` auto-advance, `--cancel`, `--dry-run`, and the §8.1 audit trail (`proposed.json` +
   `applied.json` in APPDATA). Builds the §5 perceptual matching engine (also reused by
   `cleanup --trash-perceptual`).
-- **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (§6.1 —
+- ✅ **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (§6.1 —
   index trash-folder files → record/flip assets to `trashed` → empty the folders), scan's refusal
   to index trash roots, `packrat cleanup` (mode-required: `--trash-exact` count-confirm removal;
   `--trash-perceptual` stateful staging of recompressed-trash matches for review — reuses the M3
   engine; `--undecodable` culls the folder's undecodable files + marks them trashed, §9.1), and
   `trash refresh`. Comes before merge because merge's headline value is excluding
   trashed-but-still-on-device content.
-- **M5 — Merge workflow**: `merge` — refresh-trash-first, exact-hash classification
+- ✅ **M5 — Merge workflow**: `merge` — refresh-trash-first, exact-hash classification
   (dup-in-source / trashed / exact-known / new; byte-identical collapse only), copy-only ingest
   of `new` files with hash-verify + register. No perceptual matching or review folder — simple and
   one-shot (resumable from its plan).
-- **M6 — TUI (`packrat` no-args)**: Textual app — packrat logo, global stats (total indexed
-  assets, per-root counts, trashed count), the **global work Queue** (running + durable FIFO
-  backlog, `↑/↓`-navigable, cancel a selected/all queued job, §3), a **per-root jobs list** (current
-  + history, `↑/↓`, selected via the Roots panel) with a **job result/detail view** (`[Enter]`), and
-  a menu to launch operations. The default entrypoint; a window onto daemon jobs started from any
-  terminal. **Assumes two M0-runtime additions** (§3/§4): the durable job **queue** and per-job
-  **`root_id`/`result_json`** columns — build them with M0's runtime (or as a small pre-M6 step) so
-  the TUI stays a pure presentation layer. (Otherwise depends only on the M0 runtime, so could land
-  earlier.)
+- ✅ **M6 — TUI (`packrat` no-args)**: full-terminal Textual app (§12) — dashboard (logo + Collection
+  stats + Roots + Queue), maximized Roots (sort cycle, add-root form, merge-from picker) and Queue
+  (three independently-paged sections), root detail with per-root job history + the scan/dedup/merge/
+  cleanup/review actions, and the per-`op` job result cards. Built as a **pure render core + thin
+  Textual widgets**: responsive full-terminal layout (surplus model over a 100×24 minimum), CJK-aware
+  width, role-based color on a transparent (acrylic-friendly) background, paste-aware path inputs, and
+  every action submitting a real daemon call (§1.6). The default entrypoint and a live window onto
+  daemon jobs from any terminal; `--offline` renders bundled sample data. Pure presentation over the
+  M0 runtime's durable **queue** + per-job **`root_id`/`result_json`** columns (§3/§4).
 - **M7 — Semantic embeddings**: opt-in `scan --embed` CLIP pass writing the `embeddings` table;
   brute-force cosine search scaffold. Tagging/classification behavior on top is **TBD** (§7).
 - **M8 — Hardening**: scheduled interval-scan triggers (APScheduler wiring in the daemon),

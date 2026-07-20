@@ -16,7 +16,7 @@ dependencies = [
     # TUI (M6, §12). The default face of the tool — `packrat` no-args launches it.
     # Pure-Python, no wheel risk; a lean core dep so the primary entrypoint always
     # installs. Renders the read-model snapshots + SSE stream the daemon already
-    # exposes; adds no backend (docs/M6-component-plan.md).
+    # exposes; adds no backend (PLAN §12).
     "textual>=0.60",
     # dedup/cleanup (M3+) staging + deletion. Windows-only: pywin32 gives the
     # IShellLink COM used to create Explorer-previewable .lnk shortcuts (§8 B

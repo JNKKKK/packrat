@@ -1,11 +1,10 @@
-"""Design tokens — the single source of truth for the M6 TUI (§12, component-plan).
+"""Design tokens — the single source of truth for the M6 TUI (§12).
 
-**Values only, no Textual import.** This module holds pure constants — the fixed
-window size, column widths, glyphs, semantic color *roles*, and the role→color
-:class:`Theme` table — so it is importable in a headless context (the mockup
-generator ``docs/_tui_mockup_gen.py`` pulls ``W``/``H`` + the glyphs/widths from
-here, guaranteeing the doc frames and the runtime can never drift on the numbers —
-component-plan Resolved #1). The ``.tcss`` stylesheet consumes the active theme's
+**Values only, no Textual import.** This module holds pure constants — the
+reference window size, column widths, glyphs, semantic color *roles*, and the
+role→color :class:`Theme` table — so it is importable headless. ``W``/``H`` are the
+*reference* (minimum) size the frame tests pin to; the live app scales up from it
+(:mod:`packrat.tui.geometry`). The ``.tcss`` stylesheet consumes the active theme's
 roles as Textual CSS variables, so a color changes in exactly one place.
 
 Nothing here depends on Textual; :mod:`packrat.tui.layout` (also pure) and the

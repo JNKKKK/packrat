@@ -1,21 +1,24 @@
-"""Pure frame/panel composition — the chrome vocabulary (component-plan §Chrome).
+"""Pure frame/panel composition — the chrome vocabulary.
 
-Extracted verbatim from ``docs/_tui_mockup_gen.py`` so the doc frames and the
-runtime widgets share **one** set of primitives (component-plan Why-build-it #2):
-``box`` (a bordered Panel — light or heavy), ``hjoin`` (side-by-side panels),
-and ``screen`` (the fixed W×H :class:`AppFrame`, footer pinned to the bottom).
+The primitives the whole TUI shares: ``box`` (a bordered panel — light or heavy),
+``hjoin`` (side-by-side panels), and ``screen`` (the outer W×H app frame with the
+title bar + a bottom-pinned footer). ``screen`` middle-elides an over-long right
+label (e.g. a root path) and measures by display cells so CJK titles stay aligned.
 
 All pure and colorless (they return plain strings / line lists), building on
-:mod:`packrat.tui.layout` (``fit_width`` == the generator's ``pad``) and the
-box glyphs + ``W``/``H``/``CW`` from :mod:`packrat.tui.tokens`. The Textual
-``Panel``/``AppFrame`` widgets wrap these by delegation — they never re-derive
-the box math (component-plan Resolved #2).
+:mod:`packrat.tui.layout` (``fit_width``/``cell_width``/``middle_elide``) and the
+box glyphs from :mod:`packrat.tui.tokens`. The Textual screens display these by
+delegation — they never re-derive the box math.
 """
 
 from __future__ import annotations
 
+from .layout import cell_width, middle_elide
 from .layout import fit_width as pad
-from .tokens import CW, H, HEAVY_BOX, LIGHT_BOX
+from .layout import wrap_hints
+from .tokens import CW as REF_CW
+from .tokens import H as REF_H
+from .tokens import HEAVY_BOX, LIGHT_BOX
 
 
 def box(title: str, lines: list[str], width: int, right: str = "", heavy: bool = False) -> list[str]:
@@ -45,24 +48,48 @@ def hjoin(a: list[str], b: list[str], gap: int = 1) -> list[str]:
     return [a[i] + " " * gap + b[i] for i in range(hgt)]
 
 
-def screen(title: str, content: list[str], right: str = "", footer: str = "") -> str:
-    """Wrap ``content`` in the fixed W×H frame — the :class:`AppFrame` (§12).
+def screen(title: str, content: list[str], right: str = "",
+           footer: str | list[str] = "",
+           *, width: int | None = None, height: int | None = None) -> str:
+    """Wrap ``content`` in the W×H frame — the :class:`AppFrame` (§12).
 
     ``title`` is the top-border label (``packrat · Roots``); ``right`` its
-    right-aligned counterpart (``daemon ● up``). A ``footer`` (the HintBar) is
-    pinned to the **last** body row, with blank filler *above* it, so content sits
-    at the top and hints at the bottom. Result is exactly H lines of W cells each.
+    right-aligned counterpart (``daemon ● up``). The ``footer`` (HintBar) is pinned
+    to the bottom, with blank filler *above* it. A **string** footer is wrapped to
+    the content width via :func:`wrap_hints` (a long hint bar becomes 2+ lines on a
+    narrow terminal instead of truncating); pass a **list** to pin exact rows.
+
+    ``width``/``height`` default to the reference 100×24 (so the frozen mockup
+    generator + golden tests are unchanged); the app passes the live terminal size
+    for a full-screen responsive frame. Result is exactly ``height`` lines of
+    ``width`` cells each.
     """
+    cw = (width - 2) if width is not None else REF_CW
+    h = height if height is not None else REF_H
     lt = f"─ {title} "
-    rt = f" {right} ─" if right else "─"
-    top = "┌" + pad(lt + "─" * max(0, (CW - len(lt) - len(rt))) + rt, CW) + "┐"
-    rows = H - 2  # available body rows
+    # The right label (in root detail this is "<path> · <kind>") is the first thing
+    # trimmed when the bar overflows: middle-elide it so the drive + "· <kind>" tail
+    # stay visible. cell_width (not len) so CJK titles/paths keep the bar aligned.
+    if right:
+        avail = cw - cell_width(lt) - 2          # 2 = the " " and "─" around `right`
+        right = middle_elide(right, max(0, avail))
+        rt = f" {right} ─"
+    else:
+        rt = "─"
+    fill = max(0, cw - cell_width(lt) - cell_width(rt))
+    top = "┌" + pad(lt + "─" * fill + rt, cw) + "┐"
+    rows = h - 2  # available body rows
+
+    foot_lines = (wrap_hints(footer, cw - 2) if isinstance(footer, str) and footer
+                  else list(footer))
     inner = list(content)
-    if footer:
-        inner = inner[: rows - 1]                 # leave the last row for the footer
-        inner += [""] * (rows - 1 - len(inner))   # fill the gap ABOVE the footer
-        inner.append(footer)                      # pinned to the bottom row
+    if foot_lines:
+        keep = max(0, rows - len(foot_lines))
+        inner = inner[:keep]                      # leave the last rows for the footer
+        inner += [""] * (keep - len(inner))       # fill the gap ABOVE the footer
+        inner += foot_lines                       # pinned to the bottom row(s)
     else:
         inner = (inner + [""] * rows)[:rows]
-    body = ["│ " + pad(ln, CW - 2) + " │" for ln in inner]
-    return "\n".join([top] + body + ["└" + "─" * CW + "┘"])
+    inner = inner[:rows]
+    body = ["│ " + pad(ln, cw - 2) + " │" for ln in inner]
+    return "\n".join([top] + body + ["└" + "─" * cw + "┘"])

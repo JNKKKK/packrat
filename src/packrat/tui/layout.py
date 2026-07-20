@@ -1,26 +1,75 @@
-"""Pure text-grid helpers for the fixed monospace frame (component-plan §Layout).
+"""Pure text-grid helpers for the monospace frame.
 
 Textual's CSS covers *widget-box* layout; these cover the **text-cell** concerns
-CSS can't — horizontal cell alignment in a monospace grid (:func:`row`) and
-vertical height budgeting inside the fixed 24-row frame (:func:`fit`), plus the
-§12 long-path rule (:func:`middle_elide`). All functions are **pure and return
-plain, colorless text** — width math and the golden-frame snapshot tests must
-never see color markup (component-plan §Theming "the hard rule"). Color is a
-separate layer, applied by a widget's render step *after* layout.
+CSS can't — horizontal cell alignment in a monospace grid (:func:`row`), vertical
+height budgeting (:func:`fit`), the long-path rule (:func:`middle_elide`), and
+CJK-aware display width (:func:`cell_width` — East-Asian wide chars count as 2).
+All functions are **pure and return plain, colorless text** — width math and the
+frame snapshot tests must never see color markup (§Theming "the hard rule"). Color
+is a separate layer, applied by a widget's render step *after* layout.
 
-Everything here is importable without a Textual runtime (only :mod:`tokens`),
-so the mockup generator can reuse it headless.
+Everything here is importable without a Textual runtime (only :mod:`tokens`), so it
+renders headless.
 
-Invariant that makes "never widen the window" mechanical, not vigilant:
-``len(row(width, …)) == width`` always, and ``len(fit(…, budget).rows) == budget``.
+Invariant that makes "never overflow the frame" mechanical, not vigilant:
+``cell_width(row(width, …)) == width``, and ``len(fit(…, budget).rows) == budget``.
 """
 
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass
 
 from .tokens import ELLIPSIS
+
+
+# --- display width (CJK-aware) ---------------------------------------------
+# A monospace terminal renders East-Asian Wide/Fullwidth characters (Chinese,
+# Japanese, fullwidth forms) as TWO cells, but ``len()`` counts them as one — so
+# any width math on strings containing them under-measures and breaks alignment.
+# These helpers measure and slice by *display cells*. For ASCII + all our box/dot
+# glyphs (which are narrow/ambiguous → 1 cell) they equal len()/slicing, so the
+# 100×24 golden frames are byte-identical; only real CJK content differs.
+def char_width(ch: str) -> int:
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def cell_width(text: str) -> int:
+    """Display width of ``text`` in terminal cells (CJK wide chars count as 2)."""
+    return sum(char_width(c) for c in text)
+
+
+def cell_truncate(text: str, width: int) -> str:
+    """Longest prefix of ``text`` whose display width is ≤ ``width`` (never splits a
+    wide char across the boundary; may leave 1 cell short if a wide char straddles it)."""
+    if width <= 0:
+        return ""
+    out, used = [], 0
+    for ch in text:
+        w = char_width(ch)
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out)
+
+
+def cell_pad(text: str, width: int, align: str = "left") -> str:
+    """Pad ``text`` to exactly ``width`` display cells (truncates if over-wide).
+
+    A trailing 1-cell gap can appear when a wide char straddles the cut — filled
+    with a space so the result is always exactly ``width`` cells."""
+    cut = cell_truncate(text, width)
+    pad = width - cell_width(cut)
+    if pad <= 0:
+        return cut
+    if align == "right":
+        return " " * pad + cut
+    if align == "center":
+        left = pad // 2
+        return " " * left + cut + " " * (pad - left)
+    return cut + " " * pad
 
 
 @dataclass
@@ -43,50 +92,59 @@ class Cell:
     style: str | None = None       # SEMANTIC role, never a raw color
 
 
+def _tail_by_cells(text: str, width: int) -> str:
+    """Longest *suffix* of ``text`` whose display width is ≤ ``width`` (CJK-aware)."""
+    if width <= 0:
+        return ""
+    out, used = [], 0
+    for ch in reversed(text):
+        w = char_width(ch)
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return "".join(reversed(out))
+
+
 def middle_elide(text: str, width: int, ellipsis: str = ELLIPSIS) -> str:
-    """Collapse ``text`` from the middle to exactly ``width`` cells (§12 path rule).
+    """Collapse ``text`` from the middle to ≤ ``width`` display cells (§12 path rule).
 
     Keeps the **head** (drive + start) and **tail** (leaf) visible — the two ends
     carry a path's identity; the middle folders are the throwaway. The odd leftover
-    cell is biased to the head so the drive/prefix stays as intact as possible.
+    cell is biased to the head. CJK-aware: measures/slices by display cells (a wide
+    char straddling the boundary can leave the result 1 cell short — the cell caller
+    pads it, so the row still ends up exactly ``width``).
     """
-    if len(text) <= width:
+    if cell_width(text) <= width:
         return text
-    if width <= len(ellipsis):
-        return ellipsis[:width]
-    keep = width - len(ellipsis)
+    ell = cell_width(ellipsis)
+    if width <= ell:
+        return cell_truncate(ellipsis, width)
+    keep = width - ell
     head = (keep + 1) // 2          # bias the extra cell to the head (drive side)
     tail = keep - head
-    return text[:head] + ellipsis + (text[-tail:] if tail else "")
+    return cell_truncate(text, head) + ellipsis + (_tail_by_cells(text, tail) if tail else "")
 
 
 def _elide(text: str, width: int, mode: str) -> str:
-    """Shrink ``text`` to ``width`` cells per ``mode`` (used within a cell)."""
+    """Shrink ``text`` to ≤ ``width`` display cells per ``mode`` (used within a cell)."""
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if cell_width(text) <= width:
         return text
     if mode == "middle":
         return middle_elide(text, width)
     if mode == "none":
-        return text[:width]        # hard cut, no ellipsis
+        return cell_truncate(text, width)        # hard cut, no ellipsis
     # 'end' (default): trailing ellipsis, drive/start kept
-    if width <= len(ELLIPSIS):
-        return ELLIPSIS[:width]
-    return text[: width - len(ELLIPSIS)] + ELLIPSIS
+    if width <= cell_width(ELLIPSIS):
+        return cell_truncate(ELLIPSIS, width)
+    return cell_truncate(text, width - cell_width(ELLIPSIS)) + ELLIPSIS
 
 
 def _align(text: str, width: int, align: str) -> str:
-    """Place ``text`` (already ≤ ``width``) within ``width`` cells per ``align``."""
-    pad = width - len(text)
-    if pad <= 0:
-        return text[:width]
-    if align == "right":
-        return " " * pad + text
-    if align == "center":
-        left = pad // 2
-        return " " * left + text + " " * (pad - left)
-    return text + " " * pad        # left (default)
+    """Place ``text`` within ``width`` display cells per ``align`` (pads/truncates)."""
+    return cell_pad(text, width, align)
 
 
 def _render_cell(cell: Cell, width: int) -> str:
@@ -97,15 +155,12 @@ def _render_cell(cell: Cell, width: int) -> str:
 
 
 def fit_width(s: str, width: int) -> str:
-    """Pad/hard-truncate ``s`` to exactly ``width`` cells (the invariant backstop).
+    """Pad/hard-truncate ``s`` to exactly ``width`` display cells (invariant backstop).
 
-    Matches the generator's ``pad(s, n)``: left-aligned, right-padded, hard cut —
-    so ``row(width, [Cell(text)])`` equals ``pad(text, width)`` for the common case,
-    keeping runtime renders byte-identical to the generated mockup frames.
+    Matches the generator's ``pad(s, n)`` for ASCII/glyph text; CJK-aware so a row
+    containing Chinese still ends up exactly ``width`` terminal cells wide.
     """
-    if len(s) < width:
-        return s + " " * (width - len(s))
-    return s[:width]
+    return cell_pad(s, width, "left")
 
 
 def row(width: int, cells: list[Cell], *, gap: int = 1, justify: str = "pack") -> str:
@@ -131,7 +186,7 @@ def row(width: int, cells: list[Cell], *, gap: int = 1, justify: str = "pack") -
     for i, c in enumerate(cells):
         if c.grow > 0:
             continue
-        w = c.width if c.width is not None else len(c.text)
+        w = c.width if c.width is not None else cell_width(c.text)
         widths[i] = w
         fixed_total += w
 
@@ -189,21 +244,50 @@ def wrap_cells(text: str, width: int) -> list[str]:
     for para in text.split("\n"):
         cur = ""
         for w in para.split(" "):
-            while len(w) > width:                # hard-break an over-wide token
+            while cell_width(w) > width:         # hard-break an over-wide token
                 if cur:
                     lines.append(cur)
                     cur = ""
-                lines.append(w[:width])
-                w = w[width:]
+                head = cell_truncate(w, width)
+                lines.append(head)
+                w = w[len(head):]
             if not cur:
                 cur = w
-            elif len(cur) + 1 + len(w) <= width:
+            elif cell_width(cur) + 1 + cell_width(w) <= width:
                 cur += " " + w
             else:
                 lines.append(cur)
                 cur = w
         lines.append(cur)
     return lines
+
+
+def wrap_hints(footer: str, width: int, *, sep: str = "   ") -> list[str]:
+    """Wrap a hint-bar string to ``width`` cells, breaking only between hint *groups*.
+
+    A footer is ``[k] label`` groups separated by runs of 2+ spaces; we never split
+    inside a group (so ``[x] cancel all`` stays intact). Fits on one line → returns
+    ``[footer]`` unchanged; otherwise greedily packs groups into successive lines,
+    joined by ``sep``. This is what lets a long footer become two lines on a narrow
+    terminal instead of being truncated or hand-abbreviated."""
+    if cell_width(footer) <= width or width <= 0:
+        return [footer]
+    import re
+
+    groups = [g for g in re.split(r" {2,}", footer.strip()) if g]
+    lines: list[str] = []
+    cur = ""
+    for g in groups:
+        if not cur:
+            cur = g
+        elif cell_width(cur) + cell_width(sep) + cell_width(g) <= width:
+            cur += sep + g
+        else:
+            lines.append(cur)
+            cur = g
+    if cur:
+        lines.append(cur)
+    return lines or [footer]
 
 
 @dataclass

@@ -8,45 +8,52 @@ golden-frame testable; the Textual screens display them and own key routing.
 from __future__ import annotations
 
 from .. import render
-from ..layout import fit, pager_line
-from ..tokens import CW
+from ..geometry import REFERENCE, Geometry
+from ..layout import Cell, fit, row
 
-RULE = "─" * (CW - 4)
 DOTKEY_WIDE = "◉ scanned + deduped   ◐ scanned only   ○ never scanned"
 
-# Body rows available to the list before the footer/header (§2.1 has a header
-# line + rule, the paginator, a blank, and the dot legend around the list).
+# Reference list-row budget (the mockup count); the live budget comes from Geometry.
 LIST_ROWS = 5
 
 
-def roots_body(roots: list[dict], *, now: str, sort_mode: int = 0,
-               cursor: int = 0, page: int = 0) -> list[str]:
-    """The §2.1 maximized root list, sorted per the ``[s]`` cycle + paginated."""
+def roots_body(roots: list[dict], *, now: str, geo: Geometry = REFERENCE,
+               sort_mode: int = 0, cursor: int = 0, page: int = 0) -> list[str]:
+    """The §2.1 maximized root list, sorted per the ``[s]`` cycle + paginated.
+
+    Layout: the sort header, then one line with the dot legend (left) + ``page i/N``
+    (right), then a rule, then the list filling the rest of the frame. Rows lay out
+    to ``geo``'s content width (dot/count/recency right-aligned, path grows)."""
+    w = geo.content_w
+    rule = "─" * (w - 2)
     ordered = render.sort_roots(roots, sort_mode)
     rows = [
-        render.root_row_wide(r, now=now, selected=(i == cursor))
+        render.root_row_wide(r, now=now, selected=(i == cursor), width=w)
         for i, r in enumerate(ordered)
     ]
-    fitted = fit(rows, LIST_ROWS, mode="scroll", page=page)
+    fitted = fit(rows, geo.roots_list_rows, mode="scroll", page=page)
+    # dot legend (left) + paginator (right) share one line at the top.
+    pager = f"page {page + 1}/{fitted.total_pages}"
+    legend_line = row(w, [Cell(DOTKEY_WIDE, grow=1), Cell(pager, align="right")], gap=2)
     return [
         render.sort_header(sort_mode),
-        RULE,
+        legend_line,
+        rule,
         *fitted.rows,
-        pager_line(CW - 2, page + 1, fitted.total_pages),
-        "",
-        DOTKEY_WIDE,
     ]
 
 
 def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
                   scan: bool = True, full: bool = False, embed: bool = False,
-                  focus_field: str = "path", error: str | None = None) -> list[str]:
+                  focus_field: str = "path", error: str | None = None,
+                  geo: Geometry = REFERENCE) -> list[str]:
     """The §2.2 add-root (register) form body.
 
     Radio/checkbox glyphs reflect the current selection; ``focus_field`` (one of
     :data:`ADD_ROOT_FIELDS`) puts the ``▸`` cursor on the focused field so ``[Tab]``
     navigation is visible; an inline ``error`` (a ``RootError``) shows under the
-    path (component-plan: validate inline on Enter).
+    path (component-plan: validate inline on Enter). The form fields are fixed-width;
+    only the rule line spans ``geo``'s content width.
     """
     def radio(on: bool) -> str:
         return "(•)" if on else "( )"
@@ -60,12 +67,13 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
     def cur(field: str) -> str:
         return "▸ " if focus_field == field else "  "
 
+    rule = "─" * (geo.content_w - 2)
     # The path field shows typed text padded with underscores as an input
     # affordance (55-cell field, matching the §2.2 mockup).
     filled = path + "_" * max(0, 55 - len(path))
     lines = [
         "Register a new root (metadata-only; scan it afterward).",
-        RULE,
+        rule,
         f"  Path   {cur('path')}{filled}",
         "           (must exist, be a readable directory, not overlap a root)",
     ]

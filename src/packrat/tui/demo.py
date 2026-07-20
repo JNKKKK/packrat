@@ -34,9 +34,10 @@ def _job(**kw) -> dict:
     return base
 
 
-# --- roots: 11 of them → the Roots list (§2.1, 5 rows/page) spans 3 pages -----
-# A spread of dot states (◉ deduped / ◐ scanned-only / ○ never) + a trash root +
-# a long NAS path (to show middle-elide) + varied counts (to show the [s] sort).
+# --- roots: ~33 → the Roots list (§2.1) spans several pages on any terminal ----
+# A spread of dot states (◉ deduped / ◐ scanned-only / ○ never) + trash roots,
+# several VERY LONG NAS paths (to verify middle-elide + full display on wide) and
+# a few LONG root NAMES (to verify the name column), varied counts (for [s] sort).
 _ROOT_SPECS = [
     # id, name, path, kind, photos, videos, last_scan_at, last_dedup_at, last_full
     (1, "iPhone", r"D:\Backup\iPhone", "library", 92110, 6302,
@@ -60,6 +61,54 @@ _ROOT_SPECS = [
      "2026-07-06T08:00:00", "2026-07-06T10:00:00", "2026-07-06T08:00:00"),
     (11, "SDCard", r"E:\import\SDCard_2026", "library", 0, 0,
      None, None, None),                                  # ○ freshly registered
+    (12, "Wife_iPhone", r"D:\Backup\Wife_iPhone", "library", 54300, 4100,
+     "2026-07-12T20:00:00", "2026-07-11T09:00:00", "2026-07-11T09:00:00"),
+    (13, "Screenshots", r"E:\Screenshots", "library", 3200, 0,
+     "2026-07-14T12:00:00", None, None),
+    (14, "DSLR", r"\\tubie_nas\Res-v2\DSLR\Canon_R6", "library", 22800, 1500,
+     "2026-07-08T15:00:00", "2026-07-08T18:00:00", "2026-07-08T15:00:00"),
+    (15, "WhatsApp", r"D:\Backup\WhatsApp\Media", "library", 9700, 2300,
+     "2026-07-13T10:00:00", None, None),
+    (16, "Scanner", r"E:\import\FlatbedScanner", "library", 410, 0,
+     None, None, None),                                  # ○ never scanned
+    (17, "Camcorder", r"\\tubie_nas\Res-v2\Camcorder\MiniDV_caps", "library", 12, 880,
+     "2026-07-05T09:00:00", "2026-07-05T11:00:00", "2026-07-05T09:00:00"),
+    (18, "Instagram", r"D:\export\Instagram_2026", "library", 1840, 260,
+     "2026-07-14T22:00:00", None, None),
+    (19, "iPad", r"D:\Backup\iPad_Air", "library", 7600, 540,
+     "2026-07-09T08:00:00", "2026-07-09T10:00:00", None),
+    (20, "_Trash2", r"E:\_Trash", "trash", 0, 0, None, None, None),
+    (21, "Kids_tablet", r"D:\Backup\Fire_HD", "library", 2100, 3300,
+     "2026-07-07T19:00:00", None, None),
+    # --- long NAS paths (verify middle-elide when narrow, full text when wide) ---
+    (22, "NAS_Media_Archive", r"\\tubie_nas\Res-v2\Media\Photography\Archive\2010-2014\originals\raw",
+     "library", 88400, 9200, "2026-07-04T08:00:00", "2026-07-04T20:00:00", "2026-07-04T08:00:00"),
+    (23, "Synology_Backup", r"\\synology-ds920.local\home\Backups\Devices\iPhone15Pro\DCIM\Camera",
+     "library", 33100, 5400, "2026-07-03T09:00:00", None, None),
+    (24, "Cloud_Sync_Folder", r"C:\Users\nk\OneDrive - Personal\Pictures\Camera Roll\Auto Upload",
+     "library", 12600, 700, "2026-07-14T06:00:00", "2026-07-13T23:00:00", None),
+    (25, "ExternalSSD_Videos", r"F:\Video Projects\2026\Family Events\Wedding\Ceremony\4K_ProRes",
+     "library", 40, 2100, "2026-07-02T10:00:00", None, "2026-07-02T10:00:00"),
+    (26, "Photobooth_Exports", r"\\tubie_nas\Res-v2\Events\CorporateParty2026\PhotoboothExports\hires",
+     "library", 5600, 120, None, None, None),           # ○ never scanned, long path
+    # --- long ROOT NAMES (verify the name column) ---
+    (27, "GrandparentsSharedAlbum", r"D:\Shared\Grandparents", "library", 4200, 380,
+     "2026-07-01T12:00:00", None, None),
+    (28, "iPhone_Portrait_Mode_Only", r"D:\Backup\iPhone\Portrait", "library", 3100, 0,
+     "2026-07-12T15:00:00", "2026-07-12T17:00:00", None),
+    (29, "Screenshots_and_Memes_2026", r"E:\Screenshots\2026", "library", 8800, 40,
+     "2026-07-11T09:00:00", None, None),
+    # --- more ordinary roots to bulk out the list ---
+    (30, "Nikon_Z6", r"E:\Cameras\Nikon_Z6", "library", 18400, 2600,
+     "2026-07-10T08:00:00", "2026-07-10T12:00:00", "2026-07-10T08:00:00"),
+    (31, "Sony_A7", r"E:\Cameras\Sony_A7IV", "library", 27200, 3300,
+     "2026-07-09T14:00:00", None, "2026-07-09T14:00:00"),
+    (32, "Dashcam", r"D:\Dashcam\front", "library", 30, 14200,
+     "2026-07-08T22:00:00", None, None),
+    (33, "_Trash_NAS", r"\\tubie_nas\Res-v2\_recycle", "trash", 0, 0, None, None, None),
+    # --- CJK name + path (verify wide-char display width doesn't break layout) ---
+    (34, "手机相册", r"D:\备份\手机相册\2026年家庭照片", "library", 6800, 940,
+     "2026-07-13T08:00:00", "2026-07-13T12:00:00", None),
 ]
 
 
@@ -83,15 +132,14 @@ RUNNING = _job(
     root_name="Archive", label="scan Archive (full)", _eta_s=1560,
 )
 
-# 9 queued jobs → the dashboard preview truncates ("… N more") and the maximized
+# ~18 queued jobs → the dashboard preview truncates ("… N more") and the maximized
 # Queue pages; a mix of runnable ("waiting for worker") and blocked rows.
+_PHOTOS_HOLD = {"run_type": "dedup", "what": "dedup pending since 2026-07-15T08:00:00"}
 _QUEUE_SPECS = [
     (613, "merge", 2, {"source": r"E:\iphone_dump", "into": "Camera"},
      "merge iphone_dump → Camera", None),
-    (614, "scan", 3, {"root_id": 3},
-     "scan Photos", {"run_type": "dedup", "what": "dedup pending since 2026-07-15T08:00:00"}),
-    (615, "dedup", 3, {"root_id": 3, "confirm": True},
-     "dedup Photos (confirm)", {"run_type": "dedup", "what": "dedup pending since 2026-07-15T08:00:00"}),
+    (614, "scan", 3, {"root_id": 3}, "scan Photos", _PHOTOS_HOLD),
+    (615, "dedup", 3, {"root_id": 3, "confirm": True}, "dedup Photos (confirm)", _PHOTOS_HOLD),
     (616, "scan", 7, {"root_id": 7}, "scan GoPro", None),
     (617, "scan", 10, {"root_id": 10, "full": True}, "scan OldPhone (full)", None),
     (618, "cleanup", 1, {"root_id": 1, "mode": "exact", "apply": True},
@@ -100,6 +148,17 @@ _QUEUE_SPECS = [
      "merge SDCard_2026 → Archive", None),
     (620, "dedup", 2, {"root_id": 2}, "dedup Camera (analyze)", None),
     (621, "scan", 9, {"root_id": 9}, "scan Drone", None),
+    (622, "scan", 22, {"root_id": 22, "full": True}, "scan NAS_Media_Archive (full)", None),
+    (623, "scan", 23, {"root_id": 23}, "scan Synology_Backup", None),
+    (624, "dedup", 30, {"root_id": 30}, "dedup Nikon_Z6 (analyze)", None),
+    (625, "merge", 24, {"source": r"E:\import\phone_export", "into": "Cloud_Sync_Folder"},
+     "merge phone_export → Cloud_Sync_Folder", None),
+    (626, "scan", 31, {"root_id": 31}, "scan Sony_A7", None),
+    (627, "cleanup", 29, {"root_id": 29, "mode": "undecodable", "apply": True},
+     "cleanup Screenshots_and_Memes_2026 (undecodable · delete)", None),
+    (628, "scan", 32, {"root_id": 32, "full": True}, "scan Dashcam (full)", None),
+    (629, "dedup", 12, {"root_id": 12, "confirm": True}, "dedup Wife_iPhone (confirm)", None),
+    (630, "scan", 26, {"root_id": 26}, "scan Photobooth_Exports", None),
 ]
 
 
@@ -176,6 +235,59 @@ RECENT = [
          label="merge old_card → Camera",
          result_json=_rj({"op": "merge", "source": r"D:\old_card", "dest_root": "Camera",
                           "new": 1204, "exact_known": 12, "summary": "1,204 copied · 12 exact-known"})),
+    # --- more history so Recent spans several pages -------------------------
+    _job(id=599, type="scan", root_id=22, status="done", total=97600, done=97600,
+         finished_at="2026-07-04T08:00:00", params_json=_rj({"root_id": 22, "full": True}),
+         root_name="NAS_Media_Archive", label="scan NAS_Media_Archive (full)",
+         result_json=_rj({"op": "scan", "new": 97600, "summary": "+97,600 new"})),
+    _job(id=598, type="dedup", root_id=22, status="done", finished_at="2026-07-04T20:00:00",
+         params_json=_rj({"root_id": 22, "confirm": True}), root_name="NAS_Media_Archive",
+         label="dedup NAS_Media_Archive (confirm)",
+         result_json=_rj({"op": "dedup", "action": "confirm", "review_status": "completed",
+                          "summary": "1,204 deleted · 88 spared"})),
+    _job(id=597, type="cleanup", root_id=1, status="done", finished_at="2026-07-03T16:00:00",
+         params_json=_rj({"root_id": 1, "mode": "undecodable", "apply": True}), root_name="iPhone",
+         label="cleanup iPhone (undecodable · delete)",
+         result_json=_rj({"op": "cleanup", "mode": "undecodable", "action": "delete",
+                          "deleted": 7, "summary": "7 deleted (marked trashed)"})),
+    _job(id=596, type="scan", root_id=30, status="done", total=21000, done=21000,
+         finished_at="2026-07-10T08:00:00", params_json=_rj({"root_id": 30}), root_name="Nikon_Z6",
+         label="scan Nikon_Z6", result_json=_rj({"op": "scan", "new": 340, "summary": "+340 new"})),
+    _job(id=595, type="merge", root_id=24, status="done", finished_at="2026-07-13T23:00:00",
+         params_json=_rj({"source": r"E:\import\onedrive_dump", "into": "Cloud_Sync_Folder"}),
+         root_name="Cloud_Sync_Folder", label="merge onedrive_dump → Cloud_Sync_Folder",
+         result_json=_rj({"op": "merge", "source": r"E:\import\onedrive_dump",
+                          "dest_root": "Cloud_Sync_Folder", "new": 512, "exact_known": 88,
+                          "summary": "512 copied · 88 exact-known"})),
+    _job(id=594, type="trash-refresh", status="done", finished_at="2026-07-12T07:00:00",
+         label="trash refresh",
+         result_json=_rj({"op": "trash-refresh", "roots": 2, "new_trashed": 34, "flipped": 2,
+                          "already_trashed": 5, "emptied": 41, "undeletable": 1, "errors": 0,
+                          "summary": "34 new trashed · 2 flipped · 41 emptied"})),
+    _job(id=593, type="scan", root_id=31, status="interrupted", finished_at="2026-07-09T14:30:00",
+         error="daemon restarted", params_json=_rj({"root_id": 31}), root_name="Sony_A7",
+         label="scan Sony_A7"),
+    _job(id=592, type="dedup", root_id=14, status="done", finished_at="2026-07-08T18:00:00",
+         params_json=_rj({"root_id": 14}), root_name="DSLR", label="dedup DSLR (analyze)",
+         result_json=_rj({"op": "dedup", "action": "analyze",
+                          "summary": "already clean — no exact duplicates or near-dup groups"})),
+    _job(id=591, type="scan", root_id=32, status="done", total=14400, done=14400,
+         finished_at="2026-07-08T22:00:00", params_json=_rj({"root_id": 32}), root_name="Dashcam",
+         label="scan Dashcam", result_json=_rj({"op": "scan", "new": 14230,
+                                                 "summary": "+14,230 new · 3 undecodable"})),
+    _job(id=590, type="untrash", status="done", finished_at="2026-07-07T11:00:00",
+         params_json=_rj({"path": r"R:\recovered\2019\batch"}), label="untrash batch",
+         result_json=_rj({"op": "untrash", "untrashed": 18, "forgotten": 4, "already_active": 2,
+                          "unknown": 1, "errors": 0,
+                          "summary": "18 reactivated · 4 forgotten · 2 active · 1 unknown"})),
+    _job(id=589, type="merge", root_id=6, status="error", finished_at="2026-07-06T13:00:00",
+         error="source path not readable: \\\\tubie_nas\\Res-v2\\incoming (timed out)",
+         params_json=_rj({"source": r"\\tubie_nas\Res-v2\incoming", "into": "Archive"}),
+         root_name="Archive", label="merge incoming → Archive"),
+    _job(id=588, type="scan", root_id=27, status="done", total=4600, done=4600,
+         finished_at="2026-07-01T12:00:00", params_json=_rj({"root_id": 27}),
+         root_name="GrandparentsSharedAlbum", label="scan GrandparentsSharedAlbum",
+         result_json=_rj({"op": "scan", "new": 4580, "summary": "+4,580 new"})),
 ]
 
 

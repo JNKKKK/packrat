@@ -1,16 +1,14 @@
-"""Pure content renderers — read-model dict → mockup content lines (§Content widgets).
+"""Pure content renderers — read-model dict → content line(s).
 
-Each function turns a query-shaped dict (see :mod:`packrat.queries`) into the exact
-plain-text line(s) the mockups show, built from :mod:`packrat.tui.layout` cells /
-:mod:`packrat.tui.tokens` glyphs. Keeping them **pure** (dict → line, colorless) is
-what makes the golden-frame tests cheap string assertions and lets the Textual
-widgets stay thin — a widget delegates here for its text, then colors spans by
-:class:`~packrat.tui.layout.Cell` role and owns only focus/keys/liveness
-(component-plan Resolved #2).
+Each function turns a query-shaped dict (see :mod:`packrat.queries`) into the
+plain-text line(s) for one row/panel, built from :mod:`packrat.tui.layout` cells /
+:mod:`packrat.tui.tokens` glyphs. Keeping them **pure** (dict → line, colorless)
+makes the frame tests cheap string assertions and lets the Textual widgets stay
+thin — a widget delegates here for its text, then colors spans by
+:class:`~packrat.tui.layout.Cell` role and owns only focus/keys/liveness.
 
-The row column widths reproduce the generator's f-strings exactly:
-- dashboard ``RootRow`` = ``{cur} {name:<9} {path:<20} {dot} {count:>7}``
-- so a live render is byte-comparable to the ``docs/M6-tui-mockups.md`` frame.
+Rows use ``grow`` cells so a flexible column (the path/label) absorbs slack and the
+trailing columns (dot/count/status) stay right-aligned as the frame widens.
 """
 
 from __future__ import annotations
@@ -22,9 +20,12 @@ from .tokens import BAR_EMPTY, BAR_FILL, CURSOR, RUNNING
 
 
 # --- Logo (§1) -------------------------------------------------------------
-def logo_lines(assets: int) -> list[str]:
-    """The mascot + tagline + live "· N assets hoarded ·" line (§1 Logo panel)."""
-    return [
+def logo_lines(assets: int, *, rows: int | None = None, width: int | None = None) -> list[str]:
+    """The mascot + tagline + live "· N assets hoarded ·" line (§1 Logo panel).
+
+    ``rows``/``width`` pad the block to a fixed size so it sits beside the
+    Collection box in the dashboard top section (both must be the same height)."""
+    lines = [
         "",
         "   ___",
         "  (o.o)    p a c k r a t",
@@ -32,6 +33,11 @@ def logo_lines(assets: int) -> list[str]:
         f"  /   \\    · {assets:,} assets hoarded ·",
         "",
     ]
+    if rows is not None:
+        lines = (lines + [""] * rows)[:rows]
+    if width is not None:
+        lines = [ln[:width].ljust(width) for ln in lines]
+    return lines
 
 
 # --- CollectionBox (§1) ----------------------------------------------------
@@ -63,43 +69,47 @@ def root_dot(r: dict) -> str:
     return tokens.status_dot(r["kind"], r.get("last_scan_at"), r.get("last_dedup_at"))
 
 
-def root_row_compact(r: dict, *, selected: bool = False) -> str:
-    """A dashboard/focused-box root row (§1): ``▸ Name  path…  ◐   count``.
+def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
+                     path_w: int = 20) -> str:
+    """A dashboard/focused-box root row (§1): ``▸ Name  path……………  ◐   count``.
 
-    Reproduces the generator's ``f"{cur} {nm:<9} {pth:<20} {dot} {cnt:>7}"`` — a
-    fixed-column row so every dot/count aligns; the path middle-elides at 20 (§12).
-    Trash roots show ``(trash)`` in the count column and no dot.
+    The path is a **grow** cell that absorbs the middle, so the dot + count are
+    pushed to the right end (most space goes to the path). ``path_w`` is kept as a
+    minimum floor; ``width`` is the full row width. Trash roots show ``(trash)`` in
+    the count column and no dot.
     """
     cur = CURSOR if selected else " "
     dot = root_dot(r)
     count = "(trash)" if r["kind"] == "trash" else f"{r['asset_count']:,}"
     return row(
-        62,
+        width,
         [
             Cell(cur, width=1, style="highlighted" if selected else None),
-            Cell(r["name"], width=9),
-            Cell(middle_elide(r["path"], 20), width=20, elide="middle"),
+            Cell(r["name"], width=16),
+            Cell(r["path"], grow=1, elide="middle"),   # absorbs the middle
             Cell(dot, width=1, style=_dot_style(dot)),
             Cell(count, width=7, align="right", style="dim" if r["kind"] == "trash" else None),
         ],
     ).rstrip()
 
 
-def root_row_wide(r: dict, *, now: str, selected: bool = False) -> str:
-    r"""A maximized Roots-interface row (§2.1): adds the ``deduped <age>`` recency.
+def root_row_wide(r: dict, *, now: str, selected: bool = False, path_w: int = 20,
+                  width: int = 96) -> str:
+    r"""A maximized Roots-interface row (§2.1): dot, count, recency all right-aligned.
 
-    ``▸ Downloads  D:\dump              ◐    241  never deduped`` — the layout
-    ``{cur} {name:<10} {path:<20} {mid}  {recency}`` where ``mid`` is ``(trash):>7``
-    for a trash root, else ``{dot} {count:>6}``. Reproduces the §2.1 frame rows.
+    ``▸ Downloads  D:\dump…………………  ◐     241  never deduped`` — the path is a
+    **grow** cell absorbing the middle, so the dot / count / recency columns sit at
+    the right end. ``width`` is the full row width; ``path_w`` is unused (kept for
+    call compatibility). Trash roots show ``(trash)`` for the count and ``—`` recency.
     """
     cur = CURSOR if selected else " "
     dot = root_dot(r)
-    path = middle_elide(r["path"], 20)
     if r["kind"] == "trash":
-        mid = f"{'(trash)':>7}"
-        recency = "—"
+        count, recency = "(trash)", "—"
+        dot_cell = Cell(" ", width=1)
+        count_cell = Cell(count, width=8, align="right", style="dim")
     else:
-        mid = f"{dot} {r['asset_count']:>6,}"
+        count = f"{r['asset_count']:,}"
         dd = r.get("last_dedup_at")
         if not dd:
             recency = "never deduped"
@@ -107,7 +117,19 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False) -> str:
             recency = "deduped today"
         else:
             recency = f"deduped {reltime(dd, now)}"
-    return f"{cur} {r['name']:<10} {path:<20} {mid}  {recency}".rstrip()
+        dot_cell = Cell(dot, width=1, style=_dot_style(dot))
+        count_cell = Cell(count, width=8, align="right")
+    return row(
+        width,
+        [
+            Cell(cur, width=1, style="highlighted" if selected else None),
+            Cell(r["name"], width=16),
+            Cell(r["path"], grow=1, elide="middle"),    # absorbs the middle
+            dot_cell,
+            count_cell,
+            Cell(recency, width=15, align="right", style="dim"),
+        ],
+    ).rstrip()
 
 
 def _is_today(ts: str, now: str) -> bool:
@@ -202,13 +224,14 @@ def job_status_note(job: dict) -> str:
 
 
 def queue_row(job: dict, *, selected: bool = False, show_id: bool = True,
-              index: int | None = None) -> str:
+              index: int | None = None, width: int = 94) -> str:
     """A queue-panel row (§1.4/§4): running → live bar; queued → label + reason.
 
     The running row carries the ▶ marker itself, so its bar renders ``running=False``
     (no second marker). Queued rows show a leading identifier — the positional
     ``index`` in the dashboard preview (``2 merge …``), or the job id in the
-    maximized queue (``#419 …``) when ``show_id``.
+    maximized queue (``#419 …``) when ``show_id``. ``width`` (ref 94) lets the
+    label/note row fill a wider terminal.
     """
     cur = CURSOR if selected else " "
     if job.get("status") == "running":
@@ -224,4 +247,9 @@ def queue_row(job: dict, *, selected: bool = False, show_id: bool = True,
     label = job.get("label", job["type"])
     note = job_status_note(job)
     left = f"{cur}{ident}{label}"
-    return row(94, [Cell(left, width=32), Cell(note, style="dim")], gap=1).rstrip()
+    # label grows to absorb the middle; the status/blocked note sits at the right.
+    return row(
+        width,
+        [Cell(left, grow=1, elide="end"), Cell(note, align="right", style="dim")],
+        gap=2,
+    ).rstrip()

@@ -83,7 +83,7 @@ def test_roots_snapshot_binds_to_rootrow(seeded):
 def test_status_snapshot_binds_to_dashboard(seeded):
     snap = queries.status_snapshot()
     frame = screen("packrat", dashboard_body(snap, now=NOW),
-                   "v0.1.0 · daemon ● up", footer="Ctrl-C quit")
+                   "v0.1.0 · daemon ● up", footer="Esc / Ctrl-Q quit")
     _fixed_frame(frame)
     assert "MyPhotos" in frame
     assert f"{snap['assets']:,}" in frame    # the live asset count

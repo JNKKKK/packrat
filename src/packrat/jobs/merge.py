@@ -40,8 +40,7 @@ the plan. Per-item ``progress`` closes the copied→registered crash gap.
 ``merge_runs`` row **open** (copy-only ⇒ a partial copy is safe), so re-running
 resumes. *(Because the runtime can't distinguish a user cancel from a clean daemon
 stop — both use the shared cancel flag — merge favors §3's "a stop never loses
-in-flight progress": it leaves the plan resumable rather than discarding it. See
-docs/M5.md.)*
+in-flight progress": it leaves the plan resumable rather than discarding it.)*
 """
 
 from __future__ import annotations

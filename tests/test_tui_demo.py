@@ -17,6 +17,13 @@ from textual.widgets import Static
 
 from packrat.tui import demo
 from packrat.tui.app import PackratApp
+from packrat.tui.layout import cell_width
+
+
+def _rows_exact(frame: str, w: int, h: int) -> bool:
+    """True if the frame is exactly h rows, each w DISPLAY cells (CJK-aware)."""
+    rows = frame.split("\n")
+    return len(rows) == h and all(cell_width(r) == w for r in rows)
 
 
 def _drive(coro_fn):
@@ -65,21 +72,22 @@ def test_demo_root_dot_states_all_present():
 
 
 # --- pagination ------------------------------------------------------------
-def test_roots_interface_spans_multiple_pages():
-    def scenario(app, pilot):
-        return _roots_pages(app, pilot)
+def test_roots_interface_pages_when_data_exceeds_window():
+    """RootsMax paginates when there are more roots than the list window.
 
-    async def _roots_pages(app, pilot):
+    At 100×24 the roots list window is 18 rows; the demo has >18 roots, so the list
+    spans >1 page and ←/→ moves between them."""
+    async def scenario(app, pilot):
         await pilot.press("r")
         await pilot.press("r")                 # RootsMax
         assert _scr(app) == "RootsMax"
         cur, total = _pager(app)
-        assert total >= 3 and cur == 1
+        assert total >= 2 and cur == 1
         await pilot.press("right")
         assert _pager(app) == (2, total)
         await pilot.press("left")
         assert _pager(app) == (1, total)
-    _drive(_roots_pages)
+    _drive(scenario)
 
 
 def test_dashboard_roots_box_pages_and_stays_fixed():
@@ -90,8 +98,7 @@ def test_dashboard_roots_box_pages_and_stays_fixed():
         await pilot.press("right")
         assert _pager(app)[0] == 2
         # frame never grows past the fixed 100×24
-        rows = app.screen.current_frame.split("\n")
-        assert len(rows) == 24 and all(len(r) == 100 for r in rows)
+        assert _rows_exact(app.screen.current_frame, 100, 24)
     _drive(scenario)
 
 
@@ -166,8 +173,7 @@ def test_dashboard_queue_box_pages_and_autofollows():
             await pilot.press("down")
         f = app.screen.current_frame
         assert "▸" in f
-        rows = f.split("\n")
-        assert len(rows) == 24 and all(len(r) == 100 for r in rows)  # still fixed
+        assert _rows_exact(f, 100, 24)  # still fixed
     _drive(scenario)
 
 
@@ -303,24 +309,147 @@ def test_root_detail_scan_dedup_merge_verbs():
         await pilot.press("r")
         await pilot.press("r")
         await pilot.press("enter")
-        for key, want in (("s", "packrat scan"), ("d", "packrat dedup"), ("m", "--into")):
+        # [s]/[d] surface their verb in a notice (offline); [m] opens the picker.
+        for key, want in (("s", "packrat scan"), ("d", "packrat dedup")):
             await pilot.press(key)
             await pilot.pause()
             assert _scr(app) == "MessageModal", (key, _scr(app))
             assert want in _modal_text(app), (key, _modal_text(app))
             await pilot.press("enter")
             await pilot.pause()
+        await pilot.press("m")
+        await pilot.pause()
+        assert _scr(app) == "MergePickerScreen"        # [m] → §3.3 picker, not a notice
+    _drive(scenario)
+
+
+def test_root_detail_cleanup_offers_three_modes():
+    """[c] on a root opens a 3-option cleanup picker; choosing surfaces its verb."""
+    async def scenario(app, pilot):
+        await pilot.press("r")
+        await pilot.press("r")
+        await pilot.press("enter")                 # RootDetailScreen
+        await pilot.press("c")
+        await pilot.pause()
+        assert _scr(app) == "ChoiceModal"
+        txt = _modal_text(app)
+        assert "trash-exact" in txt and "trash-perceptual" in txt and "undecodable" in txt
+        # pick the 2nd option (perceptual) → its cleanup verb
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _scr(app) == "MessageModal"
+        assert "packrat cleanup" in _modal_text(app)
+        assert "--trash-perceptual" in _modal_text(app)
+    _drive(scenario)
+
+
+def test_root_detail_no_cleaned_never_label():
+    """The no-review banner is just 'No pending review.' (dropped '(cleaned: …)')."""
+    async def scenario(app, pilot):
+        await pilot.press("r")
+        await pilot.press("r")
+        await pilot.press("enter")
+        frame = app.screen.current_frame
+        assert "No pending review." in frame
+        assert "cleaned:" not in frame
+        # the Jobs pager shares the section-title line (right-aligned)
+        jobs_line = next(ln for ln in frame.split("\n") if "Jobs (newest first)" in ln)
+        assert "page " in jobs_line
+    _drive(scenario)
+
+
+def test_merge_picker_opens_and_paginates():
+    """[m] opens the §3.3 merge picker; the registered-root list paginates + Tab
+    switches to the external-folder variant."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        await pilot.press("m")
+        assert _scr(app) == "MergePickerScreen"
+        f = app.screen.current_frame
+        assert "merge from" in f and "(•) Registered root" in f
+        cur, total = _pager(app)
+        assert total >= 2 and cur == 1                    # 30 demo sources → many pages
+        await pilot.press("right")
+        assert _pager(app)[0] == 2
+        # Tab → external folder variant (typed path)
+        await pilot.press("tab")
+        assert app.screen.source_mode == "ext"
+        for ch in ("E", ":"):
+            await pilot.press(ch)
+        assert app.screen.ext_path == "E:"
+        # Ctrl-D toggles dry-run
+        await pilot.press("ctrl+d")
+        assert app.screen.dry_run
+    _drive(scenario)
+
+
+def test_merge_picker_excludes_dest_and_trash():
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        detail = app.screen._detail
+        await pilot.press("m")
+        assert _scr(app) == "MergePickerScreen"
+        srcs = app.screen._sources()
+        assert all(s["kind"] == "library" for s in srcs)          # no trash source
+        assert all(s["name"] != detail["name"] for s in srcs)     # dest excluded
+    _drive(scenario)
+
+
+# --- paste into path fields (Ctrl+V / Ctrl+Shift+V) ------------------------
+async def _paste(app, text):
+    from textual import events
+    app.screen.post_message(events.Paste(text))
+    import asyncio as _a
+    await _a.sleep(0.05)
+
+
+def test_add_root_path_field_accepts_paste():
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("a")
+        assert _scr(app) == "AddRootScreen"
+        app.screen.path = ""            # focus starts on the path field
+        await _paste(app, r"\\nas\share\A Folder\with spaces")
+        assert app.screen.path == r"\\nas\share\A Folder\with spaces"
+        # paste strips CR/LF (paths are single-line)
+        app.screen.path = ""
+        await _paste(app, "D:\\one\r\ntwo")
+        assert app.screen.path == "D:\\onetwo"
+    _drive(scenario)
+
+
+def test_merge_ext_path_field_accepts_paste():
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        await pilot.press("m")
+        assert _scr(app) == "MergePickerScreen"
+        await pilot.press("tab")        # → external-folder mode
+        assert app.screen.source_mode == "ext"
+        await _paste(app, r"E:\Camera Roll\2026")
+        assert app.screen.ext_path == r"E:\Camera Roll\2026"
+    _drive(scenario)
+
+
+def test_paste_ignored_when_not_on_a_text_field():
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("a")
+        app.screen.path = "keep"
+        app.screen.field_idx = 2        # focus the Kind radio (not a text field)
+        await _paste(app, "SHOULD_NOT_APPEAR")
+        assert "SHOULD_NOT_APPEAR" not in app.screen.path
+        assert app.screen.path == "keep"
     _drive(scenario)
 
 
 def test_pending_review_actions_map_to_verbs():
     async def scenario(app, pilot):
-        # navigate the Roots list to Photos (the pending-review root)
+        # navigate the Roots list to Photos (the pending-review root); it sorts near
+        # the bottom (id 3, id-DESC default), so walk down until the ▸ row is Photos.
         await pilot.press("r")
         await pilot.press("r")
-        for _ in range(11):
+        for _ in range(len(demo.ROOTS) + 2):
             sel = [ln for ln in app.screen.current_frame.split("\n") if "▸" in ln]
-            if sel and "Photos" in sel[0]:
+            if sel and "Photos " in sel[0] and "iPhone" not in sel[0]:
                 break
             await pilot.press("down")
         await pilot.press("enter")
@@ -452,7 +581,7 @@ def test_job_card_covers_every_shape():
             await pilot.press("enter")
             if _scr(app) == "JobCard":
                 f = app.screen.current_frame
-                assert len(f.split("\n")) == 24 and all(len(r) == 100 for r in f.split("\n"))
+                assert _rows_exact(f, 100, 24)
                 seen_titles.add(f.split("\n")[0])
                 await pilot.press("escape")
             await pilot.press("down")
@@ -460,9 +589,9 @@ def test_job_card_covers_every_shape():
     _drive(scenario)
 
 
-# --- Ctrl-C quits from ANY screen (the hang regression) --------------------
-def _quits_from(setup_keys) -> int:
-    """Run the app to a screen via ``setup_keys``, press Ctrl-C, return exit code."""
+# --- quit behavior: Ctrl-Q anywhere, Esc at the top; Ctrl-C is NOT bound -----
+def _quits_from(setup_keys, quit_key="ctrl+q") -> int:
+    """Run the app to a screen via ``setup_keys``, press ``quit_key``, return code."""
     app = PackratApp(offline=True)
 
     async def auto(pilot):
@@ -470,27 +599,49 @@ def _quits_from(setup_keys) -> int:
         for k in setup_keys:
             await pilot.press(k)
             await pilot.pause()
-        await pilot.press("ctrl+c")
+        await pilot.press(quit_key)
         await pilot.pause()
 
     app.run(headless=True, auto_pilot=auto)
     return app.return_code
 
 
-def test_ctrl_c_quits_from_dashboard():
+def test_ctrl_q_quits_from_dashboard():
     assert _quits_from([]) == 0
 
 
-def test_ctrl_c_quits_from_maximized_screens():
+def test_ctrl_q_quits_from_maximized_screens():
     assert _quits_from(["q", "q"]) == 0          # QueueMax
     assert _quits_from(["r", "r"]) == 0          # RootsMax
     assert _quits_from(["r", "r", "enter"]) == 0  # RootDetail
 
 
-def test_ctrl_c_quits_from_modal():
-    # The reported hang: Ctrl-C inside a confirm modal must still quit (priority
-    # binding), not leave a blank, unresponsive terminal.
+def test_ctrl_q_quits_from_modal():
+    # Ctrl-Q inside a confirm modal must still quit (priority binding), not hang.
     assert _quits_from(["q", "down", "c"]) == 0   # ConfirmModal open
+
+
+def test_esc_quits_from_dashboard_top_level():
+    # At the dashboard with nothing focused, Esc quits (it's the root screen).
+    assert _quits_from([], quit_key="escape") == 0
+
+
+def test_ctrl_c_does_not_quit():
+    # Windows Terminal maps Ctrl+Shift+C (copy) to the same byte as Ctrl+C, so we
+    # must NOT bind Ctrl+C — it stays free for the terminal's copy. Pressing it
+    # should leave the app running (return_code stays None until a real quit).
+    app = PackratApp(offline=True)
+
+    async def auto(pilot):
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.return_code is None, "ctrl+c quit the app (should be free for copy)"
+        await pilot.press("ctrl+q")               # real quit so the test terminates
+        await pilot.pause()
+
+    app.run(headless=True, auto_pilot=auto)
+    assert app.return_code == 0
 
 
 def test_rapid_action_keys_do_not_corrupt_stack():

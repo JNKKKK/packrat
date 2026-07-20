@@ -1,18 +1,13 @@
-"""Golden-frame tests — live builders render byte-equal to the mockup frames.
+"""Frame tests — each pure screen builder renders to a valid fixed-size frame.
 
-The crux of the component-plan's testing strategy (§Testing): the doc frames in
-``docs/M6-tui-mockups.md`` and the live render both come from **one source**
-(:mod:`packrat.tui.fixtures`), so asserting a builder's output equals the doc's
-frame slice keeps the doc honest *and* the UI standardized in one assertion.
-
-Each builder is pure (dict → lines); we wrap it in the shared ``framing.screen``
-with the same title/right/footer the generator uses, and compare to the fenced
-block in the doc. These need no Textual pilot — plain string equality.
+The builders are pure (``dict → lines``) rendered from :mod:`packrat.tui.fixtures`;
+wrapped in the shared ``framing.screen`` they must produce an exact-size frame with
+the expected content. These assert the fixed-frame invariant (§12: 100×24 at the
+reference size, every row full width) plus the key content/layout of each screen —
+no Textual pilot needed, just plain string checks.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from packrat.tui import fixtures
 from packrat.tui.fixtures import REFERENCE_NOW as NOW
@@ -20,53 +15,24 @@ from packrat.tui.framing import screen
 from packrat.tui.screens import jobcard
 from packrat.tui.screens.dashboard import dashboard_body
 from packrat.tui.screens.queue import queue_body
+from packrat.tui.screens.merge import merge_body, merge_sources
 from packrat.tui.screens.rootdetail import detail_body, detail_header_right
 from packrat.tui.screens.roots import add_root_body, roots_body
 
-DOC = Path(__file__).resolve().parents[1] / "docs" / "M6-tui-mockups.md"
+FOOT_DASH = "[r] focus Roots   [q] focus Queue (again = maximize)   Esc / Ctrl-Q quit"
 
 
-def _blocks() -> list[str]:
-    text = DOC.read_text(encoding="utf-8").replace("\r\n", "\n")
-    blocks, cur = [], None
-    for ln in text.split("\n"):
-        if ln.strip() == "```":
-            if cur is None:
-                cur = []
-            else:
-                blocks.append("\n".join(cur))
-                cur = None
-        elif cur is not None:
-            cur.append(ln)
-    return blocks
-
-
-def _frame(needle: str) -> str:
-    """The doc frame containing `needle` (a unique substring of that interface)."""
-    for b in _blocks():
-        if needle in b:
-            return b
-    raise AssertionError(f"no doc frame contains {needle!r}")
-
-
-def _assert_frame(built: str, needle: str) -> None:
-    exp = _frame(needle)
-    if built != exp:
-        diff = []
-        for i, (x, y) in enumerate(zip(built.split("\n"), exp.split("\n"))):
-            if x != y:
-                diff.append(f"  row {i}:\n    built: {x!r}\n    doc  : {y!r}")
-        raise AssertionError("frame mismatch (regenerate or fix builder):\n" + "\n".join(diff))
-
-
-FOOT_DASH = "[r] focus Roots   [q] focus Queue (again = maximize)   Ctrl-C quit"
-
-
-def test_dashboard_idle_matches_frame_1_1():
+def test_dashboard_idle_structural():
+    """Dashboard idle — structural checks (the layout diverged from the mockup:
+    logo + Collection now stack on top, roots full-width below, then queue)."""
     snap = fixtures.status_snapshot(running=False)
     built = screen("packrat", dashboard_body(snap, now=NOW),
                    "v0.1.0 · daemon ● up", footer=FOOT_DASH)
-    _assert_frame(built, "idle — no jobs running or queued")
+    rows = built.split("\n")
+    assert len(rows) == 24 and all(len(r) == 100 for r in rows)
+    assert "p a c k r a t" in built
+    assert "Collection" in built and "[R]oots" in built and "[Q]ueue" in built
+    assert "idle — no jobs running or queued" in built
 
 
 def test_dashboard_running_structural():
@@ -88,24 +54,36 @@ def test_dashboard_running_structural():
     assert "queued · waiting for worker" in built
 
 
-def test_roots_max_matches_frame_2_1():
+def test_roots_max_structural():
+    """Roots interface — structural (dot/count/recency right-aligned; legend + pager
+    on one line at the top; layout diverged from the mockup)."""
     built = screen("packrat · Roots", roots_body(fixtures.ROOTS, now=NOW, cursor=0),
                    "daemon ● up",
                    footer="↑/↓ select   [Enter] open detail   ←/→ page   "
                           "[s] sort   [a] add root   Esc back")
-    _assert_frame(built, "[S]ort: most recent registered")
+    rows = built.split("\n")
+    assert len(rows) == 24 and all(len(r) == 100 for r in rows)
+    assert "[S]ort: most recent registered" in built
+    # legend + paginator share the line directly under the sort header
+    legend_line = next(ln for ln in rows if "scanned + deduped" in ln)
+    assert "page 1/1" in legend_line
 
 
-def test_add_root_form_matches_frame_2_2():
+def test_add_root_form_structural():
     built = screen("packrat · Roots · add",
                    add_root_body(path=r"\\tubie_nas\Res-v2\NewPhone", name="NewPhone", scan=True),
                    "daemon ● up",
                    footer="[Tab] next field   type to edit   [Enter] register   Esc cancel")
-    _assert_frame(built, "Register a new root")
+    rows = built.split("\n")
+    assert len(rows) == 24 and all(len(r) == 100 for r in rows)
+    assert "Register a new root" in built
+    assert "(•) library" in built and "( ) trash" in built     # Kind radio
+    assert "[x] scan immediately after registering" in built
+    assert r"\\tubie_nas\Res-v2\NewPhone" in built             # the typed path
 
 
 # --- §3 / §4 / §5: fixed-size structural checks ----------------------------
-# The stable chrome/content frames above are byte-exact; these interfaces carry
+# These interfaces carry
 # hand-authored illustrative detail in the mockups, so we assert the fixed-frame
 # invariant + key content rather than byte-equality (same policy as §1.2).
 def _fixed(frame: str) -> list[str]:
@@ -200,3 +178,62 @@ def test_already_clean_dedup_card():
     built = screen(jobcard.card_title(j), jobcard.card_body(j, now=NOW), "Jul 13", footer="Esc")
     _fixed(built)
     assert "already clean" in built
+
+
+# --- §3.3 merge picker -----------------------------------------------------
+def test_merge_picker_registered_root_variant():
+    dest = fixtures.root_detail_clean()          # Camera
+    sources = merge_sources(fixtures.ROOTS, dest["name"])
+    built = screen(f"packrat · {dest['name']} · merge from",
+                   merge_body(dest, sources, source_mode="root"),
+                   f"{dest['path']} · {dest['kind']}", footer="Esc")
+    _fixed(built)
+    assert "Destination   Camera" in built
+    assert "(•) Registered root" in built and "( ) External folder" in built
+    assert "--dry-run" in built
+    # dest itself + trash roots are excluded from the source list
+    assert not any(s["kind"] == "trash" for s in sources)
+    assert "Camera" not in "\n".join(
+        ln for ln in built.split("\n") if "assets" in ln)   # dest not a source row
+
+
+def test_merge_picker_external_folder_variant():
+    dest = fixtures.root_detail_clean()
+    sources = merge_sources(fixtures.ROOTS, dest["name"])
+    built = screen(f"packrat · {dest['name']} · merge from",
+                   merge_body(dest, sources, source_mode="ext",
+                              ext_path=r"E:\iphone_dump", dry_run=True),
+                   f"{dest['path']} · {dest['kind']}", footer="Esc")
+    _fixed(built)
+    assert "(•) External folder" in built
+    assert "E:\\iphone_dump" in built
+    assert "[x] --dry-run" in built              # toggle reflected
+
+
+# --- title bar: right-label trimming + CJK width ---------------------------
+def test_title_bar_middle_elides_overflowing_right_label():
+    from packrat.tui.layout import cell_width
+    long_right = (r"\\synology-ds920.local\home\Backups\Devices\iPhone15Pro"
+                  r"\DCIM\Camera · library")
+    built = screen("packrat · Synology_Backup", ["body"], long_right,
+                   footer="Esc", width=90, height=8)
+    top = built.split("\n")[0]
+    assert cell_width(top) == 90                 # border flush, not overflowed
+    assert "…" in top                            # right label was middle-elided
+    assert top.endswith("· library ┐")           # the "· <kind>" tail is kept
+
+
+def test_title_bar_cjk_stays_aligned():
+    from packrat.tui.layout import cell_width
+    built = screen("packrat · 手机相册", ["body"],
+                   r"D:\备份\手机相册\2026 · library", footer="Esc", width=100, height=8)
+    for r in built.split("\n"):
+        assert cell_width(r) == 100              # CJK measured as 2 cells → flush
+
+
+def test_title_bar_no_trim_when_it_fits():
+    # a short right label on a wide frame is untouched (no ellipsis)
+    built = screen("packrat · Camera", ["body"], r"E:\Photos · library",
+                   footer="Esc", width=100, height=8)
+    top = built.split("\n")[0]
+    assert "E:\\Photos · library" in top and "…" not in top

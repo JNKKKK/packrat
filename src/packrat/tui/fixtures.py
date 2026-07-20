@@ -1,16 +1,14 @@
-"""Shared sample data for the TUI — the crux of the golden-frame tests (§Testing).
+"""Shared sample data for the TUI golden-frame tests (§Testing).
 
-The mockup frames in ``docs/M6-tui-mockups.md`` and the live widgets must render
-from **one source** for a golden-frame assertion to *mean* anything (component-plan
-§Testing). This module is that source: query-shaped sample dicts matching exactly
-what :mod:`packrat.queries` returns (``status_snapshot`` / ``roots_snapshot`` /
-``root_detail`` / job rows + per-op ``result_json``). Widget tests feed these and
-assert the render; an offline/demo mode of the app can render them too.
+Query-shaped sample dicts matching exactly what :mod:`packrat.queries` returns
+(``status_snapshot`` / ``roots_snapshot`` / ``root_detail`` / job rows + per-op
+``result_json``), so the frame tests render the pure builders against a stable,
+mockup-scale dataset. (The richer, deliberately-oversized dataset the live offline
+app renders is :mod:`packrat.tui.demo`.)
 
 Timestamps are real ISO strings anchored to :data:`REFERENCE_NOW` so relative-time
 rendering ("2h ago", "today 11:31") is **deterministic** in tests — the render
 helpers take an explicit ``now`` (never call the wall clock in a golden test).
-The numbers mirror the mockup (iPhone 98,412 assets, Camera 26,150, …).
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Invariant tests for the pure TUI layout layer (M6-component-plan §Testing).
+"""Invariant tests for the pure TUI layout layer (§12 fixed-layout rules).
 
 These are the cheap, high-value "invariant net" that catches the whole class of
 "window grew / border eaten / column misaligned" bugs §12 exists to prevent:
@@ -15,12 +15,16 @@ from packrat.tui import tokens
 from packrat.tui.layout import (
     Cell,
     Fitted,
+    cell_pad,
+    cell_truncate,
+    cell_width,
     fit,
     fit_width,
     middle_elide,
     pager_line,
     row,
     wrap_cells,
+    wrap_hints,
 )
 
 WIDTHS = [1, 2, 5, 10, 29, 40, 55, 80, 96, 98, 100, 200]
@@ -228,3 +232,91 @@ def test_default_theme_covers_all_roles():
 
 def test_theme_color_fallback():
     assert tokens.DEFAULT_THEME.color("nonexistent") == tokens.DEFAULT_THEME.colors["default"]
+
+
+# --- CJK / wide-character display width ------------------------------------
+def test_cell_width_counts_cjk_as_two():
+    assert cell_width("相册") == 4                    # two wide chars → 4 cells
+    assert cell_width("相册 iPhone") == 11            # 4 + 1 space + 6 ascii
+    assert cell_width("ascii") == 5                   # unchanged for ascii
+
+
+def test_cell_width_glyphs_are_one_cell():
+    # our box/dot glyphs must measure as 1 cell (keeps golden frames byte-identical)
+    for g in (tokens.DOT_DEDUPED, tokens.DOT_SCANNED, tokens.DOT_NEVER,
+              tokens.CURSOR, tokens.RUNNING, tokens.WARN, tokens.ELLIPSIS,
+              tokens.BAR_FILL, tokens.BAR_EMPTY):
+        assert cell_width(g) == 1, g
+
+
+def test_cell_truncate_never_splits_a_wide_char():
+    # truncating "相册" to 3 cells keeps only the first (2 cells); no half char
+    assert cell_truncate("相册照片", 3) == "相"
+    assert cell_width(cell_truncate("相册照片", 3)) == 2
+
+
+def test_cell_pad_fills_to_exact_display_width():
+    out = cell_pad("相册", 6)                          # 4 cells + 2 pad
+    assert cell_width(out) == 6 and out == "相册  "
+
+
+@pytest.mark.parametrize("w", WIDTHS)
+def test_row_cjk_len_equals_display_width(w):
+    # a row with CJK content is still exactly `w` DISPLAY cells wide
+    cells = [
+        Cell(tokens.CURSOR, width=1),
+        Cell("相册备份", width=10),
+        Cell(r"D:\备份\手机相册\2026", grow=1, elide="middle"),
+        Cell(tokens.DOT_DEDUPED, width=1),
+        Cell("12,345", width=7, align="right"),
+    ]
+    assert cell_width(row(w, cells)) == w
+
+
+def test_middle_elide_cjk_within_width():
+    p = r"D:\备份\手机相册\2026年家庭照片\originals"
+    e = middle_elide(p, 20)
+    assert cell_width(e) <= 20
+    assert tokens.ELLIPSIS in e
+
+
+def test_fit_width_cjk_exact_cells():
+    assert cell_width(fit_width("相册 iPhone", 20)) == 20
+
+
+def test_wrap_cells_cjk_respects_display_width():
+    out = wrap_cells("相册 手机 照片 视频 备份 归档", 8)
+    assert all(cell_width(ln) <= 8 for ln in out)
+
+
+# --- wrap_hints: footer wrapping -------------------------------------------
+FOOTER = ("[r]/[q]/[e] section   ↑/↓ select   ←/→ page   [c] cancel   "
+          "[p] prioritize   [x] cancel all   [Enter] detail   Esc back")
+
+
+def test_wrap_hints_single_line_when_it_fits():
+    assert wrap_hints(FOOTER, 200) == [FOOTER]        # plenty of room → unchanged
+
+
+def test_wrap_hints_splits_when_too_narrow():
+    lines = wrap_hints(FOOTER, 96)
+    assert len(lines) == 2                            # doesn't fit 96 → 2 lines
+    assert all(len(ln) <= 96 for ln in lines)
+
+
+def test_wrap_hints_never_splits_a_hint_group():
+    # a multi-word group like "[x] cancel all" must stay intact on one line
+    for ln in wrap_hints(FOOTER, 96):
+        assert "[x] cancel all" in ln or "[x]" not in ln
+        assert "[Enter] detail" in ln or "[Enter]" not in ln
+
+
+def test_wrap_hints_all_groups_preserved():
+    joined = " ".join(wrap_hints(FOOTER, 96))
+    for group in ("[c] cancel", "[p] prioritize", "[x] cancel all", "[Enter] detail", "Esc back"):
+        assert group in joined
+
+
+def test_wrap_hints_short_footer_unchanged():
+    short = "Esc back"
+    assert wrap_hints(short, 50) == [short]
