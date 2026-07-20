@@ -76,6 +76,27 @@ def test_dashboard_logo_animation_cycles_gem_and_stays_fixed():
     _drive(scenario)
 
 
+def test_dashboard_hoard_count_matches_gem_color():
+    """The "· N assets hoarded ·" number is tinted the SAME color as the mascot's gem."""
+    async def scenario(app, pilot):
+        from packrat.tui.colorize import gem_gradient_color
+        dash = app.screen
+        frame = dash.current_frame
+        text = dash._colorize(frame)                      # what the live widget paints
+        color = gem_gradient_color(dash._gem_phase)
+        gem_idx = frame.find(dash._gem)                   # first gem cell
+        count_idx = frame.find("assets hoarded") - 2      # a digit of the count
+        def color_at(i):
+            c = text.style
+            for s in text.spans:
+                if s.start <= i < s.end:
+                    c = s.style
+            return str(c)
+        assert color_at(gem_idx) == color
+        assert color_at(count_idx) == color               # count glints with the gem
+    _drive(scenario)
+
+
 # --- focus → maximize table (§focus model) --------------------------------
 def test_focus_then_maximize_roots():
     async def scenario(app, pilot):

@@ -228,11 +228,14 @@ class Dashboard(FrameScreen):
         return render.LOGO_GEMS[idx]
 
     def _colorize(self, frame: str):
-        # Apply the base theme colors, then sweep the gem's gradient on top so the
-        # held stone glints (post-layout, live widget only — §Theming).
-        from .colorize import gem_gradient_color, recolor_gem
+        # Apply the base theme colors, then sweep the gem's gradient on top so the held
+        # stone glints — and tint the "· N assets hoarded ·" count the SAME color so the
+        # number glints with the gem (post-layout, live widget only — §Theming).
+        from .colorize import gem_gradient_color, recolor_gem, recolor_hoard_count
+        color = gem_gradient_color(self._gem_phase)
         text = colorize(frame)
-        return recolor_gem(text, frame, self._gem, gem_gradient_color(self._gem_phase))
+        recolor_gem(text, frame, self._gem, color)
+        return recolor_hoard_count(text, frame, color)
 
     def _sync_lens(self) -> None:
         snap = self.app.snapshot

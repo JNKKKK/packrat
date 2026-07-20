@@ -138,6 +138,23 @@ def recolor_gem(text: Text, frame: str, gem: str, color: str) -> Text:
     return text
 
 
+# The live hoard count in the logo's "· N assets hoarded ·" line — tinted the same as
+# the mascot's gem so the number glints with it. Matched by its surrounding words (the
+# count itself is dynamic), digits + thousands commas only.
+_HOARD_COUNT_RE = re.compile(r"·\s([\d,]+)\sassets hoarded")
+
+
+def recolor_hoard_count(text: Text, frame: str, color: str) -> Text:
+    """Tint the ``N`` in ``· N assets hoarded ·`` to ``color`` (in place, post-colorize).
+
+    Matches only the count's digit span, so the surrounding text keeps its default color.
+    Returns ``text`` for chaining."""
+    m = _HOARD_COUNT_RE.search(frame)
+    if m:
+        text.stylize(color, m.start(1), m.end(1))
+    return text
+
+
 def colorize(frame: str, theme: Theme = tokens.DEFAULT_THEME) -> Text:
     """Return a Rich ``Text`` of ``frame`` with theme role colors applied by pattern.
 

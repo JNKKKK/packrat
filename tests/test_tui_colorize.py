@@ -176,3 +176,17 @@ def test_recolor_gem_tints_only_the_gems():
     assert tinted == [(positions[0], positions[0] + 1), (positions[1], positions[1] + 1)]
     # content is untouched (recolor is style-only)
     assert text.plain == logo
+
+
+def test_recolor_hoard_count_tints_only_the_number():
+    from packrat.tui.colorize import recolor_hoard_count
+    from packrat.tui import render
+
+    logo = "\n".join(render.logo_lines(1234567, gem="◆"))
+    text = recolor_hoard_count(colorize(logo), logo, "#ff00ff")
+    tinted = [(s.start, s.end) for s in text.spans if str(s.style) == "#ff00ff"]
+    # exactly one span — the "1,234,567" count in "· N assets hoarded ·"
+    assert len(tinted) == 1
+    a, b = tinted[0]
+    assert logo[a:b] == "1,234,567"           # digits + commas, nothing else
+    assert text.plain == logo                 # style-only, content unchanged
