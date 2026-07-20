@@ -11,6 +11,7 @@ distance ~0–4 (measured, [[pdq-downscale]]) → a perceptual trash match.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -224,9 +225,13 @@ def test_cleanup_perceptual_stage_confirm_deletes(queue_and_db, tmp_path):
     _run(q, database, "scan", root_id=root["id"])
     _trash_asset_from(database, master)  # zero-instance trashed asset (matches the jpg)
 
-    _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
+    jid = _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     assert run is not None and run["stage"] == 1
+    # The analyze job's result carries review_status='pending' (like dedup) so the M6
+    # TUI card / Review box detect the awaiting-review state and offer [o]/[g]/[k].
+    rj = json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid,))["result_json"])
+    assert rj["op"] == "cleanup" and rj["review_status"] == "pending"
     acts = database.query("SELECT * FROM review_actions WHERE run_id=?", (run["id"],))
     perceptual = [a for a in acts if a["kind"] == "perceptual"]
     assert len(perceptual) == 1 and perceptual[0]["matched_trashed_asset_id"] is not None

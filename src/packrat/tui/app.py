@@ -15,6 +15,9 @@ verbs / daemon endpoints (§1.6) — the TUI issues no privileged op of its own.
 
 from __future__ import annotations
 
+import time
+
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
@@ -22,11 +25,11 @@ from textual.widgets import Static
 
 from . import demo, fixtures
 from .colorize import colorize
-from .data import reltime
+from .data import EtaEstimator, reltime
 from .framing import screen
 from .geometry import REF_H, REF_W, Geometry
 from .layout import wrap_hints
-from .modals import ChoiceModal, ConfirmModal, MessageModal
+from .modals import ChoiceModal, ConfirmModal
 from .nav import DashboardFocus
 from .screens import jobcard
 from .screens.dashboard import dashboard_body, queue_preview_pages
@@ -41,6 +44,21 @@ from .screens.roots import ADD_ROOT_FIELDS, add_root_body, roots_body
 def _review_verb(pending: dict) -> str:
     """The CLI verb that confirms/cancels a pending review run (dedup vs cleanup)."""
     return "cleanup" if pending.get("run_type") == "cleanup-perceptual" else "dedup"
+
+
+def _empty_snapshot() -> dict:
+    """A complete, zeroed ``status_snapshot()``-shaped dict for the daemon-down state.
+
+    Every pure builder indexes ``snap["assets"]`` etc. directly (not ``.get``), so an
+    empty ``{}`` crashes the dashboard with ``KeyError``. This is the safe default the
+    app renders before the first successful fetch / when the daemon is unreachable —
+    the frame draws (all zeros, ``daemon ○ down`` in the header), never crashes."""
+    return {
+        "assets": 0, "photos": 0, "videos": 0, "trashed": 0,
+        "size_bytes": 0, "lifetime_deduped": 0,
+        "running": None, "queued": [], "interrupted": [],
+        "pending_reviews": [], "roots": [],
+    }
 
 
 def _open_in_explorer(path: str) -> None:
@@ -120,7 +138,20 @@ class FrameScreen(Screen):
         self.current_frame = self.frame()      # PLAIN string (tests / snapshotting)
         # Colorize post-layout (§Theming): the plain frame stays the source of
         # truth; only the live widget gets theme role colors applied by pattern.
-        self.query_one("#frame", Static).update(colorize(self.current_frame))
+        self.query_one("#frame", Static).update(self._colorize(self.current_frame))
+
+    def _colorize(self, frame: str):
+        """Plain frame → colorized Rich ``Text`` (overridable for per-frame effects,
+        e.g. the dashboard's animated logo-gem gradient)."""
+        return colorize(frame)
+
+    def poll_reload(self) -> None:
+        """Re-fetch this screen's OWN read-model, if any (called on the poll timer).
+
+        The dashboard/queue read straight off ``app.snapshot`` (refreshed centrally),
+        so the base is a no-op. Screens with a per-screen fetch (root detail's
+        ``status <root>`` + ``root_jobs``) override this to refresh on the poll instead
+        of inside :meth:`frame` — so a keypress re-render doesn't re-hit the daemon."""
 
     @property
     def is_active(self) -> bool:
@@ -168,6 +199,40 @@ class Dashboard(FrameScreen):
         self.focus_state = DashboardFocus()
         self.roots_page = 0
         self.queue_page = 0
+        # Logo hoard animation: the held gem glyph swaps across render.LOGO_GEMS every
+        # LOGO_GEM_SWAP_TICKS, and its color shimmers along the GEM_GRADIENT each tick.
+        self._anim_tick = 0
+        self._gem_phase = 0.0
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        # Drive the logo animation on its own light timer (offline + online). Only the
+        # top section changes; the tick just advances state + re-renders the frame.
+        from .tokens import LOGO_ANIM_INTERVAL_S
+        self.set_interval(LOGO_ANIM_INTERVAL_S, self._tick_logo)
+
+    def _tick_logo(self) -> None:
+        from .tokens import LOGO_GRADIENT_STEP
+        self._anim_tick += 1
+        self._gem_phase = (self._gem_phase + LOGO_GRADIENT_STEP) % 1.0
+        # Only repaint when the dashboard is the top screen (a pushed detail/modal
+        # screen owns the display) — cheap guard so the timer idles in the background.
+        if self.is_active:
+            self.refresh_frame()
+
+    @property
+    def _gem(self) -> str:
+        from .tokens import LOGO_GEM_SWAP_TICKS
+        from . import render
+        idx = (self._anim_tick // LOGO_GEM_SWAP_TICKS) % len(render.LOGO_GEMS)
+        return render.LOGO_GEMS[idx]
+
+    def _colorize(self, frame: str):
+        # Apply the base theme colors, then sweep the gem's gradient on top so the
+        # held stone glints (post-layout, live widget only — §Theming).
+        from .colorize import gem_gradient_color, recolor_gem
+        text = colorize(frame)
+        return recolor_gem(text, frame, self._gem, gem_gradient_color(self._gem_phase))
 
     def _sync_lens(self) -> None:
         snap = self.app.snapshot
@@ -192,6 +257,7 @@ class Dashboard(FrameScreen):
             self.app.snapshot, now=self.now, geo=geo, focus=fs.target,
             roots_cursor=fs.roots_cursor, roots_page=self.roots_page,
             queue_cursor=fs.queue_cursor, queue_page=self.queue_page,
+            gem=self._gem,
         )
         return screen("packrat", body, self.app.header_right, footer=footer,
                       width=geo.w, height=geo.h)
@@ -381,9 +447,9 @@ class AddRootScreen(FrameScreen):
 
     def __init__(self) -> None:
         super().__init__()
-        # Pre-filled sample so the demo form isn't blank; the fields are editable.
-        self.path = r"E:\import\SDCard_2026"
-        self.root_name = "SDCard2"
+        # Start blank — the user types the path/name (no pre-filled sample).
+        self.path = ""
+        self.root_name = ""
         self.kind = "library"     # toggled between library/trash on the Kind field
         self.scan = True          # toggled on the scan field
         self.field_idx = 0        # index into ADD_ROOT_FIELDS ([Tab] focus order)
@@ -623,26 +689,47 @@ class RootDetailScreen(FrameScreen):
         Binding("left", "page(-1)", show=False),
         Binding("right", "page(1)", show=False),
         Binding("enter", "result", show=False),
+        Binding("v", "focus_review", show=False),
+        Binding("j", "focus_jobs", show=False),
+        Binding("r", "focus_section('running')", show=False),
+        Binding("q", "focus_section('queued')", show=False),
+        Binding("h", "focus_section('history')", show=False),
         Binding("s", "scan", show=False),
         Binding("d", "dedup", show=False),
         Binding("m", "merge", show=False),
         Binding("c", "cleanup", show=False),
         Binding("o", "open_review", show=False),
         Binding("g", "confirm_review", show=False),
+        Binding("b", "confirm_keep_suggested", show=False),
         Binding("k", "cancel_review", show=False),
-        Binding("escape", "app.pop_screen", show=False),
+        Binding("escape", "back", show=False),
     ]
 
     def __init__(self, root_name: str) -> None:
         super().__init__()
         self.root_name = root_name
-        self.cursor = 0
-        self.page = 0
-        self._jobs: list[dict] = []      # last-fetched jobs (refreshed in frame())
+        # Two focus-able bordered boxes (like the dashboard): the Review box ([v]) and
+        # the Jobs panel ([J]). `focus` is which box is focused (None | "review" |
+        # "jobs"); within the Jobs panel, [r]/[q]/[h] pick the sub-section (each with
+        # its own cursor + page). Unfocused by default.
+        self.focus: str | None = None
+        self.job_focus = "running"       # default Jobs sub-section (§3, matches Queue)
+        self.cursors = {"running": 0, "queued": 0, "history": 0}
+        self.pages = {"running": 0, "queued": 0, "history": 0}
+        self._jobs: list[dict] = []      # last-fetched jobs (refreshed on mount + poll)
         self._detail: dict | None = None
+        self._loaded = False             # False until the first reload() populates data
 
-    FOOTER = ("[s] scan  [d] dedup  [m] merge from…  [c] clean up  [Enter] result  "
-              "↑/↓ jobs  ←/→ page  Esc")
+    FOOTER_BASE = ("[s] scan  [d] dedup  [m] merge from…  [c] clean up  "
+                   "[v] review  [J] jobs  Esc")
+    FOOTER_REVIEW = ("[o] open in Explorer   [g] confirm stage   [k] cancel run   "
+                     "Esc unfocus")
+    # Stage-2 dedup also offers the bulk keep-suggested confirm (§8 B --keep-suggested).
+    FOOTER_REVIEW_STAGE2 = ("[o] open in Explorer   [g] confirm stage   "
+                            "[b] keep suggested   [k] cancel run   Esc unfocus")
+    FOOTER_REVIEW_EMPTY = "no pending review — nothing to act on   Esc unfocus"
+    FOOTER_JOBS = ("[r]/[q]/[h] section   ↑/↓ select   ←/→ page   [Enter] result   "
+                   "Esc unfocus")
 
     # The three cleanup modes (§6.2) offered by [c]; label → CLI flag. Labels kept
     # short enough to fit the choice modal (≤ ~54 cells) without wrapping.
@@ -652,39 +739,120 @@ class RootDetailScreen(FrameScreen):
         ("undecodable  (delete non-decoding files)", "--undecodable"),
     ]
 
+    def reload(self) -> None:
+        """Fetch this root's detail + jobs from the daemon (mount + poll, NOT per key).
+
+        ``root_detail`` online is two blocking HTTP calls (``status <root>`` +
+        ``root_jobs``); doing it inside :meth:`frame` re-hit the daemon on every
+        keypress and blocked the UI. We fetch here — once on mount and on each poll —
+        and :meth:`frame` renders from the cached ``self._detail``/``self._jobs``."""
+        self._detail, self._jobs = self.app.root_detail(self.root_name)
+        self._loaded = True
+
+    def on_mount(self) -> None:
+        self.reload()
+        super().on_mount()
+
+    def poll_reload(self) -> None:
+        self.reload()
+
     def frame(self) -> str:
-        # One fetch per re-render; actions reuse `self._detail`/`self._jobs` rather
-        # than re-hitting the daemon on every keypress (online → HTTP call).
-        geo = self._geo = self.geo_for(self.FOOTER)
-        d, jobs = self.app.root_detail(self.root_name)
-        self._detail, self._jobs = d, jobs
+        # Render from the cached detail/jobs (fetched on mount + poll, not per keypress).
+        if not self._loaded:
+            self.reload()
+        d, jobs = self._detail, self._jobs
+        if self.focus == "review":
+            if not self._has_review():
+                footer = self.FOOTER_REVIEW_EMPTY
+            elif self._is_stage2_dedup():
+                footer = self.FOOTER_REVIEW_STAGE2
+            else:
+                footer = self.FOOTER_REVIEW
+        elif self.focus == "jobs":
+            footer = self.FOOTER_JOBS
+        else:
+            footer = self.FOOTER_BASE
+        geo = self._geo = self.geo_for(footer)
         if d is None:
             return screen("packrat · ?", ["root not found."], self.app.header_right,
                           footer="Esc back", width=geo.w, height=geo.h)
         body = detail_body(d, now=self.now, geo=geo, jobs=jobs,
-                          jobs_cursor=self.cursor, jobs_page=self.page)
+                          focus=self.focus, job_focus=self.job_focus,
+                          cursors=self.cursors, pages=self.pages)
         return screen(f"packrat · {d['name']}", body, detail_header_right(d),
-                      footer=self.FOOTER, width=geo.w, height=geo.h)
+                      footer=footer, width=geo.w, height=geo.h)
+
+    # -- box focus + per-section navigation (mirrors QueueMax) ------------
+    def _sections(self) -> dict:
+        from .screens.rootdetail import split_jobs
+        return split_jobs(self._detail or {}, self._jobs)
+
+    def _section_jobs(self, section: str) -> list[dict]:
+        return self._sections().get(section, [])
+
+    def _section_rows(self, section: str) -> int:
+        # The queued/history window heights the body used this frame (§3 panel split).
+        from .screens.rootdetail import panel_section_rows
+        return panel_section_rows(self._detail or {}, self._geo)[section]
+
+    def action_focus_review(self) -> None:
+        # [v] focuses the Review box (always focus-able, even with no pending review —
+        # the box is a permanent section, like Jobs).
+        self.focus = "review"
+        self.refresh_frame()
+
+    def action_focus_jobs(self) -> None:
+        self.focus = "jobs"
+        self.refresh_frame()
+
+    def action_focus_section(self, section: str) -> None:
+        if self.focus == "jobs":
+            self.job_focus = section
+            self.refresh_frame()
+
+    def action_back(self) -> None:
+        # Esc un-focuses a focused box first; a second Esc backs out to Roots.
+        if self.focus is not None:
+            self.focus = None
+            self.refresh_frame()
+        else:
+            self.app.pop_screen()
 
     def action_move(self, delta: int) -> None:
-        n = len(self._jobs)
-        self.cursor = max(0, min(self.cursor + delta, n - 1)) if n else 0
-        self.page = self.cursor // self._geo.jobs_rows
+        if self.focus != "jobs":
+            return
+        sec = self.job_focus
+        n = len(self._section_jobs(sec))
+        rows = self._section_rows(sec)
+        cur = max(0, min(self.cursors[sec] + delta, n - 1)) if n else 0
+        self.cursors[sec] = cur
+        self.pages[sec] = cur // rows if rows else 0     # auto-follow within section
         self.refresh_frame()
 
     def action_page(self, delta: int) -> None:
-        rows = self._geo.jobs_rows
-        n = len(self._jobs)
-        pages = max(1, -(-n // rows))
-        new = max(0, min(self.page + delta, pages - 1))
-        if new != self.page:                       # cursor → first item of the new page
-            self.page = new
-            self.cursor = min(new * rows, max(0, n - 1))
+        if self.focus != "jobs":
+            return
+        sec = self.job_focus
+        n = len(self._section_jobs(sec))
+        rows = self._section_rows(sec)
+        pages = max(1, -(-n // rows)) if rows else 1
+        new = max(0, min(self.pages[sec] + delta, pages - 1))
+        if new != self.pages[sec]:
+            self.pages[sec] = new
+            self.cursors[sec] = min(new * rows, max(0, n - 1))   # → first item on page
         self.refresh_frame()
 
+    def _selected_job(self) -> dict | None:
+        # The focused sub-section's ▸ row (jobs unfocused → newest history job).
+        sec = self.job_focus if self.focus == "jobs" else "history"
+        jobs = self._section_jobs(sec)
+        i = self.cursors[sec] if self.focus == "jobs" else 0
+        return jobs[i] if jobs and 0 <= i < len(jobs) else None
+
     def action_result(self) -> None:
-        if self._jobs:
-            self.app.push_screen(JobCard(self._jobs[self.cursor]))
+        job = self._selected_job()
+        if job:
+            self.app.push_screen(JobCard(job))
 
     # -- per-root ops (§3): each maps to a CLI verb (§1.6), submitted for real
     #    online via the daemon client; offline shows the "would run" notice.
@@ -724,8 +892,20 @@ class RootDetailScreen(FrameScreen):
     def _has_review(self) -> bool:
         return bool(self._detail and self._detail.get("pending_review"))
 
+    def _review_actionable(self) -> bool:
+        """The review actions ([o]/[g]/[k]) fire only when the Review box is FOCUSED
+        AND a review is pending — so pressing those keys elsewhere is inert (they're
+        the box's inside shortcuts, dimmed while it's out of focus)."""
+        return self.focus == "review" and self._has_review()
+
+    def _is_stage2_dedup(self) -> bool:
+        """True when the pending review is a dedup parked at stage 2 — the only case
+        that offers ``--confirm --keep-suggested`` (§8 B)."""
+        from .screens.rootdetail import is_stage2_dedup
+        return bool(self._detail and is_stage2_dedup(self._detail.get("pending_review")))
+
     def action_open_review(self) -> None:
-        if self._has_review():
+        if self._review_actionable():
             path = self._detail["path"]
             self.app.run_verb(f"explorer {path}\\_packrat_review\\", title="open in Explorer",
                               submit=lambda: _open_in_explorer(path))
@@ -740,15 +920,27 @@ class RootDetailScreen(FrameScreen):
         return self.app.client.submit_dedup(root, **kw)
 
     def action_confirm_review(self) -> None:
-        if self._has_review():
+        if self._review_actionable():
             verb = _review_verb(self._detail["pending_review"])
             root = self.root_name
             self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
                                   f"packrat {verb} {root} --confirm",
                                   submit=lambda: self._submit_review(verb, root, confirm=True))
 
+    def action_confirm_keep_suggested(self) -> None:
+        """[b] on a stage-2 dedup review → `--confirm --keep-suggested` (§8 B): keep
+        each group's suggested lead, delete the rest, ignoring shortcut edits. Inert
+        unless the Review box is focused AND the run is a stage-2 dedup."""
+        if self._review_actionable() and self._is_stage2_dedup():
+            root = self.root_name
+            self.app.confirm_verb(
+                f"Confirm stage 2 for {root}, keeping packrat's suggested lead in each group?",
+                f"packrat dedup {root} --confirm --keep-suggested",
+                submit=lambda: self.app.client.submit_dedup(
+                    root, confirm=True, keep_suggested=True))
+
     def action_cancel_review(self) -> None:
-        if self._has_review():
+        if self._review_actionable():
             verb = _review_verb(self._detail["pending_review"])
             root = self.root_name
             self.app.confirm_verb(f"Cancel the whole {verb} run for {root}?",
@@ -774,7 +966,7 @@ class QueueMax(FrameScreen):
         Binding("right", "page(1)", show=False),
         Binding("r", "focus_section('running')", show=False),
         Binding("q", "focus_section('queued')", show=False),
-        Binding("e", "focus_section('recent')", show=False),
+        Binding("h", "focus_section('history')", show=False),
         Binding("enter", "detail", show=False),
         Binding("c", "cancel", show=False),
         Binding("p", "prioritize", show=False),
@@ -784,9 +976,9 @@ class QueueMax(FrameScreen):
 
     def __init__(self) -> None:
         super().__init__()
-        self.focus = "queued"       # focused section: running|queued|recent
-        self.cursors = {"running": 0, "queued": 0, "recent": 0}
-        self.pages = {"running": 0, "queued": 0, "recent": 0}
+        self.focus = "running"      # focused section: running|queued|history (§4 default)
+        self.cursors = {"running": 0, "queued": 0, "history": 0}
+        self.pages = {"running": 0, "queued": 0, "history": 0}
 
     # -- section data / sizing --------------------------------------------
     def _section_jobs(self, section: str) -> list[dict]:
@@ -796,12 +988,12 @@ class QueueMax(FrameScreen):
 
     # Full natural wording — wraps to 2 lines on a narrow terminal (wrap_hints),
     # one line on a wide one. No hand-trimming to fit 100 cols.
-    FOOTER = ("[r]/[q]/[e] section   ↑/↓ select   ←/→ page   [c] cancel   "
+    FOOTER = ("[r]/[q]/[h] section   ↑/↓ select   ←/→ page   [c] cancel   "
               "[p] prioritize   [x] cancel all   [Enter] detail   Esc back")
 
     def _section_rows(self, section: str) -> int:
         geo = self._geo
-        return {"running": 1, "queued": geo.queued_rows, "recent": geo.recent_rows}[section]
+        return {"running": 1, "queued": geo.queued_rows, "history": geo.recent_rows}[section]
 
     def frame(self) -> str:
         geo = self._geo = self.geo_for(self.FOOTER)
@@ -810,7 +1002,7 @@ class QueueMax(FrameScreen):
             snap.get("running"), snap.get("queued", []), self.app.recent, now=self.now,
             geo=geo, focus=self.focus,
             queued_cursor=self.cursors["queued"], queued_page=self.pages["queued"],
-            recent_cursor=self.cursors["recent"], recent_page=self.pages["recent"],
+            history_cursor=self.cursors["history"], history_page=self.pages["history"],
             running_cursor=self.cursors["running"],
         )
         return screen("packrat · Queue", body, self.app.header_right,
@@ -879,6 +1071,8 @@ class QueueMax(FrameScreen):
 # ---------------------------------------------------------------------------
 class JobCard(FrameScreen):
     BINDINGS = [
+        Binding("up", "scroll(-1)", show=False),
+        Binding("down", "scroll(1)", show=False),
         Binding("c", "cancel", show=False),
         Binding("o", "open_review", show=False),
         Binding("g", "confirm_review", show=False),
@@ -889,6 +1083,27 @@ class JobCard(FrameScreen):
     def __init__(self, job: dict) -> None:
         super().__init__()
         self.job = job
+        self._problems: list[dict] = []   # a scan card's undecodable/read-error files
+        self.problems_scroll = 0
+
+    def on_mount(self) -> None:
+        # A terminal scan card lists its problem files (paths + reasons, §12); fetch
+        # them once (they don't change for a finished job) BEFORE the first frame.
+        self._load_problems()
+        super().on_mount()
+
+    def _op(self) -> str:
+        import json
+        try:
+            return json.loads(self.job.get("result_json") or "{}").get("op") or self.job["type"]
+        except (ValueError, TypeError):
+            return self.job["type"]
+
+    def _load_problems(self) -> None:
+        if self.job.get("status") in ("running", "error", "interrupted"):
+            return
+        if self._op() == "scan":
+            self._problems = self.app.job_problem_files(self.job)
 
     def _pending(self) -> bool:
         import json
@@ -897,6 +1112,19 @@ class JobCard(FrameScreen):
         except (ValueError, TypeError):
             return False
 
+    def _verb(self) -> str:
+        """The review CLI verb this card's op maps to — ``cleanup`` or ``dedup``.
+
+        A paused ``cleanup --trash-perceptual`` also lands here (its analyze now emits
+        ``review_status='pending'``), so confirm/cancel must NOT be hardcoded to dedup."""
+        return "cleanup" if self._op() == "cleanup" else "dedup"
+
+    def _submit_review(self, root: str, **kw):
+        """Deferred confirm/cancel call for this card's review (dedup or cleanup)."""
+        if self._verb() == "cleanup":
+            return self.app.client.submit_cleanup(root, mode="perceptual", **kw)
+        return self.app.client.submit_dedup(root, **kw)
+
     def frame(self) -> str:
         j = self.job
         right = reltime(j.get("finished_at") or j.get("started_at"), self.now)
@@ -904,11 +1132,24 @@ class JobCard(FrameScreen):
             footer = "[c] cancel job   Esc back"
         elif self._pending():
             footer = "[o] open review   [g] confirm stage   [k] cancel run   Esc back"
+        elif self._problems:
+            footer = "↑/↓ scroll problem files   Esc back"
         else:
             footer = "Esc back"
         geo = self._geo = self.geo_for(footer)
-        return screen(jobcard.card_title(j), jobcard.card_body(j, now=self.now), right,
+        body = jobcard.card_body(j, now=self.now, problem_files=self._problems,
+                                 problems_scroll=self.problems_scroll, geo=geo)
+        return screen(jobcard.card_title(j), body, right,
                       footer=footer, width=geo.w, height=geo.h)
+
+    def action_scroll(self, delta: int) -> None:
+        # ↑/↓ scroll the problem-file window (no-op when the card has none).
+        budget = jobcard.problem_budget(self.job, self._problems, self._geo)
+        max_scroll = max(0, len(self._problems) - budget)
+        new = max(0, min(self.problems_scroll + delta, max_scroll))
+        if new != self.problems_scroll:
+            self.problems_scroll = new
+            self.refresh_frame()
 
     def action_cancel(self) -> None:
         if self.job.get("status") == "running":
@@ -928,16 +1169,18 @@ class JobCard(FrameScreen):
     def action_confirm_review(self) -> None:
         if self._pending():
             root = self.job.get("root_name", "")
-            self.app.confirm_verb(f"Confirm this dedup stage for {root}?",
-                                  f"packrat dedup {root} --confirm",
-                                  submit=lambda: self.app.client.submit_dedup(root, confirm=True))
+            verb = self._verb()
+            self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
+                                  f"packrat {verb} {root} --confirm",
+                                  submit=lambda: self._submit_review(root, confirm=True))
 
     def action_cancel_review(self) -> None:
         if self._pending():
             root = self.job.get("root_name", "")
-            self.app.confirm_verb(f"Cancel the whole dedup run for {root}?",
-                                  f"packrat dedup {root} --cancel",
-                                  submit=lambda: self.app.client.submit_dedup(root, cancel=True))
+            verb = self._verb()
+            self.app.confirm_verb(f"Cancel the whole {verb} run for {root}?",
+                                  f"packrat {verb} {root} --cancel",
+                                  submit=lambda: self._submit_review(root, cancel=True))
 
 
 # ---------------------------------------------------------------------------
@@ -969,9 +1212,20 @@ class PackratApp(App):
         self.client = client
         self.offline = offline or client is None
         self._now = now or fixtures.REFERENCE_NOW
-        self.snapshot: dict = {}
+        # A COMPLETE zeroed snapshot, not `{}` — the pure builders index required keys
+        # directly, so an empty dict would KeyError before the first fetch / when the
+        # daemon is down (the fallback client at run() exists precisely for that case).
+        self.snapshot: dict = _empty_snapshot()
         self.recent: list[dict] = []
         self.header_right = "daemon ● up"
+        # Live-progress plumbing (§3 SSE + §cross-cutting TUI-side ETA). The poll timer
+        # is only the backstop; the running job's bar/ETA are driven by an SSE stream
+        # (`_stream_running`) whose samples feed `_eta`. `_streamed_job_id`/`_stream_alive`
+        # guard against double-subscribing and let a dropped stream reconnect (§3).
+        self._eta = EtaEstimator()
+        self._streamed_job_id: int | None = None
+        self._stream_alive = False
+        self._last_stream_render = 0.0     # coalesces per-file SSE repaints (see below)
 
     @property
     def now(self) -> str:
@@ -1000,8 +1254,115 @@ class PackratApp(App):
                 self.recent = self.client.list_jobs(20)
                 self.header_right = "v0.1.0 · daemon ● up"
             except Exception:
+                # Daemon unreachable/erroring: degrade to a zeroed snapshot (so the
+                # frame still draws) and flag it in the header — never crash / leave a
+                # partial dict a builder would KeyError on.
+                self.snapshot = _empty_snapshot()
+                self.recent = []
                 self.header_right = "v0.1.0 · daemon ○ down"
-        # Re-render the top screen if it's mounted.
+        # Feed the SSE-less poll path into the ETA estimator + keep the live stream
+        # subscribed to whatever job is now running (fix: the "live" bar was poll-only).
+        self._track_running()
+        # Re-render the top screen if it's mounted (detail screens reload their own
+        # per-root data on the poll, NOT on every keypress — see FrameScreen.poll_reload).
+        if self.screen_stack and isinstance(self.screen, FrameScreen):
+            self.screen.poll_reload()
+            self.screen.refresh_frame()
+
+    # -- live progress: SSE stream + TUI-side ETA (§3 / §cross-cutting) ------
+    def _track_running(self) -> None:
+        """Keep the live SSE stream attached to the current running job + inject ETA.
+
+        Called on every poll refresh. **Online only** — offline demo/fixture jobs carry
+        a fixed ``_eta_s`` in the sample data and need no stream/estimator. When the
+        running job changes (or none runs) the estimator resets; otherwise the poll
+        sample folds in and the derived ETA is written onto the running row so the pure
+        builders (:func:`render.progress_bar`) render ``ETA …``. Starting the stream is
+        idempotent (guarded by ``_stream_alive``); a dropped stream reconnects here."""
+        if self.offline:
+            return
+        running = self.snapshot.get("running")
+        if not running:
+            self._streamed_job_id = None
+            self._eta.reset()
+            return
+        jid = running.get("id")
+        if jid != self._streamed_job_id:      # a new running job → fresh estimate + stream
+            self._streamed_job_id = jid
+            self._eta.reset()
+            self._stream_alive = False
+        self._observe(running)
+        # Attach the live stream if the client supports SSE and none is attached. A
+        # dropped/failed stream clears `_stream_alive`, so the NEXT poll re-attaches
+        # (§3 reconnect) — the poll cadence is the backoff, no tight retry loop.
+        if not self._stream_alive and jid is not None and hasattr(self.client, "stream_job"):
+            self._stream_running(jid)
+
+    def _observe(self, running: dict) -> None:
+        """Fold one ``done`` sample into the estimator + stamp the derived ETA on the row."""
+        done = running.get("done")
+        if done is not None:
+            self._eta.observe(time.monotonic(), done)
+        running["_eta_s"] = self._eta.eta_s(running.get("total"))
+
+    @work(thread=True, exclusive=True, group="job-stream")
+    def _stream_running(self, job_id: int) -> None:
+        """Subscribe to the running job's SSE stream, pushing live progress + ETA.
+
+        Runs in a worker thread — ``client.stream_job`` is a blocking httpx generator.
+        Each progress/state event updates the running row's ``done``/``total`` + the
+        TUI-side ETA and re-renders on the UI thread (via :meth:`call_from_thread`); a
+        terminal event triggers a full refetch so history/result cards appear. A dropped
+        or unreachable stream just ends the worker — the poll backstop re-attaches (§3,
+        job state is durable). ``exclusive`` cancels any prior stream in the group."""
+        self._stream_alive = True
+        finished = False                      # True only on a clean terminal event
+        try:
+            for ev in self.client.stream_job(job_id):
+                if self._streamed_job_id != job_id:
+                    break                     # a newer job took over — let this stream die
+                etype = ev.get("type")
+                if etype in ("progress", "state") and ev.get("done") is not None:
+                    self.call_from_thread(self._apply_stream_progress, job_id, ev)
+                if etype in ("done", "error") or ev.get("status") in (
+                        "done", "error", "cancelled", "interrupted"):
+                    finished = True
+                    break
+        except Exception:
+            pass                              # dropped / daemon gone → poll reconnects
+        finally:
+            self._stream_alive = False
+            # Refetch immediately ONLY on a clean job-finished event (history/result
+            # card appear at once). A mid-stream DROP does NOT refetch here — that would
+            # re-attach instantly and tight-loop if the daemon keeps erroring; the poll
+            # timer reconnects on its own cadence (§3 durable state).
+            if finished:
+                try:
+                    self.call_from_thread(self.refresh_data)
+                except Exception:
+                    pass                      # app tearing down
+
+    def _apply_stream_progress(self, job_id: int, ev: dict) -> None:
+        """Fold one SSE progress event into the running row + re-render (UI thread).
+
+        The in-memory counters + ETA update on EVERY event (no data lost), but the
+        repaint is COALESCED to ``STREAM_RENDER_INTERVAL_S`` — a scan fires one event
+        per file (hundreds/sec), and re-laying-out the whole frame that often is what
+        made the TUI laggy (issue #1). Between repaints the next poll tick still shows
+        the latest value, so nothing stalls visually."""
+        running = self.snapshot.get("running")
+        if not running or running.get("id") != job_id:
+            return
+        if ev.get("done") is not None:
+            running["done"] = ev["done"]
+        if ev.get("total") is not None:
+            running["total"] = ev["total"]
+        self._observe(running)
+        from .tokens import STREAM_RENDER_INTERVAL_S
+        now = time.monotonic()
+        if now - self._last_stream_render < STREAM_RENDER_INTERVAL_S:
+            return                            # coalesce: skip this repaint, data already updated
+        self._last_stream_render = now
         if self.screen_stack and isinstance(self.screen, FrameScreen):
             self.screen.refresh_frame()
 
@@ -1023,9 +1384,36 @@ class PackratApp(App):
         try:
             d = self.client.status(name).get("root_detail")
             jobs = self.client.root_jobs(d["id"]) if d else []
+            if d is not None:
+                self._inject_live_progress(d.get("running_job"))
             return d, jobs
         except Exception:
             return None, []
+
+    def _inject_live_progress(self, job: dict | None) -> None:
+        """Copy the live ``done``/``total``/``_eta_s`` onto a per-view running-job dict.
+
+        The SSE stream + TUI-side ETA are tracked against ``snapshot["running"]`` only;
+        the root-detail view fetches its ``running_job`` from a *separate* daemon call
+        that never carries the estimate. When it's the SAME job we're streaming, mirror
+        the freshest counters + ETA onto it so root detail shows the same live bar/ETA
+        as the dashboard/Queue (not a stale, ETA-less snapshot)."""
+        if not job:
+            return
+        live = self.snapshot.get("running")
+        if live and live.get("id") == job.get("id"):
+            for k in ("done", "total", "_eta_s"):
+                if live.get(k) is not None:
+                    job[k] = live[k]
+
+    def job_problem_files(self, job: dict) -> list[dict]:
+        """A scan job's undecodable/read-error files (paths + reasons, §12 card)."""
+        if self.offline:
+            return demo.job_problem_files(job["id"])
+        try:
+            return self.client.job_problem_files(job["id"])
+        except Exception:
+            return []
 
     # -- actions (§1.6: every action maps to a CLI verb) --------------------
     def _modal_on_top(self) -> bool:
@@ -1044,34 +1432,34 @@ class PackratApp(App):
             return False
 
     def run_verb(self, cmd: str, *, title: str = "would run", submit=None) -> None:
-        """Run an action that maps to a CLI verb (§1.6).
+        """Run an action that maps to a CLI verb (§1.6), reporting via a **toast**.
 
         ``cmd`` is the human display string (the CLI verb it corresponds to).
         ``submit`` is a zero-arg callable that performs the real daemon call
         (``client.submit_*``) and returns a job id; pass it for actions that
         actually submit work.
 
-        - **offline** demo: no daemon → open a notice modal showing ``cmd`` (the
-          walkable "modal describing the flow"); ``submit`` is not called.
-        - **online**: call ``submit()`` and show a brief "submitted — job #N" (or the
-          error) notice, then refresh so the new job appears. This is what was
-          missing — online the action used to be a silent no-op.
+        These are the actions that **do not need a confirmation** (a confirm-gated
+        action goes through :meth:`confirm_verb` → the ConfirmModal first). So the
+        result is a non-blocking Textual toast, never a modal popup:
+        - **offline** demo: no daemon → an info toast showing ``cmd`` (the walkable
+          "what this would run"); ``submit`` is not called.
+        - **online**: call ``submit()`` and show an info toast "submitted — job #N",
+          then refresh so the new job appears; on an exception, a **red error toast**
+          (the command failed to even submit) instead of crashing.
         """
-        if self._modal_on_top():
-            return
         if self.offline or submit is None:
-            self.push_screen(MessageModal(cmd, title=title, footer="[Enter] ok  ·  demo (no-op)"))
+            self.notify(cmd, title=title, severity="information")
             return
         try:
             job_id = submit()
         except Exception as exc:
-            self.push_screen(MessageModal(f"{cmd}\n\n✗ {exc}", title="error",
-                                          footer="[Enter] ok"))
+            self.notify(f"{cmd}\n{exc}", title="couldn't run", severity="error")
             return
         self.refresh_data()
         note = f"submitted — job #{job_id}" if job_id else "submitted"
-        self.push_screen(MessageModal(f"{cmd}\n\n{note} — watch it in the Queue ([q]).",
-                                      title="submitted", footer="[Enter] ok"))
+        self.notify(f"{cmd}\n{note} — watch it in the Queue.",
+                    title="submitted", severity="information")
 
     def confirm_verb(self, question: str, cmd: str, *, count: int | None = None,
                      network: int = 0, submit=None) -> None:

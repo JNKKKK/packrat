@@ -27,6 +27,17 @@ def _screen(app) -> str:
     return type(app.screen).__name__
 
 
+def _toasts(app) -> list:
+    """The app's posted notifications (toasts). `_on_notify` records them even in
+    headless test mode, so we can assert message + severity without rendering."""
+    return list(app._notifications)
+
+
+def _last_toast(app):
+    ts = _toasts(app)
+    return ts[-1] if ts else None
+
+
 # --- rendering -------------------------------------------------------------
 def test_dashboard_renders_logo_and_fixed_frame():
     # The offline demo uses the rich `demo` dataset (a job runs + a backlog), so
@@ -35,12 +46,33 @@ def test_dashboard_renders_logo_and_fixed_frame():
     async def scenario(app, pilot):
         from packrat.tui.layout import cell_width
         f = app.screen.current_frame
-        assert "p a c k r a t" in f
+        assert "|_) _.  _ |  ._ _. _|_" in f   # the "Packrat" ASCII wordmark
         assert "scan Archive" in f          # the demo's running job is visible
         rows = f.split("\n")
         assert len(rows) == 24
         # DISPLAY width (demo now includes a CJK root, so len() != cells on that row)
         assert all(cell_width(line) == 100 for line in rows)
+    _drive(scenario)
+
+
+def test_dashboard_logo_animation_cycles_gem_and_stays_fixed():
+    """The logo animation swaps the held gem (◆→◇→◈) and keeps the frame 100×24."""
+    async def scenario(app, pilot):
+        from packrat.tui import render
+        from packrat.tui.layout import cell_width
+        dash = app.screen
+        # A gem is always present in the mascot's hands.
+        assert any(g * 2 in dash.current_frame for g in render.LOGO_GEMS)
+        seen = set()
+        for _ in range(len(render.LOGO_GEMS) * 22):     # cover >1 full gem cycle
+            dash._tick_logo()
+            await pilot.pause()
+            gem = dash._gem
+            seen.add(gem)
+            assert f"(>{gem}{gem}<)" in dash.current_frame   # frame tracks the state
+            rows = dash.current_frame.split("\n")
+            assert len(rows) == 24 and all(cell_width(r) == 100 for r in rows)
+        assert seen == set(render.LOGO_GEMS)             # every gem was shown
     _drive(scenario)
 
 
@@ -68,6 +100,28 @@ def test_maximize_queue():
         await pilot.press("q")
         await pilot.press("q")
         assert _screen(app) == "QueueMax"
+    _drive(scenario)
+
+
+def test_queue_default_focus_is_running():
+    """The maximized Queue opens with the Running section focused (issue #4)."""
+    async def scenario(app, pilot):
+        await pilot.press("q"); await pilot.press("q")
+        assert _screen(app) == "QueueMax"
+        assert app.screen.focus == "running"
+        assert "[R]UNNING:" in app.screen.current_frame       # focused → uppercased
+    _drive(scenario)
+
+
+def test_root_detail_jobs_default_subsection_is_running():
+    """Focusing the root-detail Jobs panel starts on the Running sub-section (issue #4)."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _screen(app) == "RootDetailScreen"
+        assert app.screen.job_focus == "running"              # default sub-section
+        await pilot.press("j")                                # focus the Jobs panel
+        assert app.screen.focus == "jobs"
+        assert "[R]UNNING:" in app.screen.current_frame
     _drive(scenario)
 
 
@@ -247,7 +301,10 @@ def test_root_detail_scan_submits_online():
             assert _screen(app) == "RootDetailScreen"
             await pilot.press("s")                 # [s] scan → real submit
             await pilot.pause()
-            assert _screen(app) == "MessageModal"  # "submitted — job #901" notice
+            # no-confirm action → a toast, NOT a modal popup (still on the detail)
+            assert _screen(app) == "RootDetailScreen"
+            t = _last_toast(app)
+            assert t and t.severity == "information" and "job #901" in t.message
         return scenario
     fc = _drive_online(scenario_factory())
     assert fc.calls and fc.calls[0][0] == "scan", fc.calls
@@ -285,7 +342,7 @@ def test_queue_cancel_submits_online():
     assert any(c[0] == "cancel" for c in fc.calls), fc.calls
 
 
-def test_online_submit_error_shows_notice_not_crash():
+def test_online_submit_error_shows_red_toast_not_crash():
     class FailClient(_FakeClient):
         def submit_scan(self, root, **kw):
             raise RuntimeError("boom")
@@ -296,10 +353,10 @@ def test_online_submit_error_shows_notice_not_crash():
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         await pilot.press("s")
         await pilot.pause()
-        assert _screen(app) == "MessageModal"            # error notice, no crash
-        await pilot.press("enter")
-        await pilot.pause()
-        assert _screen(app) == "RootDetailScreen"        # app alive
+        # a submit exception surfaces as a RED (error) toast, not a crash / modal
+        assert _screen(app) == "RootDetailScreen"        # app alive, no popup
+        t = _last_toast(app)
+        assert t and t.severity == "error" and "boom" in t.message
 
     app = PackratApp(client=fc, offline=False)
 
@@ -315,3 +372,155 @@ def _press_seq(keys):
             await pilot.press(k)
             await pilot.pause()
     return scenario
+
+
+# --- fix #1: daemon-down renders (zeroed snapshot), never KeyError-crashes ---
+class _DownClient(_FakeClient):
+    """A client whose every call fails — stands in for an unreachable daemon."""
+
+    def status(self, root=None):
+        raise RuntimeError("daemon unreachable")
+
+    def list_jobs(self, limit=20):
+        raise RuntimeError("daemon unreachable")
+
+    def root_jobs(self, rid, limit=50):
+        raise RuntimeError("daemon unreachable")
+
+
+def test_daemon_down_renders_dashboard_not_crash():
+    fc = _DownClient()
+
+    async def scenario(app, pilot):
+        # The dashboard must draw (zeroed) and flag the daemon down — the pre-fix
+        # empty `{}` snapshot KeyError'd in dashboard_body before any frame appeared.
+        f = app.screen.current_frame
+        rows = f.split("\n")
+        assert len(rows) == 34                      # full frame drew (size below)
+        assert "daemon ○ down" in f                 # header reflects the failure
+        assert "|_) _.  _ |  ._ _. _|_" in f         # the "Packrat" ASCII wordmark
+        # Navigating still works (no snapshot key blows up).
+        await pilot.press("r")
+        await pilot.pause()
+        assert _screen(app) == "Dashboard"
+
+    app = PackratApp(client=fc, offline=False)
+
+    async def runner():
+        async with app.run_test(size=(100, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+
+
+# --- issue #3: root-detail running job inherits the live ETA/counters ---------
+def test_root_detail_running_job_gets_live_eta():
+    """The SSE ETA is tracked on snapshot['running']; root detail's running_job comes
+    from a separate fetch. When it's the same job, the live done/total/_eta_s must be
+    mirrored onto it so root detail shows the same bar + ETA (issue #3)."""
+    app = PackratApp(offline=True)                 # no daemon needed for the helper
+    app.snapshot = {"running": {"id": 42, "done": 900, "total": 1000, "_eta_s": 17.0}}
+    # A per-root running_job for the SAME job but without the live estimate.
+    job = {"id": 42, "done": 400, "total": 1000}
+    app._inject_live_progress(job)
+    assert job["_eta_s"] == 17.0 and job["done"] == 900 and job["total"] == 1000
+    # A DIFFERENT job id is left untouched (not the one being streamed).
+    other = {"id": 99, "done": 5, "total": 10}
+    app._inject_live_progress(other)
+    assert "_eta_s" not in other and other["done"] == 5
+
+
+# --- fix #3: a cleanup-perceptual review card confirms via `cleanup`, not dedup ---
+def test_cleanup_pending_card_confirms_via_cleanup_verb():
+    from packrat.tui import fixtures as fx
+    from packrat.tui.app import JobCard
+
+    fc = _FakeClient()
+
+    async def scenario(app, pilot):
+        app.push_screen(JobCard(dict(fx.CLEANUP_PENDING)))
+        await pilot.pause()
+        assert _screen(app) == "JobCard"
+        assert "awaiting review" in app.screen.current_frame
+        await pilot.press("g")                 # confirm stage → confirm modal
+        await pilot.pause()
+        assert _screen(app) == "ConfirmModal"
+        await pilot.press("y")                 # confirm → real submit
+        await pilot.pause()
+        t = _last_toast(app)
+        assert t and "cleanup Photos --confirm" in t.message
+
+    app = PackratApp(client=fc, offline=False)
+
+    async def runner():
+        async with app.run_test(size=(100, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+    # The submit went to cleanup (mode=perceptual, confirm), NOT dedup.
+    assert any(c[0] == "cleanup" and c[2].get("confirm") for c in fc.calls), fc.calls
+    assert not any(c[0] == "dedup" for c in fc.calls), fc.calls
+
+
+# --- fix #2: the running bar is driven by the SSE stream + TUI-side ETA ------
+def test_running_job_streams_progress_and_eta():
+    """The app attaches an SSE stream to the running job; its events advance the bar
+    and the TUI-side ETA (not just the 3s poll). We feed a canned event sequence."""
+    class StreamClient(_FakeClient):
+        def stream_job(self, job_id):
+            # Two NON-terminal progress samples → the live bar advances between polls
+            # and a TUI-side ETA becomes derivable. (No terminal event, so nothing
+            # refetches and clobbers the streamed state within the test window.)
+            yield {"job_id": job_id, "type": "progress", "done": 20000, "total": 45000}
+            yield {"job_id": job_id, "type": "progress", "done": 30000, "total": 45000}
+
+    fc = StreamClient()
+
+    async def scenario(app, pilot):
+        # Give the worker thread a moment to consume the stream + re-render.
+        for _ in range(5):
+            await pilot.pause(0.05)
+        running = app.snapshot.get("running")
+        assert running is not None
+        # The streamed `done` (30000) overrode the demo's initial 17800 — proof the
+        # bar is SSE-driven, not just the 3s poll.
+        assert running["done"] == 30000
+        # An ETA was derived TUI-side from the spaced samples and stamped on the row.
+        assert running.get("_eta_s") is not None and running["_eta_s"] > 0
+
+    app = PackratApp(client=fc, offline=False)
+
+    async def runner():
+        async with app.run_test(size=(100, 24)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+
+
+# --- fix #4: root detail fetches on mount/poll, not on every keypress --------
+def test_root_detail_does_not_refetch_per_keypress():
+    class CountingClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.status_calls = 0
+
+        def status(self, root=None):
+            if root:
+                self.status_calls += 1
+            return super().status(root)
+
+    fc = CountingClient()
+
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _screen(app) == "RootDetailScreen"
+        before = fc.status_calls
+        # Focus the Jobs panel and navigate — pure re-renders, NO new daemon fetch.
+        await pilot.press("j")
+        await pilot.press("down"); await pilot.press("down"); await pilot.press("up")
+        await pilot.pause()
+        assert fc.status_calls == before, "navigation must not re-hit status <root>"
+
+    app = PackratApp(client=fc, offline=False)
+
+    async def runner():
+        async with app.run_test(size=(120, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())

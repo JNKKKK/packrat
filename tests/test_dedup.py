@@ -239,7 +239,11 @@ def test_dedup_stage1_exact_then_advances_to_stage2(queue_and_db, tmp_path):
 
     # Confirm stage 1 (default-delete, shortcut present → delete the redundant copy),
     # auto-advance to stage 2 (recompression: a.png & a.jpg grouped).
-    _run(q, database, "dedup", root_id=root["id"], confirm=True)
+    jid1 = _run(q, database, "dedup", root_id=root["id"], confirm=True)
+    # The confirm records its deleted total in result_json (feeds lifetime-deduped).
+    import json as _json
+    r1 = _json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid1,))["result_json"])
+    assert r1["deleted"] == 1                    # one exact-dup file collapsed
     run = _run_row(database, root["id"])
     assert run is not None and run["stage"] == 2 and run["stage_phase"] == "staged"
     # a_copy.png deleted; a.png + a.jpg remain (2 files).
@@ -253,7 +257,9 @@ def test_dedup_stage1_exact_then_advances_to_stage2(queue_and_db, tmp_path):
     victim = s2[0]
     os.remove(os.path.join(grp, victim["shortcut_name"]))
     # Confirm stage 2 → advance to stage 3 (likely empty) → completed.
-    _run(q, database, "dedup", root_id=root["id"], confirm=True)
+    jid2 = _run(q, database, "dedup", root_id=root["id"], confirm=True)
+    r2 = _json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid2,))["result_json"])
+    assert r2["deleted"] == 1                    # one perceptual near-dup deleted
     assert _run_row(database, root["id"]) is None  # run completed
     run_final = database.query_one(
         "SELECT status, confirmed_at FROM review_runs WHERE root_id=? ORDER BY id DESC LIMIT 1",

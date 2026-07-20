@@ -31,10 +31,25 @@ def status_snapshot() -> dict:
         trashed = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE status='trashed'"
         ).fetchone()["c"]
+        # Full collection size: total on-disk bytes of every catalogued file instance
+        # across all roots (same SUM(file_instances.size) as per-root size_bytes, summed
+        # collection-wide) — the dashboard Collection box's "Size" line.
+        size_bytes = conn.execute(
+            "SELECT COALESCE(SUM(size), 0) c FROM file_instances"
+        ).fetchone()["c"]
+        # Lifetime deduped: total files deleted across every completed dedup job — the
+        # numeric `deleted` total each dedup --confirm records in its result_json (exact
+        # collapses + perceptual/edit deletions). SUM(json_extract(...)) over done dedup
+        # jobs; NULL for older rows (pre-`deleted`) coalesces to 0.
+        lifetime_deduped = conn.execute(
+            "SELECT COALESCE(SUM(json_extract(result_json, '$.deleted')), 0) c "
+            "FROM jobs WHERE type='dedup' AND status='done' "
+            "AND json_extract(result_json, '$.deleted') IS NOT NULL"
+        ).fetchone()["c"]
         running = conn.execute(
-            "SELECT j.id, j.type, j.root_id, j.total, j.done, j.started_at, j.params_json, "
-            "  r.name AS root_name FROM jobs j LEFT JOIN roots r ON r.id=j.root_id "
-            "WHERE j.status='running'"
+            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.started_at, "
+            "  j.params_json, r.name AS root_name FROM jobs j "
+            "LEFT JOIN roots r ON r.id=j.root_id WHERE j.status='running'"
         ).fetchone()
         interrupted = conn.execute(
             "SELECT id, type, started_at, params_json FROM jobs "
@@ -60,6 +75,8 @@ def status_snapshot() -> dict:
             "photos": photos,
             "videos": videos,
             "trashed": trashed,
+            "size_bytes": size_bytes,
+            "lifetime_deduped": lifetime_deduped,
             "running": _job_dict(running) if running else None,
             "queued": queued,
             "interrupted": [dict(r) for r in interrupted],
@@ -166,6 +183,8 @@ def roots_snapshot() -> list[dict]:
             "   WHERE fi.root_id = r.id AND a.media_type='video') AS videos, "
             "  (SELECT COUNT(*) FROM file_instances fi WHERE fi.root_id = r.id) "
             "   AS instance_count, "
+            "  (SELECT COALESCE(SUM(fi.size), 0) FROM file_instances fi "
+            "   WHERE fi.root_id = r.id) AS size_bytes, "
             "  (SELECT MAX(fi.last_seen_at) FROM file_instances fi "
             "   WHERE fi.root_id = r.id) AS last_scan_at "
             "FROM roots r ORDER BY r.id"
@@ -219,11 +238,12 @@ def root_detail(root_arg: str) -> dict | None:
             (rid,),
         ).fetchone()["c"]
         row = conn.execute(
-            "SELECT COUNT(*) c, MAX(last_seen_at) last_scan_at "
+            "SELECT COUNT(*) c, MAX(last_seen_at) last_scan_at, "
+            "  COALESCE(SUM(size), 0) size_bytes "
             "FROM file_instances WHERE root_id=?",
             (rid,),
         ).fetchone()
-        instances, last_scan_at = row["c"], row["last_scan_at"]
+        instances, last_scan_at, size_bytes = row["c"], row["last_scan_at"], row["size_bytes"]
         pending = conn.execute(
             "SELECT id, run_type, stage, created_at FROM review_runs "
             "WHERE root_id=? AND status='pending'",
@@ -292,6 +312,7 @@ def root_detail(root_arg: str) -> dict | None:
             "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
+            "size_bytes": size_bytes,             # total on-disk bytes of this root's files
             "pending_review": pending_dict,
             "last_dedup_at": last_dedup_at,       # newest completed dedup (§11 "deduped <age>")
             "last_cleanup_at": last_cleanup_at,   # newest completed perceptual-cleanup
@@ -504,5 +525,25 @@ def job_detail(job_id: int) -> dict | None:
             (job_id,),
         ).fetchone()
         return _job_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def job_problem_files(job_id: int) -> list[dict]:
+    """The undecodable / read-error files recorded by a scan job (§4, §12 result card).
+
+    Backs the scan result card's problem-file list — the exact paths + reasons behind
+    its ``undecodable``/``read_errors`` counts (``scan_problem_files``, keyed to the
+    job). Empty for a non-scan job or a scan that recorded no problems. Ordered
+    undecodable-first, then by path, so the list reads deterministically.
+    """
+    conn = _ro()
+    try:
+        rows = conn.execute(
+            "SELECT path, media_type, problem, detail FROM scan_problem_files "
+            "WHERE job_id=? ORDER BY problem DESC, path",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()

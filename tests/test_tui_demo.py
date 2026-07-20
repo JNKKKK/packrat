@@ -45,6 +45,11 @@ def _modal_text(app) -> str:
         return ""
 
 
+def _toast_text(app) -> str:
+    """Concatenated text of all posted toasts (run_verb reports via toast now)."""
+    return "\n".join(f"{n.title}\n{n.message}" for n in app._notifications)
+
+
 def _pager(app):
     m = re.search(r"page (\d+)/(\d+)", app.screen.current_frame)
     return (int(m.group(1)), int(m.group(2))) if m else None
@@ -103,12 +108,12 @@ def test_dashboard_roots_box_pages_and_stays_fixed():
 
 
 def test_queue_has_independent_per_section_paginators():
-    """Each of the 3 sections (Queued, Recent) has its OWN paginator (§4 redesign)."""
+    """Each of the 3 sections (Queued, History) has its OWN paginator (§4 redesign)."""
     async def scenario(app, pilot):
         await pilot.press("q")
         await pilot.press("q")                 # QueueMax
         pagers = _pagers(app)
-        assert len(pagers) == 2                # queued + recent each have one
+        assert len(pagers) == 2                # queued + history each have one
         assert all(total >= 2 for _, total in pagers)   # both span >1 page (demo data)
     _drive(scenario)
 
@@ -118,12 +123,12 @@ def test_queue_paging_one_section_leaves_others_untouched():
     async def scenario(app, pilot):
         await pilot.press("q")
         await pilot.press("q")                 # QueueMax (focus=queued by default)
-        before = _pagers(app)                  # [(q_cur, q_tot), (r_cur, r_tot)]
-        await pilot.press("e")                 # focus Recent
-        await pilot.press("right")             # page Recent →
+        before = _pagers(app)                  # [(q_cur, q_tot), (h_cur, h_tot)]
+        await pilot.press("h")                 # focus History
+        await pilot.press("right")             # page History →
         after = _pagers(app)
-        assert after[0] == before[0], "queued page changed when paging recent"
-        assert after[1][0] == before[1][0] + 1, "recent page did not advance"
+        assert after[0] == before[0], "queued page changed when paging history"
+        assert after[1][0] == before[1][0] + 1, "history page did not advance"
     _drive(scenario)
 
 
@@ -131,7 +136,9 @@ def test_queue_cursor_autofollows_within_focused_section():
     """↑/↓ scrolls the FOCUSED section's page so its ▸ stays visible."""
     async def scenario(app, pilot):
         await pilot.press("q")
-        await pilot.press("q")                 # QueueMax, focus=queued
+        await pilot.press("q")                 # QueueMax (default focus = running)
+        await pilot.press("q")                 # focus the Queued section
+        assert app.screen.focus == "queued"
         for _ in range(8):                     # past the 6-row queued window
             await pilot.press("down")
         assert "▸" in app.screen.current_frame, "cursor vanished (no auto-follow)"
@@ -140,16 +147,16 @@ def test_queue_cursor_autofollows_within_focused_section():
 
 
 def test_queue_section_focus_switches_with_letter_keys():
-    """[r]/[q]/[e] focus the Running/Queued/Recent sections."""
+    """[r]/[q]/[h] focus the Running/Queued/History sections."""
     async def scenario(app, pilot):
         await pilot.press("q")
         await pilot.press("q")                 # QueueMax
         await pilot.press("r")
         assert app.screen.focus == "running"
         assert "[R]UNNING:" in app.screen.current_frame   # focused → uppercased
-        await pilot.press("e")
-        assert app.screen.focus == "recent"
-        assert "REC[E]NT:" in app.screen.current_frame
+        await pilot.press("h")
+        assert app.screen.focus == "history"
+        assert "[H]ISTORY:" in app.screen.current_frame
         await pilot.press("q")
         assert app.screen.focus == "queued"
         assert "[Q]UEUED (RUNS TOP-DOWN):" in app.screen.current_frame
@@ -223,7 +230,8 @@ def test_queue_page_change_moves_cursor_to_new_page():
     """←/→ in the maximized Queue moves the ▸ to the first job on the new page."""
     async def scenario(app, pilot):
         await pilot.press("q")
-        await pilot.press("q")                     # QueueMax
+        await pilot.press("q")                     # QueueMax (default focus = running)
+        await pilot.press("q")                     # focus the Queued section (multi-page)
         await pilot.press("right")                 # page 2 → cursor on its first job
         assert _pager(app)[0] == 2
         assert _cursor_row(app) is not None, "cursor not visible on the new page"
@@ -277,10 +285,9 @@ def test_modal_own_bindings_still_work_after_swallow_fix():
         await pilot.press("c")
         await pilot.press("y")
         await pilot.pause()
-        assert _scr(app) == "MessageModal"         # confirmed → shows the verb
-        await pilot.press("enter")                 # dismiss the notice
-        await pilot.pause()
+        # confirmed → modal dismissed, the verb result shows as a toast (not a popup)
         assert _scr(app) == "Dashboard"
+        assert "jobs cancel" in _toast_text(app)
         # queue box is still focused (returning from a modal keeps focus), so a
         # cancel + decline stays on the dashboard. (No extra `q`, which would
         # maximize the already-focused queue.)
@@ -293,13 +300,148 @@ def test_modal_own_bindings_still_work_after_swallow_fix():
 
 
 def test_root_detail_jobs_list_pages():
+    """The Jobs panel's History section paginates ([J] focus → [h] section → ←/→)."""
     async def scenario(app, pilot):
         await pilot.press("r")
         await pilot.press("r")
         await pilot.press("enter")             # open first root's detail
         assert _scr(app) == "RootDetailScreen"
-        cur, total = _pager(app)
-        assert total >= 2                      # per-root history spans pages
+        await pilot.press("j")                 # focus the Jobs panel
+        assert app.screen.focus == "jobs"
+        await pilot.press("h")                 # focus the History section
+        # the History pager (last "page i/N" on screen) spans >1 page
+        hist_page = _pagers(app)[-1]
+        assert hist_page[1] >= 2, hist_page
+        await pilot.press("right")
+        assert _pagers(app)[-1][0] == 2        # History advanced to page 2
+    _drive(scenario)
+
+
+async def _to_photos_detail(app, pilot):
+    """Drill into the Photos root's detail (the pending-review + queued-jobs case)."""
+    await pilot.press("r")
+    await pilot.press("r")
+    for _ in range(len(demo.ROOTS) + 2):
+        sel = [ln for ln in app.screen.current_frame.split("\n") if "▸" in ln]
+        if sel and "Photos " in sel[0] and "iPhone" not in sel[0]:
+            break
+        await pilot.press("down")
+    await pilot.press("enter")
+
+
+def test_root_detail_jobs_panel_focus_and_sections():
+    """[J] focuses the bordered Jobs panel; [r]/[q]/[h] pick its sub-sections."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        assert _scr(app) == "RootDetailScreen"
+        f = app.screen.current_frame
+        assert "[J]obs" in f                         # the bordered panel is present
+        assert app.screen.focus is None              # nothing focused by default
+        # Photos has a pending review → its Review box is heavy only when focused, so
+        # with nothing focused there is no heavy border yet.
+        assert "┏" not in f                          # → light borders, not heavy
+        await pilot.press("j")                       # focus the Jobs panel
+        assert app.screen.focus == "jobs"
+        assert "┏" in app.screen.current_frame       # heavy (accent) border now
+        # [q]/[h]/[r] switch the focused sub-section (header uppercases)
+        await pilot.press("q")
+        assert app.screen.job_focus == "queued"
+        assert "[Q]UEUED:" in app.screen.current_frame
+        await pilot.press("h")
+        assert app.screen.job_focus == "history"
+        assert "[H]ISTORY:" in app.screen.current_frame
+        await pilot.press("r")
+        assert app.screen.job_focus == "running"
+        assert "[R]UNNING:" in app.screen.current_frame
+        # Esc un-focuses the panel first, then backs out to Roots
+        await pilot.press("escape")
+        assert _scr(app) == "RootDetailScreen" and app.screen.focus is None
+        await pilot.press("escape")
+        assert _scr(app) == "RootsMax"
+    _drive(scenario)
+
+
+def test_root_detail_jobs_panel_border_is_accent_when_focused():
+    """The focused Jobs panel's heavy border carries the accent (focus-border) color."""
+    from rich.console import Console
+    import io
+    from packrat.tui.tokens import DEFAULT_THEME as T
+
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        await pilot.press("j")                       # focus the Jobs panel
+        con = Console(file=io.StringIO(), force_terminal=True,
+                      color_system="truecolor", width=100, height=24)
+        con.print(app.screen.query_one("#frame").render(), end="")
+        out = con.file.getvalue()
+        hexc = T.color("focus-border").lstrip("#")
+        rgb = f"{int(hexc[0:2], 16)};{int(hexc[2:4], 16)};{int(hexc[4:6], 16)}"
+        assert rgb in out, "focused Jobs panel border is not accent-colored"
+    _drive(scenario)
+
+
+def test_root_detail_enter_opens_selected_job_card():
+    """[J] → [h] section → ↑/↓ selects a history job; [Enter] opens its card."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        await pilot.press("j")
+        await pilot.press("h")                       # focus History
+        await pilot.press("enter")                   # open the selected job's card
+        assert _scr(app) == "JobCard"
+        assert _rows_exact(app.screen.current_frame, 100, 24)
+    _drive(scenario)
+
+
+def test_root_detail_review_box_is_focusable():
+    """[v] focuses the bordered Review box (heavy accent border); Esc un-focuses.
+
+    Photos has a pending review, so the Review box has content + is focus-able."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        assert _scr(app) == "RootDetailScreen"
+        f = app.screen.current_frame
+        assert "[V] Review" in f                     # the bordered Review section
+        assert "awaiting review" in f
+        assert app.screen.focus is None and "┏" not in f    # nothing focused → no heavy box
+        await pilot.press("v")                       # focus the Review box
+        assert app.screen.focus == "review"
+        assert "┏" in app.screen.current_frame       # heavy (accent) border now
+        # Esc un-focuses the Review box (stays on the detail), a 2nd Esc backs out
+        await pilot.press("escape")
+        assert _scr(app) == "RootDetailScreen" and app.screen.focus is None
+        await pilot.press("escape")
+        assert _scr(app) == "RootsMax"
+    _drive(scenario)
+
+
+def test_review_box_focusable_even_with_no_pending_review():
+    """[v] focuses the Review box even when there's NO pending review (item 2).
+
+    The first root in the default sort has no pending review; its Review box still
+    reads "No pending review." and is focus-able (heavy border on [v])."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _scr(app) == "RootDetailScreen"
+        f = app.screen.current_frame
+        assert "[V] Review" in f and "No pending review." in f
+        assert app.screen.focus is None
+        await pilot.press("v")                       # focus even with nothing to review
+        assert app.screen.focus == "review"
+        assert "┏" in app.screen.current_frame       # heavy (accent) border now
+    _drive(scenario)
+
+
+def test_root_detail_review_hints_dim_when_unfocused():
+    """The Review box dims its [o]/[g]/[k] hints (‹…›) while unfocused, undimmed when focused."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        # unfocused → the action hints are guillemet-wrapped (colorize dims them)
+        f = app.screen.current_frame
+        assert "‹[o] open in Explorer" in f
+        # focused → plain (undimmed) hints, no guillemets
+        await pilot.press("v")
+        f2 = app.screen.current_frame
+        assert "[o] open in Explorer" in f2 and "‹[o]" not in f2
     _drive(scenario)
 
 
@@ -309,14 +451,13 @@ def test_root_detail_scan_dedup_merge_verbs():
         await pilot.press("r")
         await pilot.press("r")
         await pilot.press("enter")
-        # [s]/[d] surface their verb in a notice (offline); [m] opens the picker.
+        # [s]/[d] are no-confirm actions → their verb surfaces as a TOAST (offline),
+        # NOT a modal popup; the screen stays on the detail. [m] opens the picker.
         for key, want in (("s", "packrat scan"), ("d", "packrat dedup")):
             await pilot.press(key)
             await pilot.pause()
-            assert _scr(app) == "MessageModal", (key, _scr(app))
-            assert want in _modal_text(app), (key, _modal_text(app))
-            await pilot.press("enter")
-            await pilot.pause()
+            assert _scr(app) == "RootDetailScreen", (key, _scr(app))
+            assert want in _toast_text(app), (key, _toast_text(app))
         await pilot.press("m")
         await pilot.pause()
         assert _scr(app) == "MergePickerScreen"        # [m] → §3.3 picker, not a notice
@@ -334,13 +475,13 @@ def test_root_detail_cleanup_offers_three_modes():
         assert _scr(app) == "ChoiceModal"
         txt = _modal_text(app)
         assert "trash-exact" in txt and "trash-perceptual" in txt and "undecodable" in txt
-        # pick the 2nd option (perceptual) → its cleanup verb
+        # pick the 2nd option (perceptual) → its cleanup verb surfaces as a toast
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause()
-        assert _scr(app) == "MessageModal"
-        assert "packrat cleanup" in _modal_text(app)
-        assert "--trash-perceptual" in _modal_text(app)
+        assert _scr(app) == "RootDetailScreen"
+        assert "packrat cleanup" in _toast_text(app)
+        assert "--trash-perceptual" in _toast_text(app)
     _drive(scenario)
 
 
@@ -353,9 +494,12 @@ def test_root_detail_no_cleaned_never_label():
         frame = app.screen.current_frame
         assert "No pending review." in frame
         assert "cleaned:" not in frame
-        # the Jobs pager shares the section-title line (right-aligned)
-        jobs_line = next(ln for ln in frame.split("\n") if "Jobs (newest first)" in ln)
-        assert "page " in jobs_line
+        # the Jobs panel is a bordered box with a History section pager on its header.
+        # The panel is unfocused here, so the header renders in its lowercase-key
+        # (dim) form: `[h]istory:`.
+        assert "[J]obs" in frame
+        hist_line = next(ln for ln in frame.split("\n") if "[h]istory:" in ln)
+        assert "page " in hist_line
     _drive(scenario)
 
 
@@ -441,66 +585,102 @@ def test_paste_ignored_when_not_on_a_text_field():
     _drive(scenario)
 
 
+def test_review_actions_inert_until_box_focused():
+    """[o]/[g]/[k] are the Review box's inside shortcuts — they do NOTHING until the
+    box is focused with [v] (item 1: out-of-focus keys must not trigger the action)."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        assert _scr(app) == "RootDetailScreen"
+        assert app.screen.focus is None
+        # box unfocused → [g]/[k]/[o] are inert (no confirm modal, no toast)
+        for key in ("g", "k", "o"):
+            await pilot.press(key)
+            await pilot.pause()
+            assert _scr(app) == "RootDetailScreen", key
+        assert not _toast_text(app)
+    _drive(scenario)
+
+
 def test_pending_review_actions_map_to_verbs():
     async def scenario(app, pilot):
-        # navigate the Roots list to Photos (the pending-review root); it sorts near
-        # the bottom (id 3, id-DESC default), so walk down until the ▸ row is Photos.
-        await pilot.press("r")
-        await pilot.press("r")
-        for _ in range(len(demo.ROOTS) + 2):
-            sel = [ln for ln in app.screen.current_frame.split("\n") if "▸" in ln]
-            if sel and "Photos " in sel[0] and "iPhone" not in sel[0]:
-                break
-            await pilot.press("down")
-        await pilot.press("enter")
+        await _to_photos_detail(app, pilot)     # → Photos detail (pending review)
         assert _scr(app) == "RootDetailScreen"
         assert "awaiting review" in app.screen.current_frame
-        # [g] confirm → confirm modal → dedup --confirm
+        await pilot.press("v")                  # focus the Review box first
+        assert app.screen.focus == "review"
+        # [g] confirm → confirm modal → (y) → dedup --confirm surfaced as a toast
         await pilot.press("g")
         await pilot.pause()
         assert _scr(app) == "ConfirmModal"
         await pilot.press("y")
         await pilot.pause()
-        assert "dedup Photos --confirm" in _modal_text(app)
-        await pilot.press("enter")
-        await pilot.pause()
-        # [k] cancel run → dedup --cancel
+        assert "dedup Photos --confirm" in _toast_text(app)
+        # [k] cancel run → confirm → (y) → dedup --cancel toast
         await pilot.press("k")
         await pilot.pause()
         assert _scr(app) == "ConfirmModal"
         await pilot.press("y")
         await pilot.pause()
-        assert "dedup Photos --cancel" in _modal_text(app)
+        assert "dedup Photos --cancel" in _toast_text(app)
+    _drive(scenario)
+
+
+def test_stage2_review_offers_keep_suggested():
+    """A stage-2 dedup review adds [b] → `--confirm --keep-suggested` (Photos is stage 2)."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)     # → Photos detail (stage-2 dedup review)
+        f = app.screen.current_frame
+        assert "awaiting review (stage 2 of 3)" in f
+        assert "[b]" in f and "keep suggested" in f          # the new bulk action shows
+        await pilot.press("v")                  # focus the Review box
+        await pilot.press("b")                  # [b] keep-suggested confirm
+        await pilot.pause()
+        assert _scr(app) == "ConfirmModal"
+        await pilot.press("y")
+        await pilot.pause()
+        assert "dedup Photos --confirm --keep-suggested" in _toast_text(app)
+    _drive(scenario)
+
+
+def test_keep_suggested_inert_when_not_stage2():
+    """[b] does nothing on a root whose review isn't a stage-2 dedup (or none pending)."""
+    async def scenario(app, pilot):
+        # The default-sorted first root has no pending review → [b] is inert.
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _scr(app) == "RootDetailScreen"
+        assert "[b]" not in app.screen.current_frame        # not offered
+        await pilot.press("v")                  # focus review (no pending review)
+        await pilot.press("b")
+        await pilot.pause()
+        assert _scr(app) == "RootDetailScreen"  # no modal, no submit
+        assert not _toast_text(app)
     _drive(scenario)
 
 
 def test_queue_cancel_prioritize_cancelall_verbs():
     async def scenario(app, pilot):
         await pilot.press("q")
-        await pilot.press("q")                 # QueueMax (focus=queued)
+        await pilot.press("q")                 # QueueMax (default focus = running)
+        await pilot.press("q")                 # focus the Queued section
         await pilot.press("down")              # move within the Queued section
-        # [c] cancel → confirm → jobs cancel <id>
+        # [c] cancel → confirm → (y) → jobs cancel <id> toast
         await pilot.press("c")
         await pilot.pause()
         assert _scr(app) == "ConfirmModal"
         await pilot.press("y")
         await pilot.pause()
-        assert re.search(r"jobs cancel \d+", _modal_text(app))
-        await pilot.press("enter")
-        await pilot.pause()
-        # [p] prioritize → jobs prioritize <id>
+        assert re.search(r"jobs cancel \d+", _toast_text(app))
+        # [p] prioritize (no confirm) → jobs prioritize <id> toast directly
         await pilot.press("p")
         await pilot.pause()
-        assert re.search(r"jobs prioritize \d+", _modal_text(app))
-        await pilot.press("enter")
-        await pilot.pause()
-        # [x] cancel-all → confirm → cancel --all-queued
+        assert re.search(r"jobs prioritize \d+", _toast_text(app))
+        # [x] cancel-all → confirm → (y) → cancel --all-queued toast
         await pilot.press("x")
         await pilot.pause()
         assert _scr(app) == "ConfirmModal"
         await pilot.press("y")
         await pilot.pause()
-        assert "--all-queued" in _modal_text(app)
+        assert "--all-queued" in _toast_text(app)
     _drive(scenario)
 
 
@@ -512,8 +692,8 @@ def test_add_root_register_verb():
         assert _scr(app) == "AddRootScreen"
         await pilot.press("enter")
         await pilot.pause()
-        assert _scr(app) == "MessageModal"
-        assert "roots register" in _modal_text(app)
+        # register is a no-confirm submit → its verb surfaces as a toast
+        assert "roots register" in _toast_text(app)
     _drive(scenario)
 
 
@@ -566,7 +746,7 @@ def test_add_root_space_toggles_and_typing_edits():
         # the register verb reflects the edited state (trash kind)
         await pilot.press("enter")
         await pilot.pause()
-        assert "--kind trash" in _modal_text(app)
+        assert "--kind trash" in _toast_text(app)
     _drive(scenario)
 
 
@@ -574,10 +754,11 @@ def test_job_card_covers_every_shape():
     """Open a card for each recent-job shape; each renders inside the fixed frame."""
     async def scenario(app, pilot):
         await pilot.press("q")
-        await pilot.press("q")                 # QueueMax
-        # walk down through running+queued+recent, opening each card
+        await pilot.press("q")                 # QueueMax (default focus = running)
+        await pilot.press("h")                 # focus History — the varied terminal shapes
+        # walk down through the History section, opening each card
         seen_titles = set()
-        for _ in range(len(demo.RECENT) + len(demo.QUEUED) + 1):
+        for _ in range(len(demo.RECENT) + 1):
             await pilot.press("enter")
             if _scr(app) == "JobCard":
                 f = app.screen.current_frame
@@ -586,6 +767,30 @@ def test_job_card_covers_every_shape():
                 await pilot.press("escape")
             await pilot.press("down")
         assert len(seen_titles) >= 5           # several distinct card shapes opened
+    _drive(scenario)
+
+
+def test_scan_card_scrolls_problem_files():
+    """A scan card lists its undecodable/read-error files and ↑/↓ scrolls them (§12)."""
+    from packrat.tui.app import JobCard
+
+    async def scenario(app, pilot):
+        dashcam = next(j for j in demo.RECENT if j["id"] == 591)   # 14 undec + 3 read-err
+        app.push_screen(JobCard(dict(dashcam)))
+        await pilot.pause()
+        assert _scr(app) == "JobCard"
+        f = app.screen.current_frame
+        assert "problem files (17):" in f
+        assert _rows_exact(f, 100, 24)
+        first_top = re.search(r"(\d+)–(\d+) of 17", f).group(1)
+        assert first_top == "1"
+        # ↓ advances the window; the frame stays fixed-size.
+        for _ in range(6):
+            await pilot.press("down")
+        f2 = app.screen.current_frame
+        assert _rows_exact(f2, 100, 24)
+        assert re.search(r"(\d+)–(\d+) of 17", f2).group(1) != "1", "window did not scroll"
+        assert "read-error" in f2 or "clip_" in f2      # scrolled to the tail
     _drive(scenario)
 
 

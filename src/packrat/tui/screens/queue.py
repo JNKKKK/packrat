@@ -1,16 +1,22 @@
 """Queue interface (§4) — three INDEPENDENT fixed-height sections.
 
 **Running** (the single active job), **Queued** (the durable backlog in dequeue
-order, each with its blocked reason), and **Recent** (``recent_jobs`` history).
-Each section is a *fixed-height window* at a fixed position, with its **own**
-paginator — so paging one section never resizes or clears another (that was a bug
-when the three shared one scroll). Pure (dicts → lines); the screen routes keys.
+order, each with its blocked reason), and **History** (``recent_jobs`` terminal
+history). Each section is a *fixed-height window* at a fixed position, with its
+**own** paginator — so paging one section never resizes or clears another (that was
+a bug when the three shared one scroll). Pure (dicts → lines); the screen routes
+keys.
 
 Navigation model (per-section focus):
-- ``[r]`` / ``[q]`` / ``[e]`` focus the Running / Queued / Recent section; the
+- ``[r]`` / ``[q]`` / ``[h]`` focus the Running / Queued / History section; the
   focused section's header is UPPERCASED (→ accent-colored) and shows the ``▸``.
 - ``↑/↓`` move the cursor **within the focused section only**; ``←/→`` page **that
   section only**. Each section keeps its own cursor + page.
+
+The per-section renderers (:func:`section_pages`, :func:`header_line`,
+:func:`window`, the ``*_line`` row builders) are also reused by the root-detail
+jobs panel (:mod:`packrat.tui.screens.rootdetail`), which lays out the same three
+sections inside a bordered box.
 """
 
 from __future__ import annotations
@@ -22,53 +28,72 @@ from ..layout import Cell, fit, pager_line, row
 from ..tokens import CURSOR, RUNNING
 
 # Reference per-section budgets (fit the 24-row frame: 1+1 running, 1+6+1 queued,
-# 1+6+1 recent, + blanks = 20 rows, ≤ the 21 content rows). Live budgets come from
-# Geometry (split the vertical surplus between Queued and Recent).
+# 1+6+1 history, + blanks = 20 rows, ≤ the 21 content rows). Live budgets come from
+# Geometry (split the vertical surplus between Queued and History).
 QUEUED_ROWS = 6
-RECENT_ROWS = 6
+HISTORY_ROWS = 6
 
-SECTIONS = ("running", "queued", "recent")
+SECTIONS = ("running", "queued", "history")
 
 
 def section_pages(n: int, rows: int) -> int:
-    """Page count for a section of ``n`` items shown ``rows`` at a time."""
+    """Page count for a section of ``n`` items shown ``rows`` at a time.
+
+    ``rows`` can be 0 when the panel is squeezed so tight a window gets no rows (only
+    its header shows) — then there is 1 (empty) page, never a divide-by-zero."""
+    if rows <= 0:
+        return 1
     return max(1, -(-n // rows))
 
 
 def section_jobs(section: str, running: dict | None, queued: list[dict],
-                 recent: list[dict]) -> list[dict]:
+                 history: list[dict]) -> list[dict]:
     """The selectable jobs of one section (running is a 0-or-1 list)."""
     if section == "running":
         return [running] if running else []
     if section == "queued":
         return queued
-    return recent
+    return history
 
 
-def _header(label: str, key: str, focused: bool) -> str:
-    """A section header — UPPERCASED when focused, so colorize accents the line."""
-    return label.upper() if focused else label
+def header(label: str, state: str = "active") -> str:
+    """A section header, cased to encode its focus state for :mod:`colorize`.
+
+    Three states (colorize keys off the casing of the ``[K]abel:`` prefix):
+    - ``"focused"`` → UPPERCASED (``[Q]UEUED:``) → whole-line accent;
+    - ``"dim"``     → lowercased (``[q]ueued:``) → whole-line dim (inactive panel);
+    - ``"active"``  → as written (``[Q]ueued:``) → default text, ``[K]`` accented.
+    ``bool`` is accepted for back-compat (True → focused, False → active)."""
+    if state is True:
+        state = "focused"
+    elif state is False:
+        state = "active"
+    if state == "focused":
+        return label.upper()
+    if state == "dim":
+        return label.lower()
+    return label
 
 
-def queue_body(running: dict | None, queued: list[dict], recent: list[dict],
+def queue_body(running: dict | None, queued: list[dict], history: list[dict],
                *, now: str, geo: Geometry = REFERENCE, focus: str = "queued",
                queued_cursor: int = 0, queued_page: int = 0,
-               recent_cursor: int = 0, recent_page: int = 0,
+               history_cursor: int = 0, history_page: int = 0,
                running_cursor: int = 0) -> list[str]:
     """Build the §4 body — three fixed-height sections, each independently paged.
 
-    ``geo`` sizes each section's window (Queued/Recent grow on a taller terminal)
+    ``geo`` sizes each section's window (Queued/History grow on a taller terminal)
     and the paginator width. Rows lay out to ``geo``'s content width."""
-    q_rows, r_rows = geo.queued_rows, geo.recent_rows
+    q_rows, h_rows = geo.queued_rows, geo.recent_rows
     w = geo.content_w
     lines: list[str] = []
 
     # -- Running (≤1 job; no paging) --
     run_focused = focus == "running"
-    lines.append(_header("[R]unning:", "r", run_focused))
+    lines.append(header("[R]unning:", run_focused))
     if running:
         cur = CURSOR if run_focused else " "
-        lines.append(_running_line(running, cur, w))
+        lines.append(running_line(running, cur, w))
     else:
         lines.append("  (nothing running)")
     lines.append("")
@@ -76,30 +101,29 @@ def queue_body(running: dict | None, queued: list[dict], recent: list[dict],
     # -- Queued (paginator sits on the header line, right-aligned) --
     q_focused = focus == "queued"
     q_pages = section_pages(len(queued), q_rows)
-    lines.append(_header_line("[Q]ueued (runs top-down):", q_focused, w,
-                              min(queued_page, q_pages - 1) + 1, q_pages))
-    lines += _window(queued, q_rows, queued_page, queued_cursor, q_focused,
-                     lambda j, c: _queued_line(j, c, w), empty="  (backlog empty)")
+    lines.append(header_line("[Q]ueued (runs top-down):", q_focused, w,
+                             min(queued_page, q_pages - 1) + 1, q_pages))
+    lines += window(queued, q_rows, queued_page, queued_cursor, q_focused,
+                    lambda j, c: queued_line(j, c, w), empty="  (backlog empty)")
     lines.append("")
 
-    # -- Recent (paginator sits on the header line, right-aligned) --
-    r_focused = focus == "recent"
-    r_pages = section_pages(len(recent), r_rows)
-    lines.append(_header_line("Rec[e]nt:", r_focused, w,
-                              min(recent_page, r_pages - 1) + 1, r_pages))
-    lines += _window(recent, r_rows, recent_page, recent_cursor, r_focused,
-                     lambda j, c: _recent_line(j, now, c, w), empty="  (no recent jobs)")
+    # -- History (paginator sits on the header line, right-aligned) --
+    h_focused = focus == "history"
+    h_pages = section_pages(len(history), h_rows)
+    lines.append(header_line("[H]istory:", h_focused, w,
+                             min(history_page, h_pages - 1) + 1, h_pages))
+    lines += window(history, h_rows, history_page, history_cursor, h_focused,
+                    lambda j, c: history_line(j, now, c, w), empty="  (no job history)")
     return lines
 
 
-def _header_line(label: str, focused: bool, width: int, cur_page: int, total: int) -> str:
+def header_line(label: str, state, width: int, cur_page: int, total: int) -> str:
     """A section header with its ``page i/N`` right-aligned on the same line (§4)."""
-    header = _header(label, "", focused)
-    return row(width, [Cell(header, grow=1), Cell(f"page {cur_page}/{total}", align="right")],
-               gap=2)
+    return row(width, [Cell(header(label, state), grow=1),
+                       Cell(f"page {cur_page}/{total}", align="right")], gap=2)
 
 
-def _window(jobs, budget, page, cursor, focused, line_fn, *, empty):
+def window(jobs, budget, page, cursor, focused, line_fn, *, empty):
     """One section's fixed-height row window (▸ on the focused cursor)."""
     if not jobs:
         return fit([empty], budget, mode="clip").rows
@@ -113,31 +137,32 @@ def focused_header_text(focus: str) -> str:
     return {
         "running": "[R]UNNING:",
         "queued": "[Q]UEUED (RUNS TOP-DOWN):",
-        "recent": "REC[E]NT:",
+        "history": "[H]ISTORY:",
     }.get(focus, "")
 
 
-def _running_line(job: dict, cur: str = " ", width: int = 96) -> str:
-    # Label grows; percent/counts/ETA + "running" sit at the right end.
-    pct = ""
-    if job.get("total"):
-        pct = f"{int(100 * (job.get('done') or 0) / job['total'])}% {job['done']:,}/{job['total']:,}"
-        eta = render.fmt_eta(job.get("_eta_s"))
-        pct = f"{pct} {eta}".strip()
+def running_line(job: dict, cur: str = " ", width: int = 96) -> str:
+    """The running-job row: ``▸▶ #id label   ███░░░ 39% 17,800/45,000 ETA 26m``.
+
+    Carries the same visual ``███░░░`` progress bar the dashboard queue preview shows
+    (:func:`render.queue_row`) so the maximized Queue / root-detail Running section
+    match the mock. The ``▶`` marker is on the label side, so the bar renders without
+    a second marker (``running=False``)."""
     left = f"{cur}{RUNNING} #{job['id']} {job.get('label', job['type'])}"
-    right = f"{pct}  running".strip()
+    bar = render.progress_bar(job.get("done"), job.get("total"),
+                              eta_s=job.get("_eta_s"), running=False)
     return row(width, [Cell(left, grow=1, elide="end"),
-                       Cell(right, align="right", style="running")], gap=2).rstrip()
+                       Cell(bar, align="right", style="running")], gap=2).rstrip()
 
 
-def _queued_line(job: dict, cur: str = " ", width: int = 96) -> str:
+def queued_line(job: dict, cur: str = " ", width: int = 96) -> str:
     note = render.job_status_note(job)
     left = f"{cur} #{job['id']} {job.get('label', job['type'])}"
     return row(width, [Cell(left, grow=1, elide="end"),
                        Cell(note, align="right", style="dim")], gap=2).rstrip()
 
 
-def _recent_line(job: dict, now: str, cur: str = " ", width: int = 96) -> str:
+def history_line(job: dict, now: str, cur: str = " ", width: int = 96) -> str:
     when = reltime(job.get("finished_at") or job.get("started_at"), now,
                    clock=(job.get("finished_at") or "")[:10] == (now or "")[:10])
     summ = _summary(job)

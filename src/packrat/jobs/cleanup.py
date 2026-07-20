@@ -408,6 +408,15 @@ def _analyze_perceptual(ctx: JobContext) -> None:
         audit_dir, "proposed.json",
         _proposed_json(ctx, root, run_id, exact_actions, staged, skipped),
     )
+    # Outcome carries `review_status='pending'` (mirrors dedup analyze, §8 B) so the
+    # M6 result card / root-detail Review box detect the awaiting-review state and
+    # surface the [o]/[g]/[k] actions — otherwise a paused cleanup looked "done".
+    ctx._cleanup_outcome = {
+        "review_status": "pending", "stage": 1,
+        "to_delete_exact": len(exact_actions),
+        "groups": len(staged), "members": len(staged),
+        "summary": f"{len(exact_actions)} exact + {len(staged)} perceptual staged for review",
+    }
     _report_analyze(ctx, root, len(exact_actions), len(staged), skipped)
 
 

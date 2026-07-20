@@ -32,6 +32,7 @@ def dashboard_body(
     roots_page: int = 0,
     queue_cursor: int = 0,
     queue_page: int = 0,
+    gem: str = render.LOGO_GEMS[0],   # the mascot's held gem (cycled by the anim timer)
 ) -> list[str]:
     """Build the dashboard body lines (§1.1–§1.4), laid out to ``geo`` size.
 
@@ -46,8 +47,10 @@ def dashboard_body(
     roots_rows = geo.dash_roots_rows
 
     # -- Top section: logo (left) + Collection box (right) --
-    coll_box = box("Collection", render.collection_lines(snap, now=now), geo.collection_w)
-    logo = render.logo_lines(assets, rows=geo.TOP_ROWS, width=geo.logo_w)
+    coll_box = box("Collection",
+                   render.collection_lines(snap, now=now, width=geo.collection_w - 4),
+                   geo.collection_w)
+    logo = render.logo_lines(assets, gem=gem, rows=geo.TOP_ROWS, width=geo.logo_w)
     top = hjoin(logo, coll_box)
 
     # -- Roots box (full width): a fixed-height window over the root list --

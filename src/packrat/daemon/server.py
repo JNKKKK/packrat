@@ -164,6 +164,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
             raise HTTPException(status_code=404, detail="no such job")
         return detail
 
+    @app.get("/jobs/{job_id}/problem-files", dependencies=[Depends(require_token)])
+    def job_problem_files(job_id: int):
+        """A scan job's undecodable/read-error files (paths + reasons, §12 result card)."""
+        return {"problem_files": queries.job_problem_files(job_id)}
+
     @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_token)])
     def cancel_job(job_id: int):
         ok = queue.cancel(job_id)

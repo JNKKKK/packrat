@@ -83,6 +83,20 @@ def test_scan_records_problem_files_with_reasons(queue_and_db, tmp_path):
         assert p["content_hash"]            # undecodable still has a hash
 
 
+def test_job_problem_files_query_returns_paths_and_reasons(queue_and_db, tmp_path):
+    """queries.job_problem_files (the TUI scan-card list) returns the job's problems."""
+    q, database = queue_and_db
+    lib = _lib_with_bad(tmp_path)
+    root = register(database, str(lib))
+    jid = _run_scan(q, database, root["id"])
+    probs = queries.job_problem_files(jid)
+    assert len(probs) == 2
+    assert all(pf["problem"] == "undecodable" for pf in probs)
+    assert all(pf["path"] and pf["media_type"] for pf in probs)
+    # a non-scan / unknown job id has no problem files (empty, not an error)
+    assert queries.job_problem_files(999999) == []
+
+
 def test_profile_json_stored_when_profiled(queue_and_db, tmp_path):
     q, database = queue_and_db
     lib = _lib_with_bad(tmp_path)

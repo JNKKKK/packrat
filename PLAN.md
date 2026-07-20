@@ -2522,8 +2522,9 @@ sample dataset (no daemon) for demoing/development.
 ### 12.1 Interfaces
 
 - **Dashboard** (default): three stacked full-width sections — the packrat logo + live "N assets
-  hoarded" line beside the **Collection** stats box (total/photo/video/trashed + last-scan recency);
-  the **Roots** box (name, path, `◉/◐/○` freshness dot, asset count); and the **Queue** box (the
+  hoarded" line beside the **Collection** stats box (total/photo/video/trashed + **lifetime deduped**,
+  the total files removed across all dedup runs); the **Roots** box (name, path, `◉/◐/○` freshness dot,
+  asset count, **total size on disk**); and the **Queue** box (the
   running job's live bar + the queued backlog preview). `[r]`/`[q]` focus the Roots/Queue box (heavy
   accent-colored frame + `▸` cursor); pressing the same key again **maximizes** into the full Roots /
   Queue interface.
@@ -2531,18 +2532,29 @@ sample dataset (no daemon) for demoing/development.
   most-assets / photos / videos, client-side over the id-ascending snapshot), `[a]` **add-root form**
   (§2.2 register flow — Tab between fields, radios/checkboxes, paste-aware path input), `[Enter]` opens
   root detail. Dot legend + `page i/N` share the header line.
-- **Root detail** (§3): counts + scan/dedup recency, the pending-review banner (⚠ awaiting review, or
-  "No pending review"), and the per-root **jobs history** (paginated, pager on the "Jobs" header line).
-  Actions map to CLI verbs: `[s]` scan, `[d]` dedup, `[m]` **merge-from picker** (§3.3 — radio between
-  a paginated registered-root list and a typed external-folder path, `Ctrl+D` dry-run toggle),
-  `[c]` cleanup (choice modal: exact / perceptual / undecodable), and `[o]`/`[g]`/`[k]` on a pending
-  review (open Explorer / `--confirm` / `--cancel`).
+- **Root detail** (§3): a **3-column stats header** (a folder ASCII icon · assets/photos/videos +
+  total size on disk · last-scan / full-scan / last-dedup recency), then **two focus-able bordered boxes** —
+  a **Review box** (`[v]`; ⚠ awaiting review, or a calm "No pending review") and a **Jobs panel**
+  (`[J]`) laid out like the Queue interface: three independent **Running / Queued / History** sections,
+  each with its own paginator (Queued is kept short; History gets the bulk). A focused box gets the
+  heavy accent-colored border and its inside key hints read normal; the unfocused box **dims** its
+  hints (the Jobs sub-headers grey; the Review box's `[o]`/`[g]`/`[k]` grey). Within the focused Jobs
+  panel `[r]`/`[q]`/`[h]` pick the sub-section (Queued/History paginate with `←/→`, `↑/↓` selects),
+  `[Enter]` opens the selected job's result card; the **Running** row shows the live `███░░░` progress
+  bar. `Esc` un-focuses (a second `Esc` backs out). Actions map to CLI verbs: `[s]` scan, `[d]` dedup,
+  `[m]` **merge-from picker** (§3.3 — radio between a paginated registered-root list and a typed
+  external-folder path, `Ctrl+D` dry-run toggle), `[c]` cleanup (choice modal: exact / perceptual /
+  undecodable), and `[o]`/`[g]`/`[k]` on a pending review (open Explorer / `--confirm` / `--cancel`).
+  Actions that need **no confirmation** report via a non-blocking **toast** (a red error toast if the
+  submit itself fails), never a modal popup; only confirm-gated deletes still open a modal.
 - **Queue interface** (§4): three independently-paged sections — **Running**, **Queued** (with blocked
-  reasons), **Recent** — with per-section focus (`[r]`/`[q]`/`[e]`), `[c]` cancel, `[p]` prioritize,
+  reasons), **History** — with per-section focus (`[r]`/`[q]`/`[h]`), `[c]` cancel, `[p]` prioritize,
   `[x]` cancel-all, `[Enter]` result card.
 - **Job result/detail card** (§5): renders from `jobs.result_json`, keyed off `status` first then `op`;
   a running job shows the live SSE bar and swaps to its terminal card on completion; error/interrupted
-  render from `status` + `error` (NULL `result_json` tolerated).
+  render from `status` + `error` (NULL `result_json` tolerated). A **scan** card also lists its
+  undecodable/read-error **problem files** (paths + reasons, from `scan_problem_files`) in a fixed-height
+  `↑/↓`-scrollable section below the count summary.
 
 ### 12.2 Architecture (how it's built)
 

@@ -68,9 +68,14 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
         return "▸ " if focus_field == field else "  "
 
     rule = "─" * (geo.content_w - 2)
-    # The path field shows typed text padded with underscores as an input
-    # affordance (55-cell field, matching the §2.2 mockup).
-    filled = path + "_" * max(0, 55 - len(path))
+    # The path field shows typed text padded with underscores as an input affordance.
+    # The prefix "  Path   " (9) + the 2-cell focus marker = 11 cells, so the field
+    # extends from there toward the rule's right end, minus a small right margin — it
+    # grows with the terminal width instead of a fixed 55.
+    PATH_PREFIX = 11
+    RIGHT_MARGIN = 4
+    field_w = max(20, (geo.content_w - 2) - PATH_PREFIX - RIGHT_MARGIN)
+    filled = path + "_" * max(0, field_w - len(path))
     lines = [
         "Register a new root (metadata-only; scan it afterward).",
         rule,

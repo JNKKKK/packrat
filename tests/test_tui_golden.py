@@ -12,6 +12,7 @@ from __future__ import annotations
 from packrat.tui import fixtures
 from packrat.tui.fixtures import REFERENCE_NOW as NOW
 from packrat.tui.framing import screen
+from packrat.tui.layout import cell_width
 from packrat.tui.screens import jobcard
 from packrat.tui.screens.dashboard import dashboard_body
 from packrat.tui.screens.queue import queue_body
@@ -30,9 +31,19 @@ def test_dashboard_idle_structural():
                    "v0.1.0 · daemon ● up", footer=FOOT_DASH)
     rows = built.split("\n")
     assert len(rows) == 24 and all(len(r) == 100 for r in rows)
-    assert "p a c k r a t" in built
+    assert "|_) _.  _ |  ._ _. _|_" in built    # the "Packrat" ASCII wordmark
     assert "Collection" in built and "[R]oots" in built and "[Q]ueue" in built
     assert "idle — no jobs running or queued" in built
+    # Collection box shows lifetime "Deduped", not "Last scan" (item 1).
+    assert "Deduped" in built and "8,241" in built
+    assert "Last scan" not in built
+    # Collection box shows the full collection size (fmt_size(704.5e9) → 656 GB).
+    assert "Size" in built and "656 GB" in built
+    # Collection values are right-aligned to the box's right edge: the value comes AFTER
+    # the label with a run of spaces between, and sits flush against the box border (│).
+    assets_row = next(r for r in rows if "Assets" in r and "124,803" in r)
+    assert assets_row.index("Assets") < assets_row.index("124,803")
+    assert "  124,803 │" in assets_row          # right-aligned, hugging the box border
 
 
 def test_dashboard_running_structural():
@@ -49,6 +60,7 @@ def test_dashboard_running_structural():
     rows = built.split("\n")
     assert len(rows) == 24 and all(len(r) == 100 for r in rows)
     assert "▶ scan iPhone" in built and "ETA" in built
+    assert "█" in built and "░" in built          # the visual progress bar (§6)
     assert "67%" in built and "8,912/13,204" in built
     assert "blocked: Photos pending dedup" in built
     assert "queued · waiting for worker" in built
@@ -67,6 +79,8 @@ def test_roots_max_structural():
     # legend + paginator share the line directly under the sort header
     legend_line = next(ln for ln in rows if "scanned + deduped" in ln)
     assert "page 1/1" in legend_line
+    # Each root row carries its total on-disk size (item 3); trash shows "—".
+    assert "477 GB" in built and "138 GB" in built
 
 
 def test_add_root_form_structural():
@@ -89,7 +103,9 @@ def test_add_root_form_structural():
 def _fixed(frame: str) -> list[str]:
     rows = frame.split("\n")
     assert len(rows) == 24, f"{len(rows)} rows"
-    assert all(len(r) == 100 for r in rows), "a row is not 100 cells"
+    # DISPLAY width (root detail's 📁 mascot glyph is 2 cells but 1 char, so len()
+    # under-measures — measure by terminal cells).
+    assert all(cell_width(r) == 100 for r in rows), "a row is not 100 cells"
     return rows
 
 
@@ -100,9 +116,28 @@ def test_root_detail_pending_fits_and_shows_review():
     built = screen(f"packrat · {d['name']}", detail_body(d, now=NOW, jobs=jobs),
                    detail_header_right(d), footer="Esc")
     _fixed(built)
+    # 3-column stats header: packrat mascot | counts | scan/dedup dates (§3)
+    assert "(>📁<)" in built                       # the 📁-clutching mascot
+    assert "assets" in built and "92,110" in built  # photo count in the counts column
+    assert "last scan" in built and "last dedup" in built
+    # Row 4 is now the on-disk size, not the raw file count (item 2).
+    assert "size" in built and "477 GB" in built    # fmt_size(512e9) base-1024
+    assert "files" not in built
     assert "⚠ dedup — awaiting review (stage 2 of 3)" in built
     assert "240 to delete (exact) · 18 groups / 47 members" in built
     assert "[o] open in Explorer" in built
+    # Stage-2 dedup offers the bulk keep-suggested confirm (§8 B --keep-suggested).
+    assert "[b] confirm · keep suggested" in built
+    # A blank spacer row sits between the stats block and the Review box.
+    rows = built.split("\n")
+    mascot_top = next(i for i, r in enumerate(rows) if "(\\__/)" in r)  # first mascot line
+    mascot_row = next(i for i, r in enumerate(rows) if "(____)" in r)   # last mascot line
+    review_row = next(i for i, r in enumerate(rows) if "[V] Review" in r)
+    assert review_row == mascot_row + 2, "expected one blank line between stats and Review"
+    assert rows[mascot_row + 1].strip("│ ") == ""                      # the spacer is blank
+    # A blank spacer row sits ABOVE the stats section too (below the top frame border).
+    assert rows[mascot_top - 1].strip("│ ") == ""                      # the top spacer
+    assert mascot_top == 2                                             # border(0) + spacer(1)
 
 
 def test_root_detail_clean_fits_and_shows_no_review():
@@ -120,11 +155,12 @@ def test_queue_interface_fits_and_has_three_sections():
                    "daemon ● up", footer="Esc")
     _fixed(built)
     # three per-section headers with their focus accelerators; queued is focused
-    # (uppercased) here, running/recent are not.
+    # (uppercased) here, running/history are not.
     assert "[R]unning:" in built
     assert "[Q]UEUED (RUNS TOP-DOWN):" in built     # focused → uppercased
-    assert "Rec[e]nt:" in built
+    assert "[H]istory:" in built
     assert "▶ #418 scan iPhone" in built
+    assert "█" in built and "░" in built             # Running row shows the bar (§6)
     # each section has its OWN paginator (independent windows) → two "page i/N"
     assert built.count("page ") >= 2
 
@@ -135,6 +171,19 @@ def test_scan_result_card_fits():
     _fixed(built)
     assert "Job #418 · scan iPhone · done" in built
     assert "new assets" in built
+
+
+def test_scan_result_card_lists_problem_files():
+    """A scan card with undecodable/read-error files lists their paths + reasons (§12)."""
+    j = fixtures.SCAN_DONE
+    built = screen(jobcard.card_title(j),
+                   jobcard.card_body(j, now=NOW, problem_files=fixtures.SCAN_PROBLEM_FILES),
+                   "Jul 15", footer="↑/↓ scroll problem files   Esc back")
+    _fixed(built)
+    assert "problem files (3):" in built
+    assert "IMG_0032.HEIC" in built                 # a listed path
+    assert "cannot identify image file" in built    # its reason
+    assert "‹undecodable›" in built                 # the problem tag
 
 
 def test_merge_result_card_fits():
@@ -157,6 +206,17 @@ def test_dedup_pending_card_carries_actions():
     _fixed(built)
     assert "awaiting review" in built
     assert "[o] open review folder" in built and "[g] confirm this stage" in built
+
+
+def test_cleanup_pending_card_carries_actions():
+    # A paused cleanup --trash-perceptual must render the awaiting-review card with
+    # the [o]/[g]/[k] actions (was falling through to a bare one-liner before the fix).
+    j = fixtures.CLEANUP_PENDING
+    built = screen(jobcard.card_title(j), jobcard.card_body(j, now=NOW), "today", footer="Esc")
+    _fixed(built)
+    assert "awaiting review" in built
+    assert "[o] open review folder" in built and "[g] confirm & delete" in built
+    assert "perceptual" in built
 
 
 def test_error_card_renders_from_status():

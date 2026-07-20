@@ -37,30 +37,35 @@ ROOTS: list[dict] = [
         "id": 1, "name": "iPhone", "path": r"D:\Backup\iPhone", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-10T10:00:00",
         "asset_count": 98412, "photos": 92110, "videos": 6302, "instance_count": 98540,
+        "size_bytes": 512_000_000_000,
         "last_scan_at": "2026-07-15T09:04:00", "last_dedup_at": "2026-07-15T11:31:00",
     },
     {
         "id": 2, "name": "Camera", "path": r"E:\Photos", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-08T08:00:00",
         "asset_count": 26150, "photos": 25900, "videos": 250, "instance_count": 26150,
+        "size_bytes": 148_000_000_000,
         "last_scan_at": "2026-07-14T09:31:00", "last_dedup_at": "2026-07-12T15:00:00",
     },
     {
         "id": 3, "name": "Photos", "path": r"E:\Photos2", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-14T20:00:00",
         "asset_count": 8900, "photos": 8600, "videos": 300, "instance_count": 8900,
+        "size_bytes": 41_300_000_000,
         "last_scan_at": "2026-07-15T09:00:00", "last_dedup_at": None,
     },
     {
         "id": 4, "name": "_Trash", "path": r"D:\Backup\_Trash", "kind": "trash",
         "enabled": 1, "last_full_scan_at": None,
         "asset_count": 0, "photos": 0, "videos": 0, "instance_count": 0,
+        "size_bytes": 0,
         "last_scan_at": None, "last_dedup_at": None,
     },
     {
         "id": 5, "name": "Downloads", "path": r"D:\dump", "kind": "library",
         "enabled": 1, "last_full_scan_at": None,
         "asset_count": 241, "photos": 200, "videos": 41, "instance_count": 241,
+        "size_bytes": 3_200_000_000,
         "last_scan_at": "2026-07-15T11:02:00", "last_dedup_at": None,
     },
 ]
@@ -176,6 +181,22 @@ UNTRASH_DONE = _job(
     }),
 )
 
+# A paused `cleanup --trash-perceptual`: the analyze job COMPLETED and left a pending
+# review_run — like DEDUP_PENDING, but op='cleanup', so the card must route its
+# confirm/cancel to `cleanup … --confirm` (not dedup). Its analyze emits
+# review_status='pending' (jobs/cleanup.py), which the card keys off (§6.2).
+CLEANUP_PENDING = _job(
+    id=462, type="cleanup", root_id=3, status="done", finished_at="2026-07-15T11:40:00",
+    params_json=_rj({"root_id": 3, "mode": "perceptual"}), root_name="Photos",
+    label="cleanup Photos (perceptual · analyze)",
+    result_json=_rj({
+        "op": "cleanup", "mode": "perceptual", "action": "analyze",
+        "review_status": "pending", "stage": 1, "to_delete_exact": 4,
+        "groups": 11, "members": 11,
+        "summary": "4 exact + 11 perceptual staged for review",
+    }),
+)
+
 CLEANUP_ERROR = _job(
     id=461, type="cleanup", root_id=3, status="error", finished_at="2026-07-15T11:00:00",
     error="nothing to confirm; run `dedup Photos` first.",
@@ -189,12 +210,25 @@ SCAN_INTERRUPTED = _job(
     params_json=_rj({"root_id": 1}), root_name="iPhone", label="scan iPhone",
 )
 
+# The undecodable/read-error files behind SCAN_DONE's counts (shape of
+# queries.job_problem_files) — the scan result card lists these with paths+reasons.
+SCAN_PROBLEM_FILES: list[dict] = [
+    {"path": r"D:\Backup\iPhone\2019\IMG_0032.HEIC", "media_type": "photo",
+     "problem": "undecodable", "detail": "PIL: cannot identify image file"},
+    {"path": r"D:\Backup\iPhone\clips\old.3gp", "media_type": "video",
+     "problem": "undecodable", "detail": None},
+    {"path": r"D:\Backup\iPhone\2018\IMG_9910.HEIC", "media_type": "photo",
+     "problem": "undecodable", "detail": "PIL: cannot identify image file"},
+]
+
 
 # --- status_snapshot() -----------------------------------------------------
 def status_snapshot(*, running: bool = False) -> dict:
     """A ``status_snapshot()``-shaped dict (idle by default; ``running`` adds a job)."""
     return {
         "assets": 124803, "photos": 111240, "videos": 13563, "trashed": 3904,
+        "size_bytes": 704_500_000_000,          # Σ of the ROOTS' size_bytes
+        "lifetime_deduped": 8241,
         "running": dict(RUNNING_SCAN) if running else None,
         "queued": [dict(QUEUED_MERGE), dict(QUEUED_SCAN), dict(QUEUED_DEDUP)] if running else [],
         "interrupted": [],
@@ -240,6 +274,7 @@ def root_detail_pending() -> dict:
         "enabled": 1, "last_full_scan_at": "2026-07-10T10:00:00",
         "last_scan_at": "2026-07-15T09:04:00",
         "photos": 92110, "videos": 6302, "instances": 98540,
+        "size_bytes": 512_000_000_000,
         "pending_review": {
             "id": 77, "run_type": "dedup", "stage": 2, "created_at": "2026-07-15T11:31:00",
             "counts": {"to_delete_exact": 240, "groups": 18, "members": 47},
@@ -273,6 +308,7 @@ def root_detail_clean() -> dict:
         "enabled": 1, "last_full_scan_at": "2026-07-08T08:00:00",
         "last_scan_at": "2026-07-14T09:31:00",
         "photos": 25900, "videos": 250, "instances": 26150,
+        "size_bytes": 148_000_000_000,
         "pending_review": None,
         "last_dedup_at": "2026-07-12T15:00:00", "last_cleanup_at": None,
         "running_job": None,

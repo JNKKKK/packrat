@@ -72,6 +72,10 @@ class DaemonClient:
     def get_job(self, job_id: int) -> dict:
         return self._get(f"/jobs/{job_id}")
 
+    def job_problem_files(self, job_id: int) -> list[dict]:
+        """A scan job's undecodable/read-error files (paths + reasons, §12 card)."""
+        return self._get(f"/jobs/{job_id}/problem-files")["problem_files"]
+
     def list_jobs(self, limit: int = 20) -> list[dict]:
         return self._get(f"/jobs?limit={limit}")["jobs"]
 

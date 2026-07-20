@@ -88,9 +88,10 @@ class Geometry:
         """The logo panel width (left of the Collection box in the top section)."""
         return self.content_w - self.collection_w - 1   # ref: 66
 
-    # Top section is a fixed height: the Collection box is 5 stats + 2 borders = 7
-    # rows, and the logo (6 lines) is padded to match. It does not grow with height.
-    TOP_ROWS = 7
+    # Top section is a fixed height: the Collection box is 6 stats (assets/photos/
+    # videos/size/trashed/deduped) + 2 borders = 8 rows, and the logo is padded to
+    # match. It does not grow with height.
+    TOP_ROWS = 8
 
     @property
     def roots_w(self) -> int:

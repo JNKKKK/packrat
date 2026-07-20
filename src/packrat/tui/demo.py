@@ -114,11 +114,15 @@ _ROOT_SPECS = [
 
 def _root(spec) -> dict:
     rid, name, path, kind, photos, videos, scan, dedup, full = spec
+    # Synthesize a plausible on-disk size (~4 MB/photo, ~60 MB/video) so the demo's
+    # size column shows varied realistic values; trash roots are empty.
+    size_bytes = 0 if kind == "trash" else photos * 4_000_000 + videos * 60_000_000
     return {
         "id": rid, "name": name, "path": path, "kind": kind, "enabled": 1,
         "last_full_scan_at": full,
         "asset_count": photos + videos, "photos": photos, "videos": videos,
-        "instance_count": photos + videos, "last_scan_at": scan, "last_dedup_at": dedup,
+        "instance_count": photos + videos, "size_bytes": size_bytes,
+        "last_scan_at": scan, "last_dedup_at": dedup,
     }
 
 
@@ -273,8 +277,9 @@ RECENT = [
                           "summary": "already clean — no exact duplicates or near-dup groups"})),
     _job(id=591, type="scan", root_id=32, status="done", total=14400, done=14400,
          finished_at="2026-07-08T22:00:00", params_json=_rj({"root_id": 32}), root_name="Dashcam",
-         label="scan Dashcam", result_json=_rj({"op": "scan", "new": 14230,
-                                                 "summary": "+14,230 new · 3 undecodable"})),
+         label="scan Dashcam",
+         result_json=_rj({"op": "scan", "new": 14201, "undecodable": 14, "read_errors": 3,
+                          "summary": "+14,201 new · 14 undecodable · 3 read errors"})),
     _job(id=590, type="untrash", status="done", finished_at="2026-07-07T11:00:00",
          params_json=_rj({"path": r"R:\recovered\2019\batch"}), label="untrash batch",
          result_json=_rj({"op": "untrash", "untrashed": 18, "forgotten": 4, "already_active": 2,
@@ -298,6 +303,8 @@ def status_snapshot(*, running: bool = True) -> dict:
         "photos": sum(r["photos"] for r in ROOTS),
         "videos": sum(r["videos"] for r in ROOTS),
         "trashed": 3904,
+        "size_bytes": sum(r["size_bytes"] for r in ROOTS),
+        "lifetime_deduped": 14027,
         "running": dict(RUNNING) if running else None,
         "queued": [dict(j) for j in QUEUED],
         "interrupted": [],
@@ -318,6 +325,41 @@ def queued_jobs() -> list[dict]:
     return [dict(j) for j in QUEUED]
 
 
+def job_problem_files(job_id: int) -> list[dict]:
+    """Synthesize a scan job's problem-file list from its recorded counts.
+
+    Mirrors ``queries.job_problem_files``: one entry per undecodable / read-error the
+    job's ``result_json`` claims, so the count summary and the list agree (and a job
+    with many gives the card enough rows to exercise ↑/↓ scrolling)."""
+    job = next((j for j in RECENT if j["id"] == job_id), None)
+    if job is None:
+        return []
+    r = json.loads(job.get("result_json") or "{}")
+    if r.get("op") != "scan":
+        return []
+    root = job.get("root_name") or "root"
+    _EXT = {"photo": ("HEIC", "jpg", "png"), "video": ("3gp", "mov", "avi")}
+    _WHY = {
+        "photo": "PIL: cannot identify image file",
+        "video": "PyAV: no decodable video stream",
+    }
+    out: list[dict] = []
+    for i in range(r.get("undecodable", 0)):
+        mt = "photo" if i % 3 else "video"
+        out.append({
+            "path": rf"D:\Backup\{root}\2019\batch{i // 5:02d}\IMG_{4000 + i}.{_EXT[mt][i % 3]}",
+            "media_type": mt, "problem": "undecodable",
+            "detail": _WHY[mt] if i % 2 == 0 else None,
+        })
+    for i in range(r.get("read_errors", 0)):
+        out.append({
+            "path": rf"\\tubie_nas\Res-v2\{root}\corrupt\clip_{i}.mov",
+            "media_type": "video", "problem": "read-error",
+            "detail": "OSError: [Errno 5] I/O error (SMB timeout)",
+        })
+    return out
+
+
 # --- per-root detail + a long jobs history (§3 jobs list spans pages) ---------
 def _root_by_name(name: str) -> dict | None:
     for r in ROOTS:
@@ -336,15 +378,19 @@ def root_detail(name: str) -> dict | None:
         pending = {"id": 77, "run_type": "dedup", "stage": 2,
                    "created_at": "2026-07-15T08:00:00",
                    "counts": {"to_delete_exact": 240, "groups": 18, "members": 47}}
+    # This root's slice of the backlog (with blocked reasons) → the Jobs panel's
+    # Queued section; Photos has two waiting behind its pending review.
+    queued = [dict(j) for j in QUEUED if j.get("root_id") == r["id"]]
     return {
         "id": r["id"], "name": r["name"], "path": r["path"], "kind": r["kind"],
         "enabled": 1, "last_full_scan_at": r["last_full_scan_at"],
         "last_scan_at": r["last_scan_at"],
         "photos": r["photos"], "videos": r["videos"], "instances": r["instance_count"],
+        "size_bytes": r["size_bytes"],
         "pending_review": pending,
         "last_dedup_at": r["last_dedup_at"], "last_cleanup_at": None,
         "running_job": dict(RUNNING) if name == "Archive" else None,
-        "queued_jobs": [],
+        "queued_jobs": queued,
         "last_scan": None,
         "undecodable_current": 0,
         "problem_files": [],

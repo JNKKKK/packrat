@@ -149,6 +149,10 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
         members = sum(1 for r in rows if r["kind"] == "perceptual")
         result.update({"review_status": run["status"], "stage": run["stage"],
                        "to_delete_exact": exact, "groups": len(groups), "members": members})
+        # A confirm that recycled files records the numeric deleted total (durable, so
+        # the lifetime-deduped metric aggregates it across completed dedup jobs).
+        if action == "confirm":
+            result["deleted"] = getattr(ctx, "_dedup_deleted", 0)
         if run["status"] == "pending":
             result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
                                  f"{len(groups)} grp/{members} mbr")
@@ -267,6 +271,11 @@ def _confirm(ctx: JobContext) -> None:
             conn.execute("UPDATE review_runs SET stage_phase='applied' WHERE id=?", (run_id,))
         if keep_suggested:
             ctx.log("  (--keep-suggested: kept each group's suggested lead, ignored shortcut edits.)")
+        # Accumulate this confirm's deleted total on the ctx so _set_dedup_result can
+        # persist it (feeds the dashboard's lifetime-deduped metric — every file this
+        # confirm recycled, exact-dup collapses + perceptual/edit deletions).
+        ctx._dedup_deleted = getattr(ctx, "_dedup_deleted", 0) + \
+            outcomes["exact_deleted"] + outcomes["perceptual_deleted"]
         _report_stage_confirm(ctx, stage, outcomes)
 
     # Advance to the next non-empty stage, or finalize after the last.

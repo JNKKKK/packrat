@@ -91,11 +91,45 @@ def test_focused_section_header_is_fully_accented():
     assert _span_color(frame, "DOWN") == T.color("accent")
 
 
-def test_unfocused_section_header_only_key_accented():
-    # a mixed-case (unfocused) header keeps default body text; only its [e] hint pops
-    frame = "Rec[e]nt:"
-    assert _span_color(frame, "Rec") == T.color("default")
-    assert _span_color(frame, "[e]") == T.color("accent")
+def test_focused_section_header_accented_even_with_pager():
+    # a focused header carrying a right-aligned pager still accents as a whole line
+    frame = "[Q]UEUED:                                                   page 1/2"
+    assert _span_color(frame, "UEUED") == T.color("accent")
+    assert _span_color(frame, "[Q]") == T.color("accent")
+
+
+def test_active_panel_inactive_section_header_only_key_accented():
+    # a mixed-case (active panel, inactive section) header keeps default body text;
+    # only its [h] hint pops
+    frame = "[H]istory:"
+    assert _span_color(frame, "istory") == T.color("default")
+    assert _span_color(frame, "[H]") == T.color("accent")
+
+
+def test_inactive_panel_header_is_fully_dim():
+    # a lowercase-key header (the panel itself is unfocused) → whole line dim, so its
+    # [k] key hint reads grey too (not accent)
+    frame = "[h]istory:                                                  page 1/3"
+    assert _span_color(frame, "istory") == T.color("dim")
+    assert _span_color(frame, "[h]") == T.color("dim")     # key hint dimmed, not accented
+    assert _span_color(frame, "page 1/3") == T.color("dim")
+
+
+def test_header_coloring_survives_leading_frame_and_box_borders():
+    # colorize runs on the COMPOSED frame, where a sub-section header sits inside the
+    # outer frame AND its panel box: `│ │ [h]istory: … │ │`. The classifier must see
+    # past those border glyphs (regression: it anchored `^[` and colored nothing).
+    frame = "│ │ [h]istory:                                             page 1/3 │ │"
+    assert _span_color(frame, "istory") == T.color("dim")     # dim reaches the label
+    assert _span_color(frame, "[h]") == T.color("dim")
+    # the leading border glyph is NOT tinted by the header rule (it stays default)
+    assert _span_color(frame, "│ │ [h]"[:1]) == T.color("default")
+
+
+def test_focused_header_accent_survives_box_borders():
+    frame = "│ ┃ [H]ISTORY:                                             page 1/3 ┃ │"
+    assert _span_color(frame, "ISTORY") == T.color("accent")
+    assert _span_color(frame, "[H]") == T.color("accent")
 
 
 def test_trash_label_not_treated_as_key_hint():
@@ -113,3 +147,32 @@ def test_colorize_preserves_text_content():
     # coloring must not change a single character (width/content invariant)
     frame = "┌─ [R]oots ─┐ ◉ 98,412  ‹hint›"
     assert colorize(frame).plain == frame
+
+
+# --- logo gem gradient animation -------------------------------------------
+def test_gem_gradient_wraps_and_interpolates():
+    from packrat.tui.colorize import gem_gradient_color
+    from packrat.tui.tokens import GEM_GRADIENT
+
+    # phase 0 and phase 1.0 land on the same (first) stop — the loop closes.
+    assert gem_gradient_color(0.0) == GEM_GRADIENT[0]
+    assert gem_gradient_color(1.0) == gem_gradient_color(0.0)
+    # a mid-stop phase is a blend, i.e. NOT equal to either bracketing stop.
+    mid = gem_gradient_color(0.5 / len(GEM_GRADIENT))
+    assert mid not in GEM_GRADIENT
+    assert mid.startswith("#") and len(mid) == 7
+
+
+def test_recolor_gem_tints_only_the_gems():
+    from packrat.tui.colorize import recolor_gem
+    from packrat.tui import render
+
+    logo = "\n".join(render.logo_lines(1234, gem="◆"))
+    text = recolor_gem(colorize(logo), logo, "◆", "#ff00ff")
+    # exactly the two ◆ cells in `(>◆◆<)` are tinted with the gradient color
+    tinted = [(s.start, s.end) for s in text.spans if str(s.style) == "#ff00ff"]
+    positions = [i for i, ch in enumerate(logo) if ch == "◆"]
+    assert len(positions) == 2
+    assert tinted == [(positions[0], positions[0] + 1), (positions[1], positions[1] + 1)]
+    # content is untouched (recolor is style-only)
+    assert text.plain == logo

@@ -60,6 +60,19 @@ POLL_INTERVAL_S = 3.0
 # Trailing window (seconds) of SSE progress samples the TUI-side ETA averages the
 # observed rate over (§ cross-cutting "ETA is computed TUI-side").
 ETA_WINDOW_S = 8.0
+# Minimum gap (seconds) between live re-renders driven by SSE progress. A scan emits
+# one `progress` event PER FILE (hundreds/sec on a local disk); re-laying-out +
+# recolorizing the whole frame that often makes the TUI unresponsive. The streamed
+# `done`/`total` still update in memory every event (so no data is lost); only the
+# repaint is coalesced to this cadence — ~8 fps is smooth without flooding.
+STREAM_RENDER_INTERVAL_S = 0.12
+# --- Logo animation (dashboard hoard mascot) --------------------------------
+# The dashboard re-renders the logo on this tick to shimmer the held gem's color
+# gradient; the GEM GLYPH itself swaps (◆→◇→◈) every `LOGO_GEM_SWAP_TICKS` ticks,
+# so the color glints continuously while the shape changes more slowly.
+LOGO_ANIM_INTERVAL_S = 0.15   # ~7 fps color sweep (cheap: only the top section moves)
+LOGO_GEM_SWAP_TICKS = 20      # swap the gem glyph every ~3 s (20 × 0.15)
+LOGO_GRADIENT_STEP = 0.045    # gradient phase advanced per tick (full loop ≈ 3.3 s)
 
 # --- Color roles (the token layer, §Theming) --------------------------------
 # A widget tags a span with a semantic ROLE, never a raw color; the Theme decides
@@ -114,6 +127,22 @@ DEFAULT_THEME = Theme(
         "muted-border": "#585858",
         "focus-border": "#00d7af",
     },
+)
+
+
+# --- Logo gem gradient (dashboard hoard animation) --------------------------
+# The color sweep the mascot's held gem shimmers through — a loop of jewel tones
+# (cyan → sky → violet → magenta → rose → gold → back). The dashboard's animation
+# timer walks a phase along this loop and interpolates between stops (see
+# `colorize.gem_gradient_color`), so the gem glints like a faceted stone. Colorless
+# builders/tests never see this; it's applied post-layout only in the live widget.
+GEM_GRADIENT = (
+    "#00d7af",  # cyan-teal (matches the accent)
+    "#5fafff",  # sky blue
+    "#af87ff",  # violet
+    "#ff5fd7",  # magenta
+    "#ff6f91",  # rose
+    "#ffcf5f",  # gold
 )
 
 

@@ -20,18 +20,44 @@ from .tokens import BAR_EMPTY, BAR_FILL, CURSOR, RUNNING
 
 
 # --- Logo (§1) -------------------------------------------------------------
-def logo_lines(assets: int, *, rows: int | None = None, width: int | None = None) -> list[str]:
-    """The mascot + tagline + live "· N assets hoarded ·" line (§1 Logo panel).
+# The gem the packrat clutches, cycled by the dashboard's animation timer. Each is a
+# single terminal cell (verified), so swapping between them never shifts the layout —
+# the plain frame stays width-stable whatever gem is drawn. `LOGO_GEMS[0]` (◆) is the
+# deterministic default the pure builders / golden tests render.
+LOGO_GEMS = ("◆", "◇", "◈")
 
-    ``rows``/``width`` pad the block to a fixed size so it sits beside the
-    Collection box in the dashboard top section (both must be the same height)."""
+
+# The "Packrat" ASCII wordmark that sits beside the mascot's upper body (3 lines,
+# each ≤ the logo width). Plain ASCII (pipes/parens/underscores, NOT box-drawing
+# glyphs) so the colorizer leaves it default and it never reads as a panel border.
+LOGO_WORDMARK = (
+    "  _",
+    " |_) _.  _ |  ._ _. _|_",
+    " |  (_| (_ |< | (_|  |_",
+)
+
+
+def logo_lines(assets: int, *, gem: str = LOGO_GEMS[0],
+               rows: int | None = None, width: int | None = None) -> list[str]:
+    """The packrat mascot + "Packrat" wordmark + tagline + live "· N assets ·" line (§1).
+
+    The 3-line :data:`LOGO_WORDMARK` sits in the top three rows of the text column
+    (the first row has no mascot beside it); a blank line then separates it from the
+    tagline + live hoard count, which sit beside the mascot's legs/base. ``gem`` is the
+    glyph the mascot holds (``(>◆◆<)``) — the dashboard cycles it across
+    :data:`LOGO_GEMS` for the hoard animation; it defaults to ◆ so the pure builder is
+    deterministic (golden tests). ``rows``/``width`` pad the block to a fixed size so it
+    sits beside the Collection box in the dashboard top section (same height). All lines
+    are 1-cell-per-char (the gem included), so ``len``-based padding == cell width."""
+    w0, w1, w2 = LOGO_WORDMARK
+    pad = " " * 11         # indent to the wordmark column (2 + 6-cell mascot + 3-space gap)
     lines = [
-        "",
-        "   ___",
-        "  (o.o)    p a c k r a t",
-        '  (>♦<)    "hoards everything, keeps a system"',
-        f"  /   \\    · {assets:,} assets hoarded ·",
-        "",
+        f"{pad}{w0}",                          # wordmark top — no mascot on this row
+        f"  (\\__/)   {w1}",
+        f"  (o..o)   {w2}",
+        f"  (>{gem}{gem}<)",                    # gem row; text column blank → the spacer line
+        '  / || \\    "hoards everything, keeps a system"',
+        f"  (____)    · {assets:,} assets hoarded ·",
     ]
     if rows is not None:
         lines = (lines + [""] * rows)[:rows]
@@ -40,26 +66,49 @@ def logo_lines(assets: int, *, rows: int | None = None, width: int | None = None
     return lines
 
 
-# --- CollectionBox (§1) ----------------------------------------------------
-def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None) -> list[str]:
-    """Collection stats body (§1): assets/photo-video split, trashed, last scan.
+# --- size formatting -------------------------------------------------------
+def fmt_size(n: int | None) -> str:
+    """Human-readable byte size (``12.4 GB`` / ``840 MB`` / ``0 B``) for the UI.
 
-    ``last_scan_label`` overrides the derived recency (the mockup shows a literal
-    ``now`` while a job runs); otherwise it's ``max(roots[].last_scan_at)`` → reltime.
+    Base-1024 units; ≥10 in a unit shows no decimal (``124 GB``), <10 shows one
+    (``4.2 GB``) so the field stays compact. ``None``/0 → ``0 B``."""
+    f = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024 or unit == "TB":
+            if unit == "B" or f >= 10:
+                return f"{f:.0f} {unit}"
+            return f"{f:.1f} {unit}"
+        f /= 1024
+    return f"{f:.0f} TB"
+
+
+# --- CollectionBox (§1) ----------------------------------------------------
+# Inner content width of the Collection box (its outer width minus the box's 4-cell
+# border+padding), used to right-align each stat's value against the box's right edge.
+COLLECTION_INNER_W = tokens.COLLECTION_W - 4       # 25 at the reference size
+
+
+def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None,
+                     width: int = COLLECTION_INNER_W) -> list[str]:
+    """Collection stats body (§1): assets/photo-video split, size, trashed, deduped.
+
+    ``last_scan_label`` is accepted for call compatibility but no longer shown. The
+    ``Size`` line is the full collection's total on-disk bytes (``snap['size_bytes']``);
+    the last line is the lifetime-deduped total (files removed across all dedup runs).
+    Each value is **right-aligned to ``width``** (the box's inner width) so every number's
+    right edge sits flush against the box's right border.
     """
-    if last_scan_label is None:
-        scans = [r.get("last_scan_at") for r in snap.get("roots", []) if r.get("last_scan_at")]
-        last_scan_label = reltime(max(scans), now) if scans else "never"
-    # Label left-justified in 10, count right-justified in 7 → the counts' right
-    # edges line up (col 16), matching the generator's hand-aligned literals.
-    def _stat(label: str, n: int) -> str:
-        return f"{label:<10}{n:>7,}"
+    def _stat(label: str, value) -> str:
+        v = f"{value:,}" if isinstance(value, int) else str(value)
+        # label left, value right-justified to fill the rest → value hugs the right edge.
+        return f"{label}{v:>{max(1, width - len(label))}}"
     return [
         _stat("Assets", snap["assets"]),
         _stat("  photos", snap["photos"]),
         _stat("  videos", snap["videos"]),
+        _stat("Size", fmt_size(snap.get("size_bytes"))),
         _stat("Trashed", snap["trashed"]),
-        f"Last scan {last_scan_label}",
+        _stat("Deduped", snap.get("lifetime_deduped", 0)),
     ]
 
 
@@ -81,6 +130,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
     cur = CURSOR if selected else " "
     dot = root_dot(r)
     count = "(trash)" if r["kind"] == "trash" else f"{r['asset_count']:,}"
+    size = "—" if r["kind"] == "trash" else fmt_size(r.get("size_bytes"))
     return row(
         width,
         [
@@ -89,6 +139,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
             Cell(r["path"], grow=1, elide="middle"),   # absorbs the middle
             Cell(dot, width=1, style=_dot_style(dot)),
             Cell(count, width=7, align="right", style="dim" if r["kind"] == "trash" else None),
+            Cell(size, width=9, align="right", style="dim"),   # total size on disk
         ],
     ).rstrip()
 
@@ -104,6 +155,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False, path_w: int = 20
     """
     cur = CURSOR if selected else " "
     dot = root_dot(r)
+    size = "—" if r["kind"] == "trash" else fmt_size(r.get("size_bytes"))
     if r["kind"] == "trash":
         count, recency = "(trash)", "—"
         dot_cell = Cell(" ", width=1)
@@ -127,6 +179,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False, path_w: int = 20
             Cell(r["path"], grow=1, elide="middle"),    # absorbs the middle
             dot_cell,
             count_cell,
+            Cell(size, width=9, align="right", style="dim"),   # total size on disk
             Cell(recency, width=15, align="right", style="dim"),
         ],
     ).rstrip()
@@ -237,7 +290,16 @@ def queue_row(job: dict, *, selected: bool = False, show_id: bool = True,
     if job.get("status") == "running":
         bar = progress_bar(job.get("done"), job.get("total"),
                            eta_s=job.get("_eta_s"), running=False)
-        return f"{cur}{RUNNING} {job.get('label', job['type'])}     {bar}".rstrip()
+        # label grows to absorb the middle; the ███░░░ bar sits at the right end, so it
+        # stays right-aligned as the terminal widens (matches queue.running_line — the
+        # ▶ marker is on the label side, so the bar renders without a second marker).
+        left = f"{cur}{RUNNING} {job.get('label', job['type'])}"
+        return row(
+            width,
+            [Cell(left, grow=1, elide="end"),
+             Cell(bar, align="right", style="running")],
+            gap=2,
+        ).rstrip()
     if index is not None:
         ident = f"{index} "
     elif show_id:

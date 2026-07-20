@@ -243,10 +243,23 @@ def test_cell_width_counts_cjk_as_two():
 
 def test_cell_width_glyphs_are_one_cell():
     # our box/dot glyphs must measure as 1 cell (keeps golden frames byte-identical)
+    from packrat.tui import render
     for g in (tokens.DOT_DEDUPED, tokens.DOT_SCANNED, tokens.DOT_NEVER,
               tokens.CURSOR, tokens.RUNNING, tokens.WARN, tokens.ELLIPSIS,
-              tokens.BAR_FILL, tokens.BAR_EMPTY):
+              tokens.BAR_FILL, tokens.BAR_EMPTY, *render.LOGO_GEMS):
         assert cell_width(g) == 1, g
+
+
+def test_logo_gem_swap_keeps_lines_width_stable():
+    # Whatever gem the animation draws, the mascot lines stay the SAME display width —
+    # so swapping ◆→◇→◈ never shifts the layout beside the Collection box.
+    from packrat.tui import render
+    base = [cell_width(ln) for ln in render.logo_lines(98412, gem=render.LOGO_GEMS[0])]
+    for gem in render.LOGO_GEMS[1:]:
+        assert [cell_width(ln) for ln in render.logo_lines(98412, gem=gem)] == base
+    # the gem actually appears in the mascot's hands
+    line = next(ln for ln in render.logo_lines(1, gem="◇") if "(>" in ln)
+    assert "◇◇" in line
 
 
 def test_cell_truncate_never_splits_a_wide_char():
