@@ -19,34 +19,12 @@ the plan:
 
 from __future__ import annotations
 
-#: Bumped when the DDL changes. M0 ships v1; v2 adds scan_results +
-#: scan_problem_files (new tables only). v3 adds the M3 3-stage dedup columns
-#: (review_runs.stage/stage_phase, review_actions.stage). v4 added assets.detail_score
-#: (a photo detail estimate for the keep-lead). v5 adds assets.codec (video codec, for
-#: the video keep-lead's codec-efficiency weight, §8 B). v6 **retires** detail_score —
-#: the photo keep-lead now ranks resolution → format rank → file size (§8 B), so a fresh
-#: DB no longer creates the column and _ADDED_COLUMNS no longer lists it. There is no
-#: DROP-column migration (SQLite lacks it pre-3.35 and we keep migrations additive), so
-#: an existing DB just keeps an unread dead column — harmless, nothing writes or reads it.
-#: v7 adds the durable job queue + result history (§3/§4/§12): jobs gets root_id,
-#: enqueued_at, result_json (plain ADD COLUMN) AND a new 'queued' status value. The
-#: status CHECK constraint can't be widened by ALTER, so v7 also needs a one-time
-#: jobs-table REBUILD (connection._migrate_jobs_v7) — the only non-additive migration.
-#: v8 adds jobs.priority (plain ADD COLUMN): `packrat jobs prioritize <id>` bumps a
-#: queued job to the front of the runnable-first dequeue (ORDER BY priority DESC,
-#: enqueued_at, id — §3/§11). Default 0 = normal FIFO.
-#: v9 adds review_runs.deleted_count (plain ADD COLUMN): a durable running total of
-#: files recycled across a dedup run's applied stages, committed at apply time so a
-#: crash-resumed --confirm (which skips the already-applied stage) still reports its
-#: deleted count into the lifetime-deduped metric (§8 B Phase 7). Default 0.
-#: v10 adds a UNIQUE(run_id, source_rel_path) index on merge_plan_items so Phase 1 can
-#: UPSERT each source file's hash as it computes it — a crash-resumed merge then keeps
-#: already-hashed rows instead of re-reading the source over SMB (§8 C). A pre-v10 DB
-#: needs any duplicate (run_id, rel) rows collapsed before the unique index can build
-#: (connection._migrate_dedup_merge_plan_items, run before executescript).
-#: v3/v4/v5/v7/v8/v9 additions to EXISTING tables need the migration pass in init_db
-#: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns / _migrate_jobs_v7.
-SCHEMA_VERSION = 10
+#: Current schema version, stamped into ``meta`` by :func:`init_db`. There is NO
+#: migration runner — ``SCHEMA_SQL`` below is the single source of truth and is applied
+#: with ``CREATE … IF NOT EXISTS``, so ``init_db`` on a fresh (or already-current) DB
+#: is a no-op that yields exactly this schema. If the DDL ever needs a breaking change,
+#: bump this and add a migration step at that point; until then it is just a marker.
+SCHEMA_VERSION = 1
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -79,12 +57,6 @@ CREATE TABLE IF NOT EXISTS assets (
     status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'trashed')),
     undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels (§4)
     decode_error  TEXT,                       -- last decoder failure detail (debugging POC wheels)
-    -- (v4 added assets.detail_score; DROPPED in v6 — the residual-entropy keep-lead
-    --  tiebreak cost ~40% of scan CPU yet, banded to tame its high-quality-JPEG noise,
-    --  only ever agreed with file size within a format. The photo keep-lead now ranks
-    --  resolution → format rank → file size, §8 B. A fresh DB never creates the column;
-    --  an existing DB keeps it as a harmless unread dead column — there is no DROP-column
-    --  migration mechanism, and nothing reads it.)
     codec         TEXT,                       -- video codec name (h264|hevc|av1|vp9|…) from the decode
                                               --   probe; VIDEO only (NULL for photo/undecodable). Feeds
                                               --   the video keep-lead's codec-efficiency weight (§8 B).
@@ -283,7 +255,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at  TEXT,
     error        TEXT,
     result_json  TEXT,
-    priority     INTEGER NOT NULL DEFAULT 0,   -- v8: jobs prioritize (§3/§11); higher = dequeued first
+    priority     INTEGER NOT NULL DEFAULT 0,   -- jobs prioritize (§3/§11); higher = dequeued first
     params_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status);

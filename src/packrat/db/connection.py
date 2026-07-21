@@ -192,151 +192,17 @@ class Database:
             self._conn.close()
 
 
-#: Columns added to EXISTING tables after v1 — CREATE IF NOT EXISTS can't alter a
-#: table, and there is no migration runner, so init_db adds any missing one via an
-#: idempotent ADD COLUMN pass (§4 / schema v3). New *tables* need no entry here
-#: (CREATE IF NOT EXISTS handles them). Keep in sync with schema.py.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    # (table, column, column-def) — v3: the M3 3-stage dedup cursor + per-action stage.
-    ("review_runs", "stage", "INTEGER NOT NULL DEFAULT 1"),
-    ("review_runs", "stage_phase", "TEXT"),
-    ("review_actions", "stage", "INTEGER"),
-    # v5: video codec for the video keep-lead's codec-efficiency weight (§8 B).
-    ("assets", "codec", "TEXT"),
-    # NOTE: v4's assets.detail_score is intentionally ABSENT — retired in v6 (§8 B).
-    # A DB created at v4/v5 keeps the column as harmless dead data (no DROP migration);
-    # a fresh v6 DB never creates it. Nothing reads or writes it. Do NOT re-add it here.
-    # v7: durable job queue + result history (§3/§4/§12). These three are plain
-    # additive columns; the sibling 'queued' status value needs the CHECK widened,
-    # which _migrate_jobs_v7 handles by rebuilding the table (runs BEFORE this pass).
-    ("jobs", "root_id", "INTEGER REFERENCES roots(id) ON DELETE SET NULL"),
-    ("jobs", "enqueued_at", "TEXT"),
-    ("jobs", "result_json", "TEXT"),
-    # v8: `jobs prioritize <id>` — higher priority is dequeued first (§3/§11).
-    ("jobs", "priority", "INTEGER NOT NULL DEFAULT 0"),
-    # v9: durable "applied-but-not-yet-reported" recycled-file accumulator, so a
-    # crash-resumed dedup --confirm (which skips the already-applied stage) still
-    # credits its deleted count into the lifetime-deduped metric without double-
-    # counting across a run's per-stage confirm jobs (§8 B Phase 7).
-    ("review_runs", "deleted_count", "INTEGER NOT NULL DEFAULT 0"),
-)
-
-
-def _migrate_columns(conn: sqlite3.Connection) -> None:
-    """Add any post-v1 column missing from an existing table (idempotent).
-
-    ``CREATE TABLE IF NOT EXISTS`` leaves an already-created table untouched, so a
-    DB from an earlier schema version keeps the old table shape. We reconcile by
-    checking ``PRAGMA table_info`` and ``ALTER TABLE … ADD COLUMN`` for each
-    declared addition. A fresh DB already has them from ``SCHEMA_SQL`` → all no-ops.
-    """
-    for table, column, coldef in _ADDED_COLUMNS:
-        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
-
-
-def _migrate_jobs_v7(conn: sqlite3.Connection) -> None:
-    """One-time REBUILD of the ``jobs`` table for v7 (§4 durable queue).
-
-    v7 adds a ``'queued'`` value to ``jobs.status``'s CHECK constraint. SQLite can't
-    widen a CHECK with ``ALTER``, so we rebuild the table following SQLite's
-    documented recipe (foreign_keys OFF, create-copy-drop-rename in one txn). The
-    three additive v7 columns (``root_id``/``enqueued_at``/``result_json``) are
-    created here too, so ``_migrate_columns`` then finds them present (no-op).
-
-    **Must run BEFORE ``executescript``** — the v7 ``SCHEMA_SQL`` creates
-    ``ix_jobs_root ON jobs(root_id)``, which errors on an old table lacking that
-    column. Idempotent: skipped when ``jobs`` doesn't exist yet (fresh DB — the
-    following ``executescript`` creates it v7-shaped) or already has ``'queued'``.
-    """
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
-    ).fetchone()
-    if row is None or "'queued'" in (row["sql"] or ""):
-        return  # no jobs table yet (fresh DB), or already the v7 shape
-
-    existing = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    # Guard the copy against a partially-migrated DB (columns added but never rebuilt).
-    root_sel = "root_id" if "root_id" in existing else "NULL"
-    enq_sel = "enqueued_at" if "enqueued_at" in existing else "started_at"
-    res_sel = "result_json" if "result_json" in existing else "NULL"
-
-    conn.execute("PRAGMA foreign_keys=OFF")
-    conn.execute("BEGIN")
-    try:
-        conn.execute(
-            "CREATE TABLE jobs_v7_new ("
-            "  id INTEGER PRIMARY KEY,"
-            "  type TEXT NOT NULL,"
-            "  root_id INTEGER REFERENCES roots(id) ON DELETE SET NULL,"
-            "  status TEXT NOT NULL CHECK (status IN "
-            "    ('queued','running','done','error','cancelled','interrupted')),"
-            "  total INTEGER,"
-            "  done INTEGER NOT NULL DEFAULT 0,"
-            "  enqueued_at TEXT,"
-            "  started_at TEXT,"
-            "  finished_at TEXT,"
-            "  error TEXT,"
-            "  result_json TEXT,"
-            "  params_json TEXT"
-            ")"
-        )
-        conn.execute(
-            "INSERT INTO jobs_v7_new "
-            "(id, type, root_id, status, total, done, enqueued_at, started_at, "
-            " finished_at, error, result_json, params_json) "
-            f"SELECT id, type, {root_sel}, status, total, done, {enq_sel}, started_at, "
-            f"       finished_at, error, {res_sel}, params_json FROM jobs"
-        )
-        conn.execute("DROP TABLE jobs")
-        conn.execute("ALTER TABLE jobs_v7_new RENAME TO jobs")
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_jobs_root ON jobs(root_id)")
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        conn.execute("PRAGMA foreign_keys=ON")
-        raise
-    conn.execute("PRAGMA foreign_keys=ON")
-
-
-def _migrate_dedup_merge_plan_items(conn: sqlite3.Connection) -> None:
-    """v10: collapse duplicate ``(run_id, source_rel_path)`` merge_plan_items rows.
-
-    v10 adds a UNIQUE index on that pair (Phase-1 UPSERT key). An older DB could hold
-    duplicates from a pre-v10 ``planning``-resume (blind re-INSERT after a DELETE that a
-    crash left half-done), which would make the unique-index creation in ``executescript``
-    fail. Keep the lowest ``id`` per pair and delete the rest. Runs BEFORE ``executescript``.
-    Idempotent + a no-op on a fresh DB (no table yet) or one with no duplicates.
-    """
-    if conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='merge_plan_items'"
-    ).fetchone() is None:
-        return
-    conn.execute(
-        "DELETE FROM merge_plan_items WHERE id NOT IN "
-        "(SELECT MIN(id) FROM merge_plan_items GROUP BY run_id, source_rel_path)"
-    )
-
-
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     """Create the schema if missing and return an open connection (§4).
 
-    Idempotent — every DDL statement is ``IF NOT EXISTS``, plus a one-time v7
-    ``jobs`` rebuild (:func:`_migrate_jobs_v7`, run first — see its docstring) and an
-    ADD-COLUMN pass for columns added to existing tables after v1
-    (:func:`_migrate_columns`). Records/updates the ``schema_version`` in ``meta``.
+    ``SCHEMA_SQL`` is the single source of truth — every statement is
+    ``CREATE … IF NOT EXISTS``, so this is idempotent: a no-op on an already-current
+    DB, and a full build on a fresh one. There is no migration runner (§4); the
+    ``schema_version`` marker is stamped into ``meta`` for future use.
     """
     conn = connect(db_file)
-    # v7 jobs rebuild runs BEFORE executescript (the v7 DDL indexes jobs.root_id,
-    # absent on an old table) and manages its own txn + FK toggle.
-    _migrate_jobs_v7(conn)
-    # v10: collapse duplicate merge_plan_items rows before the new UNIQUE index builds.
-    _migrate_dedup_merge_plan_items(conn)
     conn.executescript(SCHEMA_SQL)
     with transaction(conn):
-        _migrate_columns(conn)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
