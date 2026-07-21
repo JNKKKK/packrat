@@ -322,11 +322,6 @@ assets(
                  a merge-created asset that is simply not-yet-fingerprinted (undecodable=0, no phash
                  yet) — see the "fully fingerprinted" predicate in §8 A2 step 4. */,
   decode_error /* nullable text: last decoder failure detail, for debugging POC-format wheels (§9.1) */,
-  /* (a `detail_score` column existed here through schema v5 — a retained-detail estimate for the
-      photo keep-lead — but was RETIRED in v6: it cost ~40% of scan CPU and, once banded to tame its
-      high-quality-JPEG noise, only ever agreed with file `size` within a format, so the photo
-      keep-lead now ranks resolution → format rank → size (§8 B). A fresh DB omits the column; an
-      existing DB keeps it as harmless dead data, since there is no DROP-column migration.) */
   codec /* nullable text, VIDEO only: codec name (h264|hevc|av1|vp9|…) from the decode probe (§8 A2
            step 8). Feeds the video stage-2 keep-lead's codec-efficiency weight (§8 B match.codec_weights).
            NULL for photo/undecodable. NOT recomputed by `scan --full` (which skips re-decoding a
@@ -1150,11 +1145,6 @@ For every candidate file:
 8. **Perceptual signature** — photo: PDQ + quality; video: duration + PDQ (with quality) of each of
    the `video.sample_frames` frames sampled at fixed timeline fractions (§5.3). → values held for
    step 9 (→ `phash` / `vphash` rows). *No near-dup comparison here.*
-   - *(A photo `detail_score` was computed here through schema v5 — a retained-detail estimate for
-     the keep-lead — but was retired in v6: it cost ~40% of scan CPU and, once banded to tame its
-     high-quality-JPEG noise, only ever agreed with file `size` within a format. The photo keep-lead
-     now ranks resolution → format rank → size (§8 B), needing nothing extra from scan. Scan no longer
-     decodes anything solely for the keep-lead.)*
    - **Video `codec` (§8 B stage-2 keep-lead), same decode pass.** For a **video** that decodes,
      capture the video stream's `codec` name (`h264`/`hevc`/`av1`/…) from the already-open decoder —
      free, no extra work. → value held for step 9 (→ `assets.codec`). Feeds the video keep-lead's
