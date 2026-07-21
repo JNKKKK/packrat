@@ -26,6 +26,35 @@ def _result(job: dict) -> dict:
         return {}
 
 
+def review_ui(job: dict) -> str | None:
+    """How a dedup/cleanup review card should render its actions — the single source
+    of truth for the awaiting-review affordances (shared by the body + the app footer).
+
+    A review job freezes ``result_json.review_status``/``stage`` at the moment it
+    paused; a later ``--confirm`` advances or finishes the run **without** rewriting
+    that older job's row (§8 B). So the card must key off the run's LIVE state, which
+    the data layer reconciles into ``job['review_state']``
+    (:func:`packrat.queries._reconcile_review_state`):
+
+    - ``'current'``  → the run is pending **on this card's stage**: show
+      ``[o]`` open / ``[g]`` confirm this stage / ``[k]`` cancel.
+    - ``'advanced'`` → the run is pending on a **later** stage (this card's stage was
+      already confirmed and it auto-advanced): show ``[o]`` / ``[k]`` only — no confirm,
+      since confirming here would apply a *different* stage than the card depicts.
+    - ``None``       → not awaiting review (run completed/cancelled, or a plain terminal
+      job): no review actions.
+
+    Fallback when ``review_state`` is absent (the offline demo/fixtures build job dicts
+    directly, never passing through the live reconciler): trust the frozen
+    ``review_status='pending'`` as ``'current'`` — those fixtures depict a live pending
+    run, so the pre-existing behavior is preserved.
+    """
+    state = job.get("review_state")
+    if state is not None:
+        return state if state in ("current", "advanced") else None
+    return "current" if _result(job).get("review_status") == "pending" else None
+
+
 def card_title(job: dict) -> str:
     """The card's top-border title: ``Job #418 · scan iPhone · running``."""
     label = job.get("label", job["type"])
@@ -36,7 +65,9 @@ def _status_word(job: dict) -> str:
     st = job.get("status")
     if st == "running":
         return "running"
-    if job.get("status") == "done" and _result(job).get("review_status") == "pending":
+    # Only the card that still OWNS a live pending stage reads "awaiting review"; an
+    # already-confirmed/advanced or finished run keeps its plain terminal word.
+    if st == "done" and review_ui(job) == "current":
         return "⚠ awaiting review"
     return st or "done"
 
@@ -166,9 +197,21 @@ def _merge_body(job: dict) -> list[str]:
 
 def _dedup_body(job: dict) -> list[str]:
     r = _result(job)
-    if r.get("review_status") == "pending":
+    ui = review_ui(job)
+    if ui is not None:
+        # `stage` shows the run's LIVE stage when known (this card advanced), else the
+        # frozen one; the actions line differs by whether this card owns the stage.
+        stage = job.get("review_live_stage") or r.get("stage", "?")
+        if ui == "advanced":
+            return [
+                f"dedup  {job.get('root_name') or ''}   stage {stage}",
+                RULE,
+                f"{render.RUNNING} this stage was confirmed; run advanced to stage {stage} (awaiting review)",
+                "",
+                "[o] open review folder   [k] cancel run",
+            ]
         return [
-            f"dedup  {job.get('root_name') or ''}   stage {r.get('stage', '?')}",
+            f"dedup  {job.get('root_name') or ''}   stage {stage}",
             RULE,
             f"{render.RUNNING} staged · {r.get('groups', 0)} groups / {r.get('members', 0)} members (KEEP)",
             f"  {r.get('to_delete_exact', 0)} exact to delete",
@@ -187,8 +230,11 @@ def _cleanup_body(job: dict) -> list[str]:
     r = _result(job)
     # A paused `cleanup --trash-perceptual` analyze emits review_status='pending' (like
     # dedup) — render the awaiting-review card with the [o]/[g]/[k] actions the footer
-    # advertises, not a bare one-liner.
-    if r.get("review_status") == "pending":
+    # advertises, not a bare one-liner. But only while the run is STILL pending: a later
+    # --confirm/--cancel finishes the single-stage run without rewriting this analyze
+    # job's row, so key off the live-reconciled review_ui, not the frozen snapshot.
+    # (Cleanup is single-stage → no 'advanced'; a finished run falls to the one-liner.)
+    if review_ui(job) == "current":
         return [
             f"cleanup  {job.get('root_name') or ''}   perceptual",
             RULE,

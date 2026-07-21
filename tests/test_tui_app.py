@@ -230,6 +230,39 @@ def test_add_root_form_opens():
     _drive(scenario)
 
 
+def _selected_emphasis_style():
+    from packrat.tui.tokens import DEFAULT_THEME as T
+    return f"bold {T.color('selected')}"
+
+
+def _emphasized_spans(screen):
+    frame = screen.current_frame
+    text = screen._colorize(frame)
+    want = _selected_emphasis_style()
+    return [frame[s.start:s.end] for s in text.spans if str(s.style) == want]
+
+
+def test_add_root_form_never_emphasizes_a_field():
+    # A form field's ▸ marker (esp. the scan field, whose marker sits at the row start
+    # with no label before it) must NOT get the list-row bold+bright emphasis.
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("a")
+        assert _screen(app) == "AddRootScreen"
+        for _ in range(4):                                 # tab through all four fields
+            assert not _emphasized_spans(app.screen), f"field {app.screen._field} emphasized"
+            await pilot.press("tab")
+    _drive(scenario)
+
+
+def test_maximized_roots_list_emphasizes_selected_row():
+    # The positive case: a real list screen DOES bold+brighten its ▸-selected row.
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r")     # RootsMax
+        assert _screen(app) == "RootsMax"
+        assert _emphasized_spans(app.screen)               # the selected row is emphasized
+    _drive(scenario)
+
+
 def test_escape_from_dashboard_unfocuses_not_quits():
     async def scenario(app, pilot):
         await pilot.press("r")
@@ -521,6 +554,50 @@ def test_cleanup_pending_card_confirms_via_cleanup_verb():
     # The submit went to cleanup (mode=perceptual, confirm), NOT dedup.
     assert any(c[0] == "cleanup" and c[2].get("confirm") for c in fc.calls), fc.calls
     assert not any(c[0] == "dedup" for c in fc.calls), fc.calls
+
+
+# --- a confirmed JobCard action returns to the previous interface (after toast) ---
+def test_jobcard_action_pops_back_after_toast():
+    """Confirming an action on the job-details card reports via a toast and then pops
+    the card back to the interface that opened it — the user shouldn't be left on a
+    now-stale card. Declining (n) posts no toast and stays put."""
+    from packrat.tui import fixtures as fx
+    from packrat.tui.app import JobCard
+
+    fc = _FakeClient()
+
+    async def scenario(app, pilot):
+        # Dashboard is the interface the card was opened from.
+        assert _screen(app) == "Dashboard"
+
+        # Decline first: 'g' → ConfirmModal, 'n' → no toast, still on the card.
+        app.push_screen(JobCard(dict(fx.CLEANUP_PENDING)))
+        await pilot.pause()
+        assert _screen(app) == "JobCard"
+        before = len(_toasts(app))
+        await pilot.press("g")
+        await pilot.pause()
+        assert _screen(app) == "ConfirmModal"
+        await pilot.press("n")
+        await pilot.pause()
+        assert _screen(app) == "JobCard"                 # declined → stayed put
+        assert len(_toasts(app)) == before               # and posted no toast
+
+        # Confirm: 'g' → ConfirmModal, 'y' → toast fires AND the card pops back.
+        await pilot.press("g")
+        await pilot.pause()
+        assert _screen(app) == "ConfirmModal"
+        await pilot.press("y")
+        await pilot.pause()
+        assert _screen(app) == "Dashboard"               # popped back to the opener
+        assert len(_toasts(app)) == before + 1           # exactly one action toast
+
+    app = PackratApp(client=fc, offline=False)
+
+    async def runner():
+        async with app.run_test(size=(100, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
 
 
 # --- fix #2: the running bar is driven by the SSE stream + TUI-side ETA ------

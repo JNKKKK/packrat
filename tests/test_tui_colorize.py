@@ -213,6 +213,73 @@ def test_shade_box_title_shades_the_title_tab():
     assert text.plain == frame                # style-only
 
 
+def test_emphasize_selected_row_bolds_and_brightens_cursor_row_text_only():
+    from packrat.tui.colorize import emphasize_selected_row
+    # Two focused-box body rows; only the one carrying the ▸ cursor is emphasized
+    # (bold + the brighter `selected` white), and it stops before the right ┃ border.
+    frame = (f"┃ {tokens.CURSOR} Downloads   D:\\dump          241 ┃\n"
+             f"┃   Camera      E:\\photos        1,024 ┃")
+    text = emphasize_selected_row(colorize(frame), frame)
+    want = f"bold {T.color('selected')}"
+    emph = [(s.start, s.end) for s in text.spans if str(s.style) == want]
+    assert len(emph) == 1                     # only the ▸ row
+    a, b = emph[0]
+    seg = frame[a:b]
+    assert not seg.startswith(tokens.CURSOR)  # the cursor keeps its accent (span starts after it)
+    assert "Downloads" in seg and "241" in seg  # the row text is inside the emphasized span
+    assert "┃" not in seg                     # the box border is NOT touched
+    # the ▸ cursor still reads accent (emphasis started after it), not the selected white
+    assert _span_color(frame, tokens.CURSOR) == T.color("accent")
+    assert text.plain == frame                # style-only, content unchanged
+
+
+def test_emphasize_selected_row_noop_without_cursor():
+    from packrat.tui.colorize import emphasize_selected_row
+    frame = "┃   Camera      E:\\photos        1,024 ┃"
+    text = emphasize_selected_row(colorize(frame), frame)
+    want = f"bold {T.color('selected')}"
+    assert not [s for s in text.spans if str(s.style) == want]
+
+
+def test_emphasize_selected_row_ignores_midline_field_marker():
+    # The add-root form uses ▸ as a FIELD marker after a label ("  Path   ▸ …"), NOT a
+    # list-row cursor — a letter precedes it, so it must not be emphasized.
+    from packrat.tui.colorize import emphasize_selected_row
+    frame = f"│   Path   {tokens.CURSOR} D:\\dump______________ │"
+    text = emphasize_selected_row(colorize(frame), frame)
+    want = f"bold {T.color('selected')}"
+    assert not [s for s in text.spans if str(s.style) == want]
+
+
+def test_emphasize_selected_row_works_inside_outer_frame_border():
+    # A list row on a plain screen sits inside the outer frame's │ … │ (not a heavy box);
+    # emphasis still lands and stops before the right │ border.
+    from packrat.tui.colorize import emphasize_selected_row
+    frame = f"│ {tokens.CURSOR} Downloads   D:\\dump              241 │"
+    text = emphasize_selected_row(colorize(frame), frame)
+    want = f"bold {T.color('selected')}"
+    emph = [(s.start, s.end) for s in text.spans if str(s.style) == want]
+    assert len(emph) == 1
+    a, b = emph[0]
+    assert "Downloads" in frame[a:b] and "│" not in frame[a:b]
+
+
+def test_emphasize_selected_row_reasserts_semantic_glyph_colors():
+    # A selected row keeps meaningful glyph colors (bolded), not washed to white: the
+    # ◐ scanned dot stays warn, the █ bar fill stays running — just bold.
+    from packrat.tui.colorize import emphasize_selected_row
+    frame = (f"┃ {tokens.CURSOR} Camera   {tokens.DOT_SCANNED}   {tokens.BAR_FILL * 3} 50% ┃")
+    text = emphasize_selected_row(colorize(frame), frame)
+
+    def over(needle):
+        i = frame.index(needle)
+        covering = [s for s in text.spans if s.start <= i < s.end]
+        return str(covering[-1].style) if covering else str(text.style)
+
+    assert over(tokens.DOT_SCANNED) == f"bold {T.color('warn')}"
+    assert over(tokens.BAR_FILL) == f"bold {T.color('running')}"
+
+
 def test_shade_box_title_also_shades_the_pager():
     from packrat.tui.colorize import shade_box_title
     # A focused box border with a right-aligned `page i/N` paginator — both the title

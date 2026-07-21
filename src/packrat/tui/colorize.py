@@ -155,6 +155,75 @@ def recolor_hoard_count(text: Text, frame: str, color: str) -> Text:
     return text
 
 
+#: Border glyphs that bound a row's content on the frame (outer ``│``) or a focused
+#: panel (heavy ``┃``). A list-row cursor sits just inside these; the add-root form's
+#: mid-line ``▸`` field marker has a text label before it, so it's excluded.
+_BORDER_GLYPHS = frozenset("│┃")
+
+
+def _row_cursor_index(line: str, marker: str) -> int | None:
+    """Index of ``marker`` iff it is the row's LEADING content glyph (a list-row
+    cursor), else ``None``.
+
+    A selected list row is ``│ [┃ ]▸ …`` — only frame/box borders + spaces precede the
+    ``▸``. The add-root form instead uses ``▸`` as a *field* marker after a label
+    (``  Path   ▸ …``), which this rejects (a letter precedes the marker), so emphasis
+    never lands on a form field."""
+    idx = line.find(marker)
+    if idx == -1:
+        return None
+    if all(ch == " " or ch in _BORDER_GLYPHS for ch in line[:idx]):
+        return idx
+    return None
+
+
+def _row_content_end(line: str, start: int) -> int:
+    """End (exclusive) of the row's content — the first border glyph at/after ``start``
+    (the enclosing panel's ``┃`` or the frame's ``│``), else the rstrip'd length.
+
+    Content never contains a box-drawing glyph, so the first one scanning right is the
+    row's right border — emphasis stops just before it, never tinting a border."""
+    for i in range(start, len(line)):
+        if line[i] in _BORDER_GLYPHS:
+            return i
+    return len(line.rstrip())
+
+
+def emphasize_selected_row(text: Text, frame: str, marker: str = tokens.CURSOR,
+                           theme: Theme = tokens.DEFAULT_THEME) -> Text:
+    """Emphasize the list row carrying the ``▸`` selection ``marker`` (in place,
+    post-colorize) — **bold + the brighter ``selected`` foreground** (``#ffffff`` vs.
+    the ``#d0d0d0`` body default), the highlighted-cursor-row look the ``selected``
+    role was defined for (§Theming).
+
+    Applies from **just after** the ``▸`` (the cursor keeps its accent color) to the
+    row's right border, so the row *text* pops while the frame/box borders stay
+    untouched. Runs AFTER :func:`colorize`, so the ``bold #ffffff`` overrides the row's
+    default text — then the semantic glyph/role colors within the row are
+    **re-asserted on top** (bolded), so the dedup dots (◉/◐/○), a running ``▶``, and a
+    progress bar's ``█``/``░`` keep their meaning instead of washing out to white. Only
+    rows whose ``▸`` is the leading content glyph are touched (:func:`_row_cursor_index`
+    excludes the add-root form's mid-line field marker); no-op on any other line."""
+    white = f"bold {theme.color('selected')}"
+    offset = 0
+    for line in frame.split("\n"):
+        idx = _row_cursor_index(line, marker)
+        if idx is not None:
+            start = idx + len(marker)
+            end = _row_content_end(line, start)
+            base = offset + start
+            text.stylize(white, base, offset + end)
+            # Re-assert semantic colors within the row (bolded) so meaningful glyphs
+            # aren't flattened to white — same patterns/order as colorize's own pass.
+            seg = line[start:end]
+            for role, pattern in ROLE_PATTERNS:
+                for m in re.finditer(pattern, seg):
+                    text.stylize(f"bold {theme.color(role)}",
+                                 base + m.start(), base + m.end())
+        offset += len(line) + 1             # +1 for the '\n'
+    return text
+
+
 def shade_box_title(text: Text, frame: str, title: str, right: str = "",
                     theme: Theme = tokens.DEFAULT_THEME) -> Text:
     """Shade the `` <title> `` (and optional `` <right> ``) tabs of a focused box's top

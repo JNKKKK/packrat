@@ -167,6 +167,98 @@ def test_lifetime_deduped_sums_dedup_deleted(seeded, packrat_home):
         database.close()
 
 
+# --- review-card state is reconciled against the LIVE review_runs row --------
+# A dedup/cleanup analyze (or advancing confirm) job freezes review_status='pending'
+# + its stage into result_json; a later --confirm advances/finishes the run WITHOUT
+# rewriting that older job's row. queries._job_dict must reconcile the frozen snapshot
+# against the live run so a stale card shows the right actions (§8 B).
+def _seed_review_job(database, *, root_id, stage, run_id, status="done"):
+    """Insert a dedup analyze job frozen at ``stage`` referencing run ``run_id``."""
+    import json as _json
+
+    return database.execute(
+        "INSERT INTO jobs(type, root_id, status, params_json, result_json) "
+        "VALUES ('dedup', ?, ?, ?, ?)",
+        (root_id, status, _json.dumps({"root_id": root_id}),
+         _json.dumps({"op": "dedup", "action": "analyze", "review_status": "pending",
+                      "stage": stage, "run_id": run_id, "to_delete_exact": 0,
+                      "groups": 3, "members": 7, "summary": f"stage {stage}"})),
+    ).lastrowid
+
+
+def test_review_state_current_advanced_and_closed(seeded, packrat_home):
+    """job_detail attaches review_state reconciled from the live review_runs row."""
+    from packrat.tui.screens import jobcard
+
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        # One dedup run, currently pending on stage 3 (stage 2 already confirmed).
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+            "VALUES (?, 'dedup', 'pending', 3, 'staged', '2026-07-20T00:00:00')", (rid,)
+        ).lastrowid
+        j_stage2 = _seed_review_job(database, root_id=rid, stage=2, run_id=run_id)  # advanced
+        j_stage3 = _seed_review_job(database, root_id=rid, stage=3, run_id=run_id)  # current
+
+        d2 = queries.job_detail(j_stage2)
+        d3 = queries.job_detail(j_stage3)
+        # The stage-2 analyze card: its stage was confirmed, run moved on → 'advanced'.
+        assert d2["review_state"] == "advanced" and d2["review_live_stage"] == 3
+        assert jobcard.review_ui(d2) == "advanced"
+        # The stage-3 analyze card owns the pending stage → 'current'.
+        assert d3["review_state"] == "current" and d3["review_live_stage"] == 3
+        assert jobcard.review_ui(d3) == "current"
+
+        # Now the run completes (stage 3 confirmed) → both cards go 'closed' (no actions).
+        database.execute("UPDATE review_runs SET status='completed' WHERE id=?", (run_id,))
+        for jid in (j_stage2, j_stage3):
+            d = queries.job_detail(jid)
+            assert d["review_state"] == "closed"
+            assert jobcard.review_ui(d) is None
+    finally:
+        database.close()
+
+
+def test_review_card_bodies_reflect_reconciled_state(seeded, packrat_home):
+    """The job card body/status renders per reconciled state — the three scenarios."""
+    from packrat.tui.screens import jobcard
+
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+            "VALUES (?, 'dedup', 'pending', 3, 'staged', '2026-07-20T00:00:00')", (rid,)
+        ).lastrowid
+        j2 = _seed_review_job(database, root_id=rid, stage=2, run_id=run_id)
+        j3 = _seed_review_job(database, root_id=rid, stage=3, run_id=run_id)
+
+        # current: full actions incl. confirm.
+        b3 = "\n".join(jobcard.card_body(queries.job_detail(j3), now=NOW))
+        assert "confirm this stage" in b3 and "open review folder" in b3
+        assert jobcard._status_word(queries.job_detail(j3)) == "⚠ awaiting review"
+
+        # advanced: open + cancel, but NO confirm (would apply a different stage).
+        b2 = "\n".join(jobcard.card_body(queries.job_detail(j2), now=NOW))
+        assert "open review folder" in b2 and "cancel run" in b2
+        assert "confirm this stage" not in b2
+        assert "advanced to stage 3" in b2
+        assert jobcard._status_word(queries.job_detail(j2)) != "⚠ awaiting review"
+
+        # closed (run finished): no review actions at all, plain summary card.
+        database.execute("UPDATE review_runs SET status='completed' WHERE id=?", (run_id,))
+        for jid in (j2, j3):
+            body = "\n".join(jobcard.card_body(queries.job_detail(jid), now=NOW))
+            assert "confirm this stage" not in body
+            assert "open review folder" not in body and "cancel run" not in body
+            assert jobcard._status_word(queries.job_detail(jid)) == "done"
+    finally:
+        database.close()
+
+
 def test_status_snapshot_binds_to_dashboard(seeded):
     snap = queries.status_snapshot()
     frame = screen("packrat", dashboard_body(snap, now=NOW),

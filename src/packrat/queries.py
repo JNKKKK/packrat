@@ -429,13 +429,67 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     return {"exact": exact, "perceptual": perceptual}
 
 
-def _job_dict(row) -> dict:
+def _reconcile_review_state(conn, job_type: str, params: dict, result: dict):
+    """Resolve a review job's LIVE review-run state from its frozen ``result_json``.
+
+    A dedup/cleanup **analyze** (or advancing **confirm**) job freezes
+    ``review_status='pending'`` + the ``stage`` it paused at into ``result_json``. A
+    later ``--confirm`` advances the run to the next stage — or completes/cancels it —
+    **without rewriting that older job's row** (a new ``jobs`` row runs the confirm). So
+    the snapshot goes stale: an old analyze card would still offer "confirm this stage"
+    for a run that has moved on or finished. This re-reads the one live ``review_runs``
+    row and returns how the card should treat it:
+
+    - ``("current",  stage)`` — run is ``pending`` **on this job's frozen stage** → the
+      card is the one awaiting review: show ``[o]`` open / ``[g]`` confirm / ``[k]`` cancel.
+    - ``("advanced", stage)`` — run is ``pending`` but on a **later** stage (this stage
+      was already confirmed and the run auto-advanced) → show ``[o]`` / ``[k]`` only
+      (confirming here would act on a *different* stage than the card depicts).
+    - ``("closed",   None)``  — the run ``completed``/``cancelled`` → **no** review
+      actions (the "all stages confirmed" case).
+    - ``(None,       None)``  — not an awaiting-review job (render as a plain terminal card).
+
+    ``stage`` in the non-closed cases is the run's **live** current stage.
+    """
+    if result.get("review_status") != "pending":
+        return None, None
+    run_type = "cleanup-perceptual" if job_type == "cleanup" else "dedup"
+    row = None
+    run_id = result.get("run_id")
+    if run_id is not None:
+        row = conn.execute(
+            "SELECT status, stage FROM review_runs WHERE id=?", (run_id,)
+        ).fetchone()
+    if row is None:
+        # Older jobs (frozen before ``run_id`` was recorded) / fallback: the newest run
+        # for this root+type. At most one run is ever ``pending`` per root (partial-unique
+        # index, §4), so this resolves the live review unambiguously.
+        root_id = params.get("root_id")
+        if root_id is not None:
+            row = conn.execute(
+                "SELECT status, stage FROM review_runs WHERE root_id=? AND run_type=? "
+                "ORDER BY id DESC LIMIT 1", (root_id, run_type)
+            ).fetchone()
+    if row is None or row["status"] != "pending":
+        return "closed", None
+    frozen_stage = result.get("stage")
+    if frozen_stage is not None and row["stage"] != frozen_stage:
+        return "advanced", row["stage"]
+    return "current", row["stage"]
+
+
+def _job_dict(row, conn=None) -> dict:
     """Shape a ``jobs`` row for a client: add a derived display ``label`` (§12).
 
     The label is computed from ``type`` + ``params_json`` (the params→label rule,
     :mod:`packrat.jobs.labels`), with the root name resolved from ``root_id`` when set.
     ``result_json``/``params_json`` are passed through as raw JSON strings (the client
     decodes what it needs).
+
+    When ``conn`` is given and this is a review job, a computed **``review_state``**
+    (+ live ``review_live_stage``) is attached — the frozen ``result_json.review_status``
+    reconciled against the live ``review_runs`` row (:func:`_reconcile_review_state`), so
+    a stale analyze/confirm card shows the run's real state, not the stage it paused at.
     """
     import json as _json
 
@@ -448,6 +502,16 @@ def _job_dict(row) -> dict:
     except (ValueError, TypeError):
         params = {}
     d["label"] = job_label(d["type"], params, root_name=d.get("root_name"))
+    if conn is not None:
+        result = {}
+        try:
+            result = _json.loads(d.get("result_json") or "{}")
+        except (ValueError, TypeError):
+            result = {}
+        state, live_stage = _reconcile_review_state(conn, d["type"], params, result)
+        if state is not None:
+            d["review_state"] = state
+            d["review_live_stage"] = live_stage
     return d
 
 
@@ -467,7 +531,7 @@ def recent_jobs(limit: int = 20) -> list[dict]:
             "ORDER BY j.id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [_job_dict(r) for r in rows]
+        return [_job_dict(r, conn) for r in rows]
     finally:
         conn.close()
 
@@ -511,7 +575,7 @@ def root_jobs(root_id: int, limit: int = 50) -> list[dict]:
             "WHERE j.root_id=? ORDER BY j.id DESC LIMIT ?",
             (root_id, limit),
         ).fetchall()
-        return [_job_dict(r) for r in rows]
+        return [_job_dict(r, conn) for r in rows]
     finally:
         conn.close()
 
@@ -524,7 +588,7 @@ def job_detail(job_id: int) -> dict | None:
             "LEFT JOIN roots r ON r.id = j.root_id WHERE j.id=?",
             (job_id,),
         ).fetchone()
-        return _job_dict(row) if row else None
+        return _job_dict(row, conn) if row else None
     finally:
         conn.close()
 

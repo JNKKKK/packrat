@@ -140,10 +140,26 @@ class FrameScreen(Screen):
         # truth; only the live widget gets theme role colors applied by pattern.
         self.query_one("#frame", Static).update(self._colorize(self.current_frame))
 
+    #: Whether this screen's ``▸`` marks a selectable LIST ROW (→ bold + brighter-white
+    #: emphasis). True for every list screen; a screen whose ``▸`` is a *form field*
+    #: marker (:class:`AddRootScreen`) sets this False, since a focused field-cursor at
+    #: the row start is indistinguishable from a list cursor by text alone.
+    EMPHASIZE_SELECTED_ROW = True
+
     def _colorize(self, frame: str):
         """Plain frame → colorized Rich ``Text`` (overridable for per-frame effects,
-        e.g. the dashboard's animated logo-gem gradient)."""
-        return colorize(frame)
+        e.g. the dashboard's animated logo-gem gradient).
+
+        Applies the base theme colors, then (when :attr:`EMPHASIZE_SELECTED_ROW`)
+        emphasizes the ``▸``-selected list row (bold + brighter white) — a single place
+        so EVERY list screen (roots, queue, merge sources, root-detail jobs) gets the
+        same focus emphasis. Overrides call ``super()._colorize(frame)`` to inherit it,
+        then layer their own effects."""
+        from .colorize import emphasize_selected_row
+        text = colorize(frame)
+        if self.EMPHASIZE_SELECTED_ROW:
+            emphasize_selected_row(text, frame)
+        return text
 
     def poll_reload(self) -> None:
         """Re-fetch this screen's OWN read-model, if any (called on the poll timer).
@@ -233,8 +249,11 @@ class Dashboard(FrameScreen):
         # number glints with the gem (post-layout, live widget only — §Theming).
         from .colorize import (gem_gradient_color, recolor_gem, recolor_hoard_count,
                                shade_box_title)
+        # Base colors + the ▸-selected-row emphasis (inherited from FrameScreen), then
+        # the dashboard's own effects on top: the gem gradient sweep, the hoard-count
+        # tint, and the focused box's shaded title tab.
+        text = super()._colorize(frame)
         color = gem_gradient_color(self._gem_phase)
-        text = colorize(frame)
         recolor_gem(text, frame, self._gem, color)
         recolor_hoard_count(text, frame, color)
         # Focused box: shade its title tab + pager (a highlighted-tab look).
@@ -446,6 +465,11 @@ class RootsMax(FrameScreen):
 
 
 class AddRootScreen(FrameScreen):
+    # A form, not a list: its ▸ marks the focused FIELD (and the scan field's marker sits
+    # at the row start, where it would otherwise read as a list cursor). Opt out of the
+    # selected-row emphasis so a focused field is never bold-highlighted like a list row.
+    EMPHASIZE_SELECTED_ROW = False
+
     BINDINGS = [
         Binding("tab", "next_field", show=False),
         Binding("shift+tab", "prev_field", show=False),
@@ -793,9 +817,10 @@ class RootDetailScreen(FrameScreen):
                       footer=footer, width=geo.w, height=geo.h)
 
     def _colorize(self, frame: str):
-        # Shade the focused box's title tab (accent tab), matching the dashboard boxes.
+        # Base colors + the ▸-selected-row emphasis (inherited), then shade the focused
+        # box's title tab (accent tab), matching the dashboard boxes.
         from .colorize import shade_box_title
-        text = colorize(frame)
+        text = super()._colorize(frame)
         # A focused root-detail box drops its key-hint brackets (no maximize), so shade
         # the PLAIN title that _review_box/_jobs_panel render when focused.
         if self.focus == "review":
@@ -872,6 +897,13 @@ class RootDetailScreen(FrameScreen):
         return jobs[i] if jobs and 0 <= i < len(jobs) else None
 
     def action_result(self) -> None:
+        # [Enter] opens the selected job's result card — a Jobs-panel action (and the
+        # unfocused default: newest history job). It is NOT a Review-box shortcut: the
+        # Review footers don't advertise [Enter], and the box has its own [o]/[g]/[k]
+        # actions with no job list to drill into. So Enter is inert while Review is
+        # focused (otherwise it wrongly opened the newest history job's card).
+        if self.focus == "review":
+            return
         job = self._selected_job()
         if job:
             self.app.push_screen(JobCard(job))
@@ -1127,12 +1159,17 @@ class JobCard(FrameScreen):
         if self._op() == "scan":
             self._problems = self.app.job_problem_files(self.job)
 
+    def _review_ui(self) -> str | None:
+        """This card's live review-action mode — ``'current'`` (owns the pending stage:
+        open/confirm/cancel), ``'advanced'`` (a later stage is pending: open/cancel
+        only), or ``None`` (no review actions). Reconciled by the data layer against the
+        live ``review_runs`` row, so a stale analyze/confirm card never offers actions
+        for a stage that was already confirmed or a run that finished (§8 B)."""
+        return jobcard.review_ui(self.job)
+
     def _pending(self) -> bool:
-        import json
-        try:
-            return json.loads(self.job.get("result_json") or "{}").get("review_status") == "pending"
-        except (ValueError, TypeError):
-            return False
+        """True while this card owns a live pending stage (open + confirm + cancel)."""
+        return self._review_ui() == "current"
 
     def _verb(self) -> str:
         """The review CLI verb this card's op maps to — ``cleanup`` or ``dedup``.
@@ -1154,6 +1191,11 @@ class JobCard(FrameScreen):
             footer = "[c] cancel job   Esc back"
         elif self._pending():
             footer = "[o] open review   [g] confirm stage   [k] cancel run   Esc back"
+        elif self._review_ui() == "advanced":
+            # This stage was already confirmed; the run advanced to a later stage. Offer
+            # opening that stage's folder + cancelling the run — but NOT confirm (it would
+            # apply a different stage than this card shows).
+            footer = "[o] open review   [k] cancel run   Esc back"
         elif self._problems:
             footer = "↑/↓ scroll problem files   Esc back"
         else:
@@ -1173,20 +1215,38 @@ class JobCard(FrameScreen):
             self.problems_scroll = new
             self.refresh_frame()
 
+    def _back(self) -> None:
+        """Pop this card back to the interface that opened it (§5).
+
+        Every JobCard action reports via a toast (``run_verb``/``confirm_verb``) and
+        then returns here so the user lands back on the screen they came from — the
+        root detail's Jobs panel or the Queue — rather than staring at a now-stale
+        card. Guarded on ``is_active`` so a stray key on a lower screen can't pop the
+        wrong screen, and re-checked because the card may already be gone."""
+        if self.is_active and self.app.screen_stack:
+            self.app.pop_screen()
+
     def action_cancel(self) -> None:
         if self.job.get("status") == "running":
             jid = self.job["id"]
             self.app.confirm_verb(f"Cancel running {self.job['label']} (#{jid})?",
                                   f"packrat jobs cancel {jid}",
-                                  submit=lambda: self.app.client.cancel_job(jid))
+                                  submit=lambda: self.app.client.cancel_job(jid),
+                                  then=self._back)
+
+    def _reviewable(self) -> bool:
+        """Open/cancel apply while the run is still open — this card's stage (``current``)
+        or a later one it advanced to (``advanced``). Confirm is ``current``-only."""
+        return self._review_ui() in ("current", "advanced")
 
     def action_open_review(self) -> None:
-        if self._pending():
+        if self._reviewable():
             root = self.job.get("root_name", "")
             path = self.app.root_path(root)
             submit = (lambda: _open_in_explorer(path)) if path else None
             target = f"{path}\\_packrat_review\\" if path else f"<{root} review folder>"
-            self.app.run_verb(f"explorer {target}", title="open in Explorer", submit=submit)
+            self.app.run_verb(f"explorer {target}", title="open in Explorer",
+                              submit=submit, then=self._back)
 
     def action_confirm_review(self) -> None:
         if self._pending():
@@ -1194,15 +1254,17 @@ class JobCard(FrameScreen):
             verb = self._verb()
             self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
                                   f"packrat {verb} {root} --confirm",
-                                  submit=lambda: self._submit_review(root, confirm=True))
+                                  submit=lambda: self._submit_review(root, confirm=True),
+                                  then=self._back)
 
     def action_cancel_review(self) -> None:
-        if self._pending():
+        if self._reviewable():
             root = self.job.get("root_name", "")
             verb = self._verb()
             self.app.confirm_verb(f"Cancel the whole {verb} run for {root}?",
                                   f"packrat {verb} {root} --cancel",
-                                  submit=lambda: self._submit_review(root, cancel=True))
+                                  submit=lambda: self._submit_review(root, cancel=True),
+                                  then=self._back)
 
 
 # ---------------------------------------------------------------------------
@@ -1453,13 +1515,16 @@ class PackratApp(App):
         except Exception:
             return False
 
-    def run_verb(self, cmd: str, *, title: str = "would run", submit=None) -> None:
+    def run_verb(self, cmd: str, *, title: str = "would run", submit=None,
+                 then=None) -> None:
         """Run an action that maps to a CLI verb (§1.6), reporting via a **toast**.
 
         ``cmd`` is the human display string (the CLI verb it corresponds to).
         ``submit`` is a zero-arg callable that performs the real daemon call
         (``client.submit_*``) and returns a job id; pass it for actions that
-        actually submit work.
+        actually submit work. ``then`` is an optional zero-arg callable fired right
+        after the toast is posted — e.g. the JobCard passes ``self._back`` so an
+        action pops the card back to the interface that opened it (§5).
 
         These are the actions that **do not need a confirmation** (a confirm-gated
         action goes through :meth:`confirm_verb` → the ConfirmModal first). So the
@@ -1472,23 +1537,31 @@ class PackratApp(App):
         """
         if self.offline or submit is None:
             self.notify(cmd, title=title, severity="information")
+            if then:
+                then()
             return
         try:
             job_id = submit()
         except Exception as exc:
             self.notify(f"{cmd}\n{exc}", title="couldn't run", severity="error")
+            if then:
+                then()
             return
         self.refresh_data()
         note = f"submitted — job #{job_id}" if job_id else "submitted"
         self.notify(f"{cmd}\n{note} — watch it in the Queue.",
                     title="submitted", severity="information")
+        if then:
+            then()
 
     def confirm_verb(self, question: str, cmd: str, *, count: int | None = None,
-                     network: int = 0, submit=None) -> None:
+                     network: int = 0, submit=None, then=None) -> None:
         """Confirm (y/n or typed-count), then run the verb (§1.6 — gather then act).
 
         On confirm, delegates to :meth:`run_verb` (offline → notice; online →
-        ``submit()`` + result notice). ``submit`` is the real daemon call.
+        ``submit()`` + result notice). ``submit`` is the real daemon call; ``then``
+        is forwarded to :meth:`run_verb` and so fires only after a confirmed action's
+        toast — declining (``n``) posts no toast and runs no ``then``.
         """
         if self._modal_on_top():
             return
@@ -1496,7 +1569,7 @@ class PackratApp(App):
         # so run_verb there sees no modal on top and is allowed (ask→act sequence).
         def after(ok):
             if ok:
-                self.run_verb(cmd, title="confirmed", submit=submit)
+                self.run_verb(cmd, title="confirmed", submit=submit, then=then)
 
         self.push_screen(ConfirmModal(question, count=count, network=network), after)
 

@@ -148,17 +148,39 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
         groups = {r["group_no"] for r in rows if r["kind"] == "perceptual" and r["group_no"] is not None}
         members = sum(1 for r in rows if r["kind"] == "perceptual")
         result.update({"review_status": run["status"], "stage": run["stage"],
+                       "run_id": int(run["id"]),
                        "to_delete_exact": exact, "groups": len(groups), "members": members})
         # A confirm that recycled files records the numeric deleted total (durable, so
         # the lifetime-deduped metric aggregates it across completed dedup jobs).
         if action == "confirm":
             result["deleted"] = getattr(ctx, "_dedup_deleted", 0)
         if run["status"] == "pending":
-            result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
-                                 f"{len(groups)} grp/{members} mbr")
+            if action == "confirm":
+                # A confirm APPLIES its stage, then auto-advances the cursor to the next
+                # non-empty stage and stages it — so run["stage"] here is the stage the
+                # run ADVANCED TO, not the one this job acted on. Report both, keyed off
+                # the applied stage recorded before the advance, so a stage-2
+                # keep-suggested confirm never reads as "staged stage 3" (§8 B).
+                applied = getattr(ctx, "_dedup_confirmed_stage", run["stage"])
+                result["confirmed_stage"] = applied
+                result["summary"] = (
+                    f"{action}: applied stage {applied} ({result['deleted']} deleted) · "
+                    f"advanced to stage {run['stage']} · {exact} exact · "
+                    f"{len(groups)} grp/{members} mbr")
+            else:
+                result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
+                                     f"{len(groups)} grp/{members} mbr")
         elif run["status"] == "completed" and action == "analyze":
             # An analyze that completed immediately = already clean (no stages to review).
             result["summary"] = f"{action}: already clean (nothing to review)"
+        elif run["status"] == "completed" and action == "confirm":
+            # The confirm applied the LAST non-empty stage → run finished. Report the
+            # stage it applied + its deleted total, not a bare "run completed".
+            applied = getattr(ctx, "_dedup_confirmed_stage", run["stage"])
+            result["confirmed_stage"] = applied
+            result["summary"] = (
+                f"{action}: applied stage {applied} ({result['deleted']} deleted) · "
+                f"run completed")
         else:
             result["summary"] = f"{action}: run {run['status']}"
     else:
@@ -235,6 +257,10 @@ def _confirm(ctx: JobContext) -> None:
         raise ValueError(f"nothing to confirm for {root['name']!r}; run `dedup <folder>` first.")
     run_id = int(run["id"])
     stage = int(run["stage"])
+    # The stage this confirm APPLIES — stash it for the result summary, since a
+    # successful confirm auto-advances the run cursor to the NEXT non-empty stage
+    # (below), so run["stage"] read afterward is no longer the stage we acted on.
+    ctx._dedup_confirmed_stage = stage
     audit_dir = review.audit_run_dir("dedup", root["name"], run_id)
 
     keep_suggested = bool(ctx.params.get("keep_suggested"))

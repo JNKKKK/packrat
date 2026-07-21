@@ -414,6 +414,23 @@ def test_root_detail_enter_opens_selected_job_card():
     _drive(scenario)
 
 
+def test_root_detail_enter_inert_while_review_focused():
+    """[Enter] must NOT open a job card while the Review box is focused (§12).
+
+    [Enter] result is a Jobs-panel action (and the unfocused default); the Review box
+    has its own [o]/[g]/[k] shortcuts and its footer never advertises [Enter], so
+    pressing Enter there should stay on the detail screen, not drill into the newest
+    history job's card."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        await pilot.press("e")                       # focus the Review box
+        assert app.screen.focus == "review"
+        await pilot.press("enter")                   # should be inert here
+        assert _scr(app) == "RootDetailScreen"       # NOT JobCard
+        assert app.screen.focus == "review"          # still focused on Review
+    _drive(scenario)
+
+
 def test_root_detail_review_box_is_focusable():
     """[e] focuses the bordered R[e]view box (heavy accent border); Esc un-focuses.
 
