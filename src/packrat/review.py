@@ -95,8 +95,20 @@ def _safe_name(name: str) -> str:
 
 
 def write_audit(run_dir: str, filename: str, obj: dict) -> str:
-    """Write an immutable audit JSON (``proposed.json`` / ``applied.json``, §8.1)."""
+    """Write an immutable audit JSON (``proposed.json`` / ``applied.json``, §8.1).
+
+    **Crash-atomic:** serialize to a sibling ``.tmp`` file, ``fsync`` it, then
+    ``os.replace`` it into place — so a crash/power-loss mid-write can never leave a
+    truncated or empty ``proposed.json``/``applied.json`` (this is the forensic record
+    §8.1 says must survive DB loss; a half-written one would be worse than none). The
+    replace is atomic on both NTFS and POSIX, so a reader sees either the old file or
+    the complete new one, never a partial.
+    """
     p = os.path.join(run_dir, filename)
-    with open(p, "w", encoding="utf-8") as f:
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)
     return p

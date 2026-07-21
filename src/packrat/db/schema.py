@@ -39,9 +39,14 @@ from __future__ import annotations
 #: files recycled across a dedup run's applied stages, committed at apply time so a
 #: crash-resumed --confirm (which skips the already-applied stage) still reports its
 #: deleted count into the lifetime-deduped metric (§8 B Phase 7). Default 0.
+#: v10 adds a UNIQUE(run_id, source_rel_path) index on merge_plan_items so Phase 1 can
+#: UPSERT each source file's hash as it computes it — a crash-resumed merge then keeps
+#: already-hashed rows instead of re-reading the source over SMB (§8 C). A pre-v10 DB
+#: needs any duplicate (run_id, rel) rows collapsed before the unique index can build
+#: (connection._migrate_dedup_merge_plan_items, run before executescript).
 #: v3/v4/v5/v7/v8/v9 additions to EXISTING tables need the migration pass in init_db
 #: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns / _migrate_jobs_v7.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -244,6 +249,10 @@ CREATE TABLE IF NOT EXISTS merge_plan_items (
     error           TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_merge_plan_items_run ON merge_plan_items(run_id);
+-- One row per (run, source file): Phase 1 UPSERTs each file's hash by this key so a
+-- crash-resumed merge keeps already-hashed rows instead of re-reading the source (§8 C).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_merge_plan_items_run_relpath
+    ON merge_plan_items(run_id, source_rel_path);
 
 -- ---------------------------------------------------------------------------
 -- jobs: the durable queue + progress-display counter (§4). total/done drive the

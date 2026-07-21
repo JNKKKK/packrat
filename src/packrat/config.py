@@ -266,13 +266,29 @@ def _coerce_section(cls: type, raw: dict, section_name: str) -> object:
 
 
 def _coerce_value(f, value, dotted: str):
-    """Coerce a TOML scalar/list to the field's declared type where sensible."""
+    """Coerce a TOML scalar/list to the field's declared type, or raise ConfigError.
+
+    A malformed value is rejected HERE (at load, naming the bad key — §9.2) rather
+    than stored and detonated deep inside a running job: e.g. a scalar where an
+    extension list / codec-weight table is expected would otherwise blow up later in
+    ``media_exts()`` (``str | frozenset``) or the video keep-lead.
+    """
     # frozenset[str] fields (the extension allowlists) arrive as TOML arrays.
-    if f.name in ("photo", "video") and isinstance(value, list):
+    if f.name in ("photo", "video"):
+        if not isinstance(value, list):
+            raise ConfigError(
+                f"[{dotted}] must be an array of extensions (e.g. [\"jpg\", \"png\"]), "
+                f"got {type(value).__name__}"
+            )
         return frozenset(str(v).lower().lstrip(".") for v in value)
     # codec_weights: a TOML table → {codec (lower): weight (float)}. Merge onto the
     # defaults so a partial user override doesn't drop the built-in codecs.
-    if f.name == "codec_weights" and isinstance(value, dict):
+    if f.name == "codec_weights":
+        if not isinstance(value, dict):
+            raise ConfigError(
+                f"[{dotted}] must be a table of codec = weight (e.g. hevc = 2.0), "
+                f"got {type(value).__name__}"
+            )
         merged = dict(DEFAULT_CODEC_WEIGHTS)
         for k, v in value.items():
             try:
@@ -280,12 +296,15 @@ def _coerce_value(f, value, dotted: str):
             except (TypeError, ValueError):
                 log.warning("bad codec weight [%s] %s=%r — ignored", dotted, k, v)
         return merged
-    if f.type in ("bool", bool):
-        return bool(value)
-    if f.type in ("int", int):
-        return int(value)
-    if f.type in ("float", float):
-        return float(value)
+    try:
+        if f.type in ("bool", bool):
+            return bool(value)
+        if f.type in ("int", int):
+            return int(value)
+        if f.type in ("float", float):
+            return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"[{dotted}] must be {f.type} — got {value!r} ({exc})") from exc
     return value
 
 

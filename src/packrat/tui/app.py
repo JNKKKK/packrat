@@ -774,12 +774,14 @@ class RootDetailScreen(FrameScreen):
     ]
 
     def reload(self) -> None:
-        """Fetch this root's detail + jobs from the daemon (mount + poll, NOT per key).
+        """Fetch this root's detail + jobs from the daemon (mount + first paint).
 
         ``root_detail`` online is two blocking HTTP calls (``status <root>`` +
         ``root_jobs``); doing it inside :meth:`frame` re-hit the daemon on every
-        keypress and blocked the UI. We fetch here — once on mount and on each poll —
-        and :meth:`frame` renders from the cached ``self._detail``/``self._jobs``."""
+        keypress and blocked the UI. We fetch here — once on mount — and :meth:`frame`
+        renders from the cached ``self._detail``/``self._jobs``. The POLL path uses
+        :meth:`poll_reload`, which fetches off the UI thread (a slow daemon must not
+        freeze input on the timer)."""
         self._detail, self._jobs = self.app.root_detail(self.root_name)
         self._loaded = True
 
@@ -788,7 +790,28 @@ class RootDetailScreen(FrameScreen):
         super().on_mount()
 
     def poll_reload(self) -> None:
-        self.reload()
+        """Poll refresh — fetch off the UI thread so a slow daemon can't freeze input.
+
+        Offline (in-memory demo) or with no running loop (unit tests) applies inline;
+        online it hands the blocking fetch to a worker that marshals back via
+        :meth:`_apply_reload`."""
+        if self.app.offline or not self.app._app_loop_running():
+            self.reload()
+            return
+        self._poll_fetch()
+
+    @work(thread=True, exclusive=True, group="rootdetail-poll")
+    def _poll_fetch(self) -> None:
+        detail, jobs = self.app.root_detail(self.root_name)
+        try:
+            self.app.call_from_thread(self._apply_reload, detail, jobs)
+        except Exception:
+            pass   # screen/app tearing down
+
+    def _apply_reload(self, detail, jobs) -> None:
+        self._detail, self._jobs = detail, jobs
+        self._loaded = True
+        self.refresh_frame()
 
     def frame(self) -> str:
         # Render from the cached detail/jobs (fetched on mount + poll, not per keypress).
@@ -1361,26 +1384,56 @@ class PackratApp(App):
 
     # -- data ---------------------------------------------------------------
     def refresh_data(self) -> None:
-        """Re-fetch the snapshot + recent jobs (poll backstop / job-finished trigger)."""
+        """Re-fetch the snapshot + recent jobs (poll backstop / job-finished trigger).
+
+        ONLINE the fetch is two blocking httpx calls, so it runs in a WORKER THREAD
+        (:meth:`_fetch_online`) and marshals the result back to the UI thread — a slow
+        or hung daemon must never freeze keyboard input / rendering on the poll timer.
+        OFFLINE (in-memory demo data, no I/O) applies inline. Tests that call this
+        directly on a running app get the async worker; the synchronous apply path
+        (:meth:`_apply_data`) is what actually mutates state + re-renders."""
         if self.offline:
-            # The offline demo uses the rich `demo` dataset (multi-page lists +
-            # every job shape) rather than the mockup-exact `fixtures`, so a person
-            # can exercise pagination and every screen without a daemon.
-            self.snapshot = demo.status_snapshot(running=True)
-            self.recent = demo.recent_jobs()
-            self.header_right = "v0.1.0 · daemon ● up"
+            self._apply_data(demo.status_snapshot(running=True), demo.recent_jobs(),
+                             "v0.1.0 · daemon ● up")
+            return
+        # Online: fetch off the UI thread. If no app loop is running (a bare unit test
+        # driving refresh_data on an un-mounted app), fall back to a synchronous fetch.
+        if self._app_loop_running():
+            self._fetch_online()
         else:
-            try:
-                self.snapshot = self.client.status()
-                self.recent = self.client.list_jobs(20)
-                self.header_right = "v0.1.0 · daemon ● up"
-            except Exception:
-                # Daemon unreachable/erroring: degrade to a zeroed snapshot (so the
-                # frame still draws) and flag it in the header — never crash / leave a
-                # partial dict a builder would KeyError on.
-                self.snapshot = _empty_snapshot()
-                self.recent = []
-                self.header_right = "v0.1.0 · daemon ○ down"
+            self._apply_data(*self._blocking_fetch())
+
+    def _app_loop_running(self) -> bool:
+        """True when the Textual event loop is up (so worker threads can marshal back)."""
+        try:
+            return bool(self.is_running)   # Textual App: True while run()/run_test() is active
+        except Exception:  # noqa: BLE001 - be conservative: no loop → synchronous path
+            return False
+
+    def _blocking_fetch(self) -> tuple[dict, list, str]:
+        """The blocking daemon fetch (status + recent jobs). Returns (snapshot, recent,
+        header_right); degrades to a zeroed snapshot + 'down' header if unreachable."""
+        try:
+            return self.client.status(), self.client.list_jobs(20), "v0.1.0 · daemon ● up"
+        except Exception:
+            # Daemon unreachable/erroring: a zeroed snapshot (so the frame still draws)
+            # + a 'down' header — never crash / leave a partial dict a builder KeyErrors on.
+            return _empty_snapshot(), [], "v0.1.0 · daemon ○ down"
+
+    @work(thread=True, exclusive=True, group="poll-fetch")
+    def _fetch_online(self) -> None:
+        """Worker-thread poll fetch (blocking httpx), applied back on the UI thread."""
+        snap, recent, header = self._blocking_fetch()
+        try:
+            self.call_from_thread(self._apply_data, snap, recent, header)
+        except Exception:
+            pass   # app tearing down
+
+    def _apply_data(self, snapshot: dict, recent: list, header_right: str) -> None:
+        """Install a freshly-fetched read-model + re-render (UI thread only)."""
+        self.snapshot = snapshot
+        self.recent = recent
+        self.header_right = header_right
         # Feed the SSE-less poll path into the ETA estimator + keep the live stream
         # subscribed to whatever job is now running (fix: the "live" bar was poll-only).
         self._track_running()
@@ -1571,7 +1624,15 @@ class PackratApp(App):
         - **online**: call ``submit()`` and show an info toast "submitted — job #N",
           then refresh so the new job appears; on an exception, a **red error toast**
           (the command failed to even submit) instead of crashing.
+
+        **Modal guard:** a background screen's action key can bubble down the stack and
+        reach here while a modal is open (Textual only *focuses* the modal's widgets),
+        which would fire a real daemon submit underneath the modal. Refuse when a modal
+        is on top. (A confirm-gated action is safe: :meth:`confirm_verb` calls this from
+        its post-dismiss callback, when no modal is on top.)
         """
+        if self._modal_on_top():
+            return
         if self.offline or submit is None:
             self.notify(cmd, title=title, severity="information")
             if then:

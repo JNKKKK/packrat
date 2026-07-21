@@ -393,6 +393,73 @@ def test_merge_resume_skips_already_registered(queue_and_db, tmp_path):
     assert "2 exact-known" in "\n".join(logs)
 
 
+def test_merge_phase1_persists_hashes_incrementally_and_resume_skips(queue_and_db, tmp_path, monkeypatch):
+    """Phase 1 UPSERTs each source hash as it's computed, so a crash mid-hash keeps the
+    work; a `planning`-resume skips already-hashed files (§8 C SMB-cost avoidance)."""
+    from packrat import media
+    from packrat.jobs import merge as merge_mod
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    src = tmp_path / "src"
+    _png(src / "a.png", 1)
+    _png(src / "b.png", 2)
+
+    # An open 'planning' run (Phase 1 not yet done) — the state a crash before the
+    # copying-flip leaves. Hand-build it so we can drive _build_plan directly.
+    cur = database.execute(
+        "INSERT INTO merge_runs(source_path, dest_path, dest_root_id, status, created_at) "
+        "VALUES (?,?,?, 'planning', 't')", (str(src), str(lib), root["id"]),
+    )
+    run_id = int(cur.lastrowid)
+    run = dict(database.query_one("SELECT * FROM merge_runs WHERE id=?", (run_id,)))
+
+    # Crash Phase 1 after the FIRST hash: wrap hash_file to raise on the 2nd call.
+    real_hash = media.hash_file
+    calls = {"n": 0}
+
+    def flaky_hash(path):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated crash mid-Phase-1")
+        return real_hash(path)
+
+    monkeypatch.setattr(merge_mod.media, "hash_file", flaky_hash)
+    import threading
+
+    from packrat.config import Config
+    from packrat.jobs.context import JobContext
+
+    ctx = JobContext(0, "merge", {}, Config(), database,
+                     emit=lambda ev: None, set_progress=lambda d, t: None,
+                     cancel_event=threading.Event())
+    with pytest.raises(RuntimeError):
+        merge_mod._build_plan(ctx, run)
+
+    # The first file's hash was persisted despite the crash (incremental UPSERT).
+    rows = database.query("SELECT source_rel_path, content_hash FROM merge_plan_items WHERE run_id=?", (run_id,))
+    hashed = {r["source_rel_path"]: r["content_hash"] for r in rows if r["content_hash"] is not None}
+    assert len(hashed) == 1, rows
+
+    # Resume with the real hasher: the already-hashed file must NOT be re-read.
+    monkeypatch.setattr(merge_mod.media, "hash_file", real_hash)
+    reread = {"n": 0}
+    orig = real_hash
+
+    def counting_hash(path):
+        reread["n"] += 1
+        return orig(path)
+
+    monkeypatch.setattr(merge_mod.media, "hash_file", counting_hash)
+    merge_mod._build_plan(ctx, dict(database.query_one("SELECT * FROM merge_runs WHERE id=?", (run_id,))))
+    # Only the ONE not-yet-hashed file is read on resume (the first is reused).
+    assert reread["n"] == 1, f"resume re-hashed {reread['n']} files (expected 1)"
+    both = database.query("SELECT content_hash FROM merge_plan_items WHERE run_id=?", (run_id,))
+    assert all(r["content_hash"] is not None for r in both) and len(both) == 2
+
+
 # ---------------------------------------------------------------------------
 # cross-op guard (§8 C Phase 0 step 2a) — held behind a pending review
 # ---------------------------------------------------------------------------

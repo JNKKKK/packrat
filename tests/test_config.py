@@ -64,6 +64,30 @@ def test_malformed_raises(tmp_path):
         config.load_config(p)
 
 
+def test_scalar_where_extension_list_expected_raises(tmp_path):
+    # allowlist.photo = "jpg" (a scalar, not an array) must be rejected at LOAD naming
+    # the key — not stored as a str and detonated later in media_exts() (§9.2).
+    p = tmp_path / "bad_photo.toml"
+    p.write_text('[allowlist]\nphoto = "jpg"\n', encoding="utf-8")
+    with pytest.raises(config.ConfigError, match=r"allowlist\.photo"):
+        config.load_config(p)
+
+
+def test_scalar_where_codec_table_expected_raises(tmp_path):
+    p = tmp_path / "bad_codec.toml"
+    p.write_text("[match]\ncodec_weights = 1.0\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError, match=r"codec_weights"):
+        config.load_config(p)
+
+
+def test_non_numeric_scalar_raises_configerror_naming_key(tmp_path):
+    # A bad scalar must raise ConfigError (naming the key), not a bare ValueError.
+    p = tmp_path / "bad_int.toml"
+    p.write_text('[video]\nsample_frames = "twelve"\n', encoding="utf-8")
+    with pytest.raises(config.ConfigError, match=r"video\.sample_frames"):
+        config.load_config(p)
+
+
 def test_allowlist_raw_and_media_exts(tmp_path):
     p = tmp_path / "al.toml"
     p.write_text('[allowlist]\nraw = true\n', encoding="utf-8")

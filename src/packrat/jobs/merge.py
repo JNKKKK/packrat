@@ -208,9 +208,6 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
     # (the plan owns source+dest, §8 C), so a `planning`-resume can't drift to a
     # different --source arg pointing at the same dest root.
     source = run["source_path"]
-    # A `planning`-resume rebuilds: nothing was copied yet (copy starts only after the
-    # flip to `copying`), so wiping partial Phase-1 items and redoing is safe + simplest.
-    db.execute("DELETE FROM merge_plan_items WHERE run_id=?", (run_id,))
 
     ignore = IgnoreSet.build(ctx.config)  # source isn't a root → config allowlist + built-ins
     en = enumerate_root(source, ignore)
@@ -218,21 +215,50 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
         raise ValueError(f"source is not readable: {source}")
     cands = en.candidates
 
-    # Phase 1 — BLAKE3 each source file (the resume-avoids-this SMB cost, §10.1).
+    # Phase 1 — BLAKE3 each source file, PERSISTING each row as it's hashed (the
+    # resume-avoids-this SMB cost, §10.1). A `planning`-resume keeps rows already
+    # hashed and skips re-hashing them — so a crash during a long source hash doesn't
+    # throw away the work done so far. (Copy only starts after the flip to `copying`,
+    # so no dest file exists yet; a Phase-1 row is just a hash record.) Rows are keyed
+    # by source_rel_path; enumeration is deterministic, so the same file maps to the
+    # same row across runs.
+    already = {
+        r["source_rel_path"]: r
+        for r in db.query(
+            "SELECT source_rel_path, content_hash, progress FROM merge_plan_items WHERE run_id=?",
+            (run_id,),
+        )
+    }
     ctx.set_total(len(cands))
-    items: list[dict] = []
     for i, cand in enumerate(cands, 1):
         ctx.check_cancelled()
         ctx.progress(i, message=os.path.basename(cand.path))
+        prior = already.get(cand.rel)
+        if prior is not None and (prior["content_hash"] is not None or prior["progress"] == "error"):
+            continue  # already hashed (or a recorded read-error) on a prior pass — skip the re-read
         try:
             content_hash = media.hash_file(cand.path)
-            items.append({"rel": cand.rel, "size": cand.size, "mtime": cand.mtime,
-                          "content_hash": content_hash, "progress": "pending"})
+            row = {"content_hash": content_hash, "progress": "pending", "error": None}
         except OSError as exc:
             log.warning("merge: unreadable source file %s: %s", cand.path, exc)
-            items.append({"rel": cand.rel, "size": cand.size, "mtime": cand.mtime,
-                          "content_hash": None, "progress": "error",
-                          "error": f"{type(exc).__name__}: {exc}"[:500]})
+            row = {"content_hash": None, "progress": "error",
+                   "error": f"{type(exc).__name__}: {exc}"[:500]}
+        # UPSERT this one file's hash immediately (committed per item, so a crash keeps it).
+        db.execute(
+            "INSERT INTO merge_plan_items(run_id, source_rel_path, size, mtime, content_hash, "
+            "progress, error) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id, source_rel_path) DO UPDATE SET "
+            "size=excluded.size, mtime=excluded.mtime, content_hash=excluded.content_hash, "
+            "progress=excluded.progress, error=excluded.error",
+            (run_id, cand.rel, cand.size, cand.mtime, row["content_hash"],
+             row["progress"], row["error"]),
+        )
+
+    # Load the full persisted plan back for classification (Phase 2 works on all rows,
+    # including ones hashed in an earlier crashed pass).
+    items = [dict(r) for r in db.query(
+        "SELECT source_rel_path AS rel, size, mtime, content_hash, progress "
+        "FROM merge_plan_items WHERE run_id=?", (run_id,))]
 
     # Phase 2 step 8 — collapse exact-within-source dups (keep oldest-mtime rep).
     by_hash: dict[str, list[dict]] = {}
@@ -252,15 +278,14 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
         rep = min(group, key=lambda x: (x["mtime"] if x["mtime"] is not None else 0.0, x["rel"]))
         rep["classification"] = _classify_hash(db, rep["content_hash"])
 
-    # Persist the frozen plan + flip to `copying` in one transaction.
+    # Persist each row's classification + flip to `copying` in one transaction (the plan
+    # is now FROZEN; resume trusts it verbatim). Rows already carry their hash from Phase 1.
     with db.transaction() as conn:
         for it in items:
             conn.execute(
-                "INSERT INTO merge_plan_items(run_id, source_rel_path, size, mtime, content_hash, "
-                "classification, rep_of_hash, progress, error) VALUES (?,?,?,?,?,?,?,?,?)",
-                (run_id, it["rel"], it["size"], it["mtime"], it["content_hash"],
-                 it.get("classification"), it.get("rep_of_hash"),
-                 it["progress"], it.get("error")),
+                "UPDATE merge_plan_items SET classification=?, rep_of_hash=? "
+                "WHERE run_id=? AND source_rel_path=?",
+                (it.get("classification"), it.get("rep_of_hash"), run_id, it["rel"]),
             )
         conn.execute("UPDATE merge_runs SET status='copying' WHERE id=?", (run_id,))
 

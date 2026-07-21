@@ -41,10 +41,16 @@ def connect(
     else:
         conn = sqlite3.connect(p, timeout=30.0, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # `journal_mode`/`synchronous` are WRITE pragmas — setting them on a read-only
+    # handle raises `OperationalError` if the DB isn't already in WAL mode (a restored/
+    # copied DB left in delete-journal mode, an externally-created one). The writer
+    # connection WAL-izes the file once (persistent), so a read-only handle just needs
+    # the connection-scoped pragmas below; skip the file-level write pragmas.
+    if not read_only:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -60,6 +66,7 @@ class Database:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
         self._lock = threading.RLock()
+        self._txn_depth = 0   # >0 while inside a transaction() (suppresses auto-commit)
 
     @property
     def lock(self) -> threading.RLock:
@@ -71,9 +78,14 @@ class Database:
         return self._conn
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Execute one statement. Auto-commits — EXCEPT when called inside a
+        ``transaction()`` block, where the commit is deferred to the block (so a
+        nested ``db.execute`` can't prematurely commit and break the unit's atomicity).
+        """
         with self._lock:
             cur = self._conn.execute(sql, params)
-            self._conn.commit()
+            if self._txn_depth == 0:
+                self._conn.commit()
             return cur
 
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -86,16 +98,28 @@ class Database:
 
     @contextmanager
     def transaction(self):
-        """Atomic unit of work, serialized against all other writers."""
+        """Atomic unit of work, serialized against all other writers.
+
+        Re-entrancy-safe: a nested ``transaction()`` (or a ``db.execute`` called within
+        one) joins the outer transaction rather than starting/committing its own — the
+        whole outermost block commits once on success, rolls back once on any exception.
+        SQLite has no nested BEGIN, so only the OUTERMOST enter issues BEGIN/COMMIT."""
         with self._lock:
-            self._conn.execute("BEGIN")
+            outermost = self._txn_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN")
+            self._txn_depth += 1
             try:
                 yield self._conn
             except Exception:
-                self._conn.rollback()
+                if outermost:
+                    self._conn.rollback()
                 raise
             else:
-                self._conn.commit()
+                if outermost:
+                    self._conn.commit()
+            finally:
+                self._txn_depth -= 1
 
     def clear_catalog(self) -> dict[str, int]:
         """DELETE every catalog row, preserving the schema (dev-only — §clear-db).
@@ -277,6 +301,25 @@ def _migrate_jobs_v7(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migrate_dedup_merge_plan_items(conn: sqlite3.Connection) -> None:
+    """v10: collapse duplicate ``(run_id, source_rel_path)`` merge_plan_items rows.
+
+    v10 adds a UNIQUE index on that pair (Phase-1 UPSERT key). An older DB could hold
+    duplicates from a pre-v10 ``planning``-resume (blind re-INSERT after a DELETE that a
+    crash left half-done), which would make the unique-index creation in ``executescript``
+    fail. Keep the lowest ``id`` per pair and delete the rest. Runs BEFORE ``executescript``.
+    Idempotent + a no-op on a fresh DB (no table yet) or one with no duplicates.
+    """
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='merge_plan_items'"
+    ).fetchone() is None:
+        return
+    conn.execute(
+        "DELETE FROM merge_plan_items WHERE id NOT IN "
+        "(SELECT MIN(id) FROM merge_plan_items GROUP BY run_id, source_rel_path)"
+    )
+
+
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     """Create the schema if missing and return an open connection (§4).
 
@@ -289,6 +332,8 @@ def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     # v7 jobs rebuild runs BEFORE executescript (the v7 DDL indexes jobs.root_id,
     # absent on an old table) and manages its own txn + FK toggle.
     _migrate_jobs_v7(conn)
+    # v10: collapse duplicate merge_plan_items rows before the new UNIQUE index builds.
+    _migrate_dedup_merge_plan_items(conn)
     conn.executescript(SCHEMA_SQL)
     with transaction(conn):
         _migrate_columns(conn)

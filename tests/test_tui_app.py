@@ -457,6 +457,32 @@ def test_queue_cancel_submits_online():
     assert any(c[0] == "cancel" for c in fc.calls), fc.calls
 
 
+def test_run_verb_refused_while_modal_on_top():
+    """A no-confirm action (run_verb) that bubbles from a background screen while a
+    modal is open must NOT fire a real daemon submit underneath it (§1.6 modal guard)."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _screen(app) == "RootDetailScreen"
+        # Open a cleanup choice modal (a real modal on top of the detail screen).
+        await pilot.press("c")
+        await pilot.pause()
+        assert _screen(app) == "ChoiceModal"
+        submitted = {"n": 0}
+        # Directly invoke run_verb (mimicking a bubbled background action key).
+        app.run_verb("packrat scan X", title="scan",
+                     submit=lambda: submitted.__setitem__("n", submitted["n"] + 1) or 999)
+        await pilot.pause()
+        assert submitted["n"] == 0, "run_verb fired a submit under an open modal"
+        assert _screen(app) == "ChoiceModal"     # still the modal, nothing pushed/submitted
+    fc = _FakeClient()
+
+    async def runner():
+        app = PackratApp(client=fc, offline=False)
+        async with app.run_test(size=(120, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+
+
 def test_online_submit_error_shows_red_toast_not_crash():
     class FailClient(_FakeClient):
         def submit_scan(self, root, **kw):

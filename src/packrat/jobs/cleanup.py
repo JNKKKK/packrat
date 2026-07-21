@@ -85,7 +85,20 @@ def _run_cleanup(ctx: JobContext) -> None:
     ``--confirm``/``--cancel`` review run (which also bundles exact-trash deletions).
     """
     p = ctx.params
-    mode = p.get("mode") or "exact"
+    # §6.2: a cleanup that DELETES (or opens a review) requires an EXPLICIT, valid mode —
+    # there is no bare default that deletes. The CLI enforces this, but the daemon is the
+    # authoritative contract (§1.6), so validate here too: never silently fall into a real
+    # delete mode on a mode-less API call. A confirm/cancel acts on an existing pending
+    # perceptual run (no mode needed); a read-only PREVIEW is harmless (acts on nothing),
+    # so a mode-less preview is allowed and treated as the exact-trash count.
+    mode = p.get("mode")
+    acts = p.get("apply") or (mode == "perceptual" and not p.get("dry_run"))
+    if acts and mode not in ("exact", "perceptual", "undecodable"):
+        raise ValueError(
+            f"cleanup requires a mode (--trash-exact / --trash-perceptual / "
+            f"--undecodable); got {mode!r}"
+        )
+    mode = mode or "exact"   # mode-less → the (read-only) exact-trash preview
     if p.get("cancel"):
         _cancel(ctx)                       # perceptual run only
         action = "cancel"
@@ -93,10 +106,18 @@ def _run_cleanup(ctx: JobContext) -> None:
         _confirm(ctx)                      # perceptual run only
         action = "confirm"
     elif p.get("apply"):
+        # `apply` is the one-shot commit for the count-confirm modes only. Perceptual
+        # deletions apply via --confirm (a review run), NOT apply — reject the mismatch
+        # rather than silently exact-deleting under a perceptual request.
         if mode == "undecodable":
             _apply_undecodable(ctx)
-        else:
+        elif mode == "exact":
             _apply_default_exact(ctx)
+        else:
+            raise ValueError(
+                f"cleanup --apply is only for the one-shot modes (exact/undecodable); "
+                f"perceptual applies via --confirm, not apply (got mode={mode!r})"
+            )
         action = "delete"
     elif mode == "perceptual" and not p.get("dry_run"):
         _analyze_perceptual(ctx)

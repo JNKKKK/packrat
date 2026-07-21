@@ -81,6 +81,63 @@ def test_v8_migration_adds_priority_column(packrat_home, tmp_path):
         migrated.close()
 
 
+def test_v9_migration_adds_deleted_count(packrat_home, tmp_path):
+    """A pre-v9 review_runs (no deleted_count) gains the column via the ADD-COLUMN pass."""
+    dbfile = tmp_path / "pre_v9.db"
+    full = db.init_db(dbfile)          # fresh v-current DB
+    full.execute("ALTER TABLE review_runs DROP COLUMN deleted_count")  # simulate v8 shape
+    full.commit()
+    full.close()
+    migrated = db.init_db(dbfile)
+    try:
+        cols = {r["name"] for r in migrated.execute("PRAGMA table_info(review_runs)")}
+        assert "deleted_count" in cols
+        assert db.schema_version(migrated) == db.SCHEMA_VERSION
+    finally:
+        migrated.close()
+
+
+def test_nested_execute_inside_transaction_is_atomic(conn):
+    """A db.execute() nested inside `with db.transaction()` must NOT commit early —
+    a later exception rolls the WHOLE unit back (regression: execute auto-committed,
+    so the pre-exception write survived a rollback)."""
+    d = db.Database(conn)
+    d.execute("CREATE TABLE t_atomic (x INTEGER)")
+    with pytest.raises(RuntimeError):
+        with d.transaction() as c:
+            c.execute("INSERT INTO t_atomic(x) VALUES (1)")
+            d.execute("INSERT INTO t_atomic(x) VALUES (2)")   # nested wrapper call
+            raise RuntimeError("boom")                        # must roll BOTH back
+    assert d.query_one("SELECT COUNT(*) c FROM t_atomic")["c"] == 0
+
+
+def test_nested_transaction_commits_once(conn):
+    """A nested transaction() joins the outer one — the outermost commits once."""
+    d = db.Database(conn)
+    d.execute("CREATE TABLE t_nest (x INTEGER)")
+    with d.transaction() as c:
+        c.execute("INSERT INTO t_nest(x) VALUES (1)")
+        with d.transaction() as c2:                           # joins the outer txn
+            c2.execute("INSERT INTO t_nest(x) VALUES (2)")
+    assert d.query_one("SELECT COUNT(*) c FROM t_nest")["c"] == 2
+
+
+def test_read_only_open_of_non_wal_db(tmp_path):
+    """A read-only open must NOT run the WAL/synchronous WRITE pragmas — otherwise it
+    raises OperationalError on a DB left in delete-journal mode (restore/copy)."""
+    dbfile = tmp_path / "delete_journal.db"
+    c = sqlite3.connect(dbfile)
+    c.execute("PRAGMA journal_mode=DELETE")
+    c.execute("CREATE TABLE t(x)")
+    c.commit()
+    c.close()
+    ro = db.connect(dbfile, read_only=True)   # must not raise
+    try:
+        assert ro.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        ro.close()
+
+
 def test_asset_delete_cascades(conn):
     rid = _mk_root(conn)
     aid = _mk_asset(conn, "h1")

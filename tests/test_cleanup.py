@@ -183,6 +183,21 @@ def test_cleanup_preview_counts_exact_trash(queue_and_db, tmp_path):
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == 1
 
 
+def test_cleanup_mode_less_apply_is_rejected(queue_and_db, tmp_path):
+    """A mode-less cleanup that would DELETE must error, not silently exact-delete
+    (§6.2 no bare default). The daemon is the authoritative contract (§1.6)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "x.png", 1)
+    root = register(database, str(lib))
+    _run(q, database, "scan", root_id=root["id"])
+    # apply with NO mode → rejected (a mode-less PREVIEW is still allowed, tested above).
+    _run(q, database, "cleanup", expect="error", root_id=root["id"], apply=True)
+    # apply=True + mode='perceptual' is also invalid (perceptual applies via --confirm).
+    _run(q, database, "cleanup", expect="error", root_id=root["id"], mode="perceptual", apply=True)
+
+
 @win_only
 def test_cleanup_default_exact_apply_deletes(queue_and_db, tmp_path):
     q, database = queue_and_db
@@ -199,7 +214,7 @@ def test_cleanup_default_exact_apply_deletes(queue_and_db, tmp_path):
     database.execute("UPDATE assets SET status='trashed', trash_reason='trash-folder' WHERE id=?",
                      (junk_asset,))
 
-    _run(q, database, "cleanup", root_id=root["id"], apply=True)
+    _run(q, database, "cleanup", root_id=root["id"], mode="exact", apply=True)
     # junk.png deleted; its asset stays trashed (fingerprints retained); keep.png intact.
     assert not (lib / "junk.png").exists()
     assert (lib / "keep.png").exists()
