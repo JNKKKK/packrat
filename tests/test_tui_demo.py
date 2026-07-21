@@ -168,12 +168,12 @@ def test_dashboard_queue_box_pages_and_autofollows():
     async def scenario(app, pilot):
         await pilot.press("q")                 # focus the Queue box (single press)
         assert _scr(app) == "Dashboard"
-        qtitle = [ln for ln in app.screen.current_frame.split("\n") if "[Q]UEUE" in ln]
+        qtitle = [ln for ln in app.screen.current_frame.split("\n") if "[Q]ueue" in ln]
         assert qtitle and re.search(r"page 1/\d+", qtitle[0])
         total = int(re.search(r"page 1/(\d+)", qtitle[0]).group(1))
         assert total >= 2                      # demo backlog spans >1 preview page
         await pilot.press("right")
-        qtitle2 = [ln for ln in app.screen.current_frame.split("\n") if "[Q]UEUE" in ln]
+        qtitle2 = [ln for ln in app.screen.current_frame.split("\n") if "[Q]ueue" in ln]
         assert re.search(r"page 2/", qtitle2[0])
         # down-arrow auto-follow keeps the cursor visible
         for _ in range(6):
@@ -361,6 +361,28 @@ def test_root_detail_jobs_panel_focus_and_sections():
     _drive(scenario)
 
 
+def test_root_detail_e_reviews_r_runs():
+    """[e] focuses the R[e]view box; [r] is the Jobs panel's Running sub-section (only
+    meaningful once [J]obs is focused) — no conflict between them."""
+    async def scenario(app, pilot):
+        await _to_photos_detail(app, pilot)
+        # [e] → Review box.
+        await pilot.press("e")
+        assert app.screen.focus == "review"
+        # Esc back, [J] → Jobs; [h] moves off Running, [r] → Running sub-section.
+        await pilot.press("escape")
+        assert app.screen.focus is None
+        await pilot.press("j")
+        assert app.screen.focus == "jobs"
+        await pilot.press("h")
+        assert app.screen.job_focus == "history"
+        await pilot.press("r")                       # [r] inside Jobs → Running sub-section
+        assert app.screen.focus == "jobs" and app.screen.job_focus == "running"
+        # [r] does NOT focus the Review box (that's [e]'s job).
+        assert app.screen.focus != "review"
+    _drive(scenario)
+
+
 def test_root_detail_jobs_panel_border_is_accent_when_focused():
     """The focused Jobs panel's heavy border carries the accent (focus-border) color."""
     from rich.console import Console
@@ -393,19 +415,22 @@ def test_root_detail_enter_opens_selected_job_card():
 
 
 def test_root_detail_review_box_is_focusable():
-    """[v] focuses the bordered Review box (heavy accent border); Esc un-focuses.
+    """[e] focuses the bordered R[e]view box (heavy accent border); Esc un-focuses.
 
     Photos has a pending review, so the Review box has content + is focus-able."""
     async def scenario(app, pilot):
         await _to_photos_detail(app, pilot)
         assert _scr(app) == "RootDetailScreen"
         f = app.screen.current_frame
-        assert "[V] Review" in f                     # the bordered Review section
+        assert "R[e]view" in f                       # unfocused → the [e] key hint shows
         assert "awaiting review" in f
         assert app.screen.focus is None and "┏" not in f    # nothing focused → no heavy box
-        await pilot.press("v")                       # focus the Review box
+        await pilot.press("e")                       # [e] focuses the Review box
         assert app.screen.focus == "review"
-        assert "┏" in app.screen.current_frame       # heavy (accent) border now
+        f2 = app.screen.current_frame
+        assert "┏" in f2                             # heavy (accent) border now
+        # Focused drops the key-hint brackets → plain "Review" (no maximize here).
+        assert "┏━ Review" in f2 and "R[e]view" not in f2
         # Esc un-focuses the Review box (stays on the detail), a 2nd Esc backs out
         await pilot.press("escape")
         assert _scr(app) == "RootDetailScreen" and app.screen.focus is None
@@ -415,17 +440,17 @@ def test_root_detail_review_box_is_focusable():
 
 
 def test_review_box_focusable_even_with_no_pending_review():
-    """[v] focuses the Review box even when there's NO pending review (item 2).
+    """[e] focuses the Review box even when there's NO pending review (item 2).
 
     The first root in the default sort has no pending review; its Review box still
-    reads "No pending review." and is focus-able (heavy border on [v])."""
+    reads "No pending review." and is focus-able (heavy border on [e])."""
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         assert _scr(app) == "RootDetailScreen"
         f = app.screen.current_frame
-        assert "[V] Review" in f and "No pending review." in f
+        assert "R[e]view" in f and "No pending review." in f
         assert app.screen.focus is None
-        await pilot.press("v")                       # focus even with nothing to review
+        await pilot.press("e")                       # [e] focuses even with nothing to review
         assert app.screen.focus == "review"
         assert "┏" in app.screen.current_frame       # heavy (accent) border now
     _drive(scenario)
@@ -439,7 +464,7 @@ def test_root_detail_review_hints_dim_when_unfocused():
         f = app.screen.current_frame
         assert "‹[o] open in Explorer" in f
         # focused → plain (undimmed) hints, no guillemets
-        await pilot.press("v")
+        await pilot.press("e")                  # [e] focuses the Review box
         f2 = app.screen.current_frame
         assert "[o] open in Explorer" in f2 and "‹[o]" not in f2
     _drive(scenario)
@@ -587,7 +612,7 @@ def test_paste_ignored_when_not_on_a_text_field():
 
 def test_review_actions_inert_until_box_focused():
     """[o]/[g]/[k] are the Review box's inside shortcuts — they do NOTHING until the
-    box is focused with [v] (item 1: out-of-focus keys must not trigger the action)."""
+    box is focused with [r] (item 1: out-of-focus keys must not trigger the action)."""
     async def scenario(app, pilot):
         await _to_photos_detail(app, pilot)
         assert _scr(app) == "RootDetailScreen"
@@ -606,7 +631,7 @@ def test_pending_review_actions_map_to_verbs():
         await _to_photos_detail(app, pilot)     # → Photos detail (pending review)
         assert _scr(app) == "RootDetailScreen"
         assert "awaiting review" in app.screen.current_frame
-        await pilot.press("v")                  # focus the Review box first
+        await pilot.press("e")                  # [e] focuses the Review box first
         assert app.screen.focus == "review"
         # [g] confirm → confirm modal → (y) → dedup --confirm surfaced as a toast
         await pilot.press("g")
@@ -632,7 +657,7 @@ def test_stage2_review_offers_keep_suggested():
         f = app.screen.current_frame
         assert "awaiting review (stage 2 of 3)" in f
         assert "[b]" in f and "keep suggested" in f          # the new bulk action shows
-        await pilot.press("v")                  # focus the Review box
+        await pilot.press("e")                  # [e] focuses the Review box
         await pilot.press("b")                  # [b] keep-suggested confirm
         await pilot.pause()
         assert _scr(app) == "ConfirmModal"
@@ -649,7 +674,7 @@ def test_keep_suggested_inert_when_not_stage2():
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         assert _scr(app) == "RootDetailScreen"
         assert "[b]" not in app.screen.current_frame        # not offered
-        await pilot.press("v")                  # focus review (no pending review)
+        await pilot.press("e")                  # [e] focuses review (no pending review)
         await pilot.press("b")
         await pilot.pause()
         assert _scr(app) == "RootDetailScreen"  # no modal, no submit

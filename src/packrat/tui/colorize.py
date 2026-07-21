@@ -155,6 +155,42 @@ def recolor_hoard_count(text: Text, frame: str, color: str) -> Text:
     return text
 
 
+def shade_box_title(text: Text, frame: str, title: str, right: str = "",
+                    theme: Theme = tokens.DEFAULT_THEME) -> Text:
+    """Shade the `` <title> `` (and optional `` <right> ``) tabs of a focused box's top
+    border (in place, post-colorize).
+
+    Paints the ``accent`` color as a BACKGROUND block behind the box title *and its
+    flanking spaces* (``┏━ [R]oots ━┓`` → the `` [R]oots `` reads like a highlighted
+    accent tab) and forces the whole tab — including the ``[R]`` key — to the dark
+    ``accent-fg`` foreground (high contrast on the bright accent bg), overriding the
+    per-``[k]`` accent from the regex pass (so ``[R]`` isn't invisible accent-on-accent).
+    ``right`` (e.g. the ``page 1/2`` paginator) is shaded the same way at its spot near
+    the right corner. Only the FIRST heavy-border line carrying the title is touched (the
+    box's top border), so the identical string elsewhere isn't affected. Returns ``text``
+    for chaining."""
+    style = f"{theme.color('accent-fg')} on {theme.color('accent')}"
+    # The heavy top border is `┏━ <title> ━…━ <right> ━┓`; shade each label plus the
+    # single space on either side (the `━ [R]oots ━` / `━ page 1/2 ━` runs).
+    for line in frame.split("\n"):
+        if "┏" in line and f" {title} " in line:
+            base = frame.index(line)
+            col = line.index(f" {title} ")
+            text.stylize(style, base + col, base + col + len(title) + 2)
+            # Right label: caller-supplied, else auto-detect a trailing `page i/N`.
+            rlabel = right or (_TITLE_PAGER_RE.search(line).group(1)
+                               if _TITLE_PAGER_RE.search(line) else "")
+            if rlabel and f" {rlabel} " in line:
+                rcol = line.rindex(f" {rlabel} ")  # rindex: the label is near the right end
+                text.stylize(style, base + rcol, base + rcol + len(rlabel) + 2)
+            break
+    return text
+
+
+# A `page i/N` paginator riding a box's top border (shaded with the title tab).
+_TITLE_PAGER_RE = re.compile(r" (page \d+/\d+) ")
+
+
 def colorize(frame: str, theme: Theme = tokens.DEFAULT_THEME) -> Text:
     """Return a Rich ``Text`` of ``frame`` with theme role colors applied by pattern.
 

@@ -86,7 +86,9 @@ ROLES = (
     "warn",           # ⚠ awaiting-review / attention
     "error",          # failed job status, a RootError in a form
     "success",        # ◉ deduped dot / a clean "done" result
-    "accent",         # titles, focused heavy border, key letters in [k] hints
+    "accent",         # titles, focused heavy border, key letters in [k] hints;
+                      #   also the background of a focused box's shaded title tab
+    "accent-fg",      # dark foreground for text ON the accent background (the shaded tab)
     "muted-border",   # unfocused Panel frame
     "focus-border",   # focused Panel frame
 )
@@ -124,6 +126,7 @@ DEFAULT_THEME = Theme(
         "error": "#ff5f5f",
         "success": "#5fd75f",
         "accent": "#00d7af",
+        "accent-fg": "#0a1f1a",   # near-black teal — dark text for the accent-shaded tab
         "muted-border": "#585858",
         "focus-border": "#00d7af",
     },

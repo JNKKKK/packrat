@@ -101,9 +101,51 @@ def test_dashboard_hoard_count_matches_gem_color():
 def test_focus_then_maximize_roots():
     async def scenario(app, pilot):
         await pilot.press("r")
-        assert "[R]OOTS" in app.screen.current_frame       # focused heavy frame
+        f = app.screen.current_frame
+        assert "┏" in f                                    # focused → heavy frame
+        # Focused Roots title stays mixed-case "[R]oots" (shaded, not upper-cased).
+        assert "┏━ [R]oots" in f and "[R]OOTS" not in f
         await pilot.press("r")
         assert _screen(app) == "RootsMax"                  # maximized
+    _drive(scenario)
+
+
+def _shade_style():
+    from packrat.tui.tokens import DEFAULT_THEME as T
+    return f"{T.color('accent-fg')} on {T.color('accent')}"
+
+
+def _shaded_spans(screen):
+    """Substrings of the screen's colorized frame carrying the shade (accent-tab) style."""
+    frame = screen.current_frame
+    text = screen._colorize(frame)
+    want = _shade_style()
+    return [frame[s.start:s.end] for s in text.spans if str(s.style) == want]
+
+
+def test_dashboard_queue_box_title_shaded_when_focused():
+    async def scenario(app, pilot):
+        await pilot.press("q")                             # focus the Queue box
+        f = app.screen.current_frame
+        assert "┏━ [Q]ueue" in f and "[Q]UEUE" not in f    # mixed-case, shaded (not upper)
+        shaded = _shaded_spans(app.screen)
+        assert " [Q]ueue " in shaded                       # title tab shaded
+        assert any(s.strip().startswith("page ") for s in shaded)   # pager shaded too
+    _drive(scenario)
+
+
+def test_root_detail_boxes_title_shaded_when_focused():
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _screen(app) == "RootDetailScreen"
+        await pilot.press("e")                             # [e] → Review box
+        assert app.screen.focus == "review"
+        # focused box drops the key-hint brackets → plain title, shaded.
+        assert " Review " in _shaded_spans(app.screen)
+        await pilot.press("escape")
+        await pilot.press("j")                             # [J] → Jobs box
+        assert app.screen.focus == "jobs"
+        assert " Jobs " in _shaded_spans(app.screen)       # Jobs tab shaded
     _drive(scenario)
 
 

@@ -5,8 +5,8 @@ Renders the 3-column stats header (folder icon | counts | scan/dedup dates), a
 line, §3.2), and a **bordered Jobs panel** laid out like the Queue interface (§4) —
 three independent Running / Queued / History sections, each with its own paginator.
 
-Both boxes are focus-able (like the dashboard boxes): the Review box is focused by
-``[v]`` and the Jobs panel by ``[J]``; a focused box gets the heavy accent-colored
+Both boxes are focus-able (like the dashboard boxes): the R[e]view box is focused by
+``[e]`` and the Jobs panel by ``[J]``; a focused box gets the heavy accent-colored
 border, while an unfocused box dims its inside key hints. Within the focused Jobs
 panel, ``[r]``/``[q]``/``[h]`` pick the sub-section (Queued/History paginate). Pure
 (dict → lines); the Textual screen routes the action keys to the CLI verbs.
@@ -197,8 +197,10 @@ def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, 
                      lambda j, c: q.history_line(j, now, c, iw), empty="  (no job history)")
 
     # Fixed-height interior, then wrap in a heavy (accent) box when focused (§focus).
+    # No maximize here, so drop the [J] key hint once focused → plain "Jobs".
     body = (body + [""] * interior)[:interior]
-    return box("[J]obs", body, width, heavy=focused)
+    title = "Jobs" if focused else "[J]obs"
+    return box(title, body, width, heavy=focused)
 
 
 def _is_today(ts, now) -> bool:
@@ -251,7 +253,10 @@ def _review_box(d: dict, width: int, *, focused: bool) -> list[str]:
     rows = _review_rows(d)
     body = _review_lines(d, focused=focused)
     body = (body + [""] * rows)[:rows]
-    return box("[V] Review", body, width, heavy=focused)
+    # No double-press-to-maximize here (unlike the dashboard), so the [e] key hint is
+    # only useful while UNFOCUSED; a focused box drops the brackets → plain "Review".
+    title = "Review" if focused else "R[e]view"
+    return box(title, body, width, heavy=focused)
 
 
 def _hints(text: str, focused: bool) -> str:

@@ -75,7 +75,7 @@ def test_plain_text_gets_default_color():
 
 def test_heavy_border_gets_focus_border_color():
     # a focused Panel's heavy frame glyphs carry the focus-border (accent) color
-    assert _span_color("┏━ [Q]UEUE ━┓", "┏") == T.color("focus-border")
+    assert _span_color("┏━ [Q]ueue ━┓", "┏") == T.color("focus-border")
 
 
 def test_light_border_stays_default():
@@ -190,3 +190,36 @@ def test_recolor_hoard_count_tints_only_the_number():
     a, b = tinted[0]
     assert logo[a:b] == "1,234,567"           # digits + commas, nothing else
     assert text.plain == logo                 # style-only, content unchanged
+
+
+def test_shade_box_title_shades_the_title_tab():
+    from packrat.tui.colorize import shade_box_title
+    # A focused (heavy-border) box top line; the light-border twin below must NOT shade.
+    frame = "┏━ [R]oots ━━━┓\n┌─ [R]oots ─┐"
+    text = shade_box_title(colorize(frame), frame, "[R]oots")
+    # the tab gets the accent as BACKGROUND + the dark accent-fg foreground (high
+    # contrast; so [R] isn't invisible accent-on-accent).
+    want = f"{T.color('accent-fg')} on {T.color('accent')}"
+    shaded = [(s.start, s.end) for s in text.spans if str(s.style) == want]
+    assert len(shaded) == 1                   # only the heavy line's tab
+    a, b = shaded[0]
+    assert frame[a:b] == " [R]oots "          # title + its flanking spaces
+    assert a < frame.index("\n")              # it's on the FIRST (heavy) line
+    # the [R] key falls inside the shaded tab → last span over it is the shade style
+    # (default fg on accent bg), overriding the regex [k] accent so [R] isn't invisible.
+    rk = frame.index("[R]")
+    over = [s for s in text.spans if s.start <= rk < s.end]
+    assert str(over[-1].style) == want
+    assert text.plain == frame                # style-only
+
+
+def test_shade_box_title_also_shades_the_pager():
+    from packrat.tui.colorize import shade_box_title
+    # A focused box border with a right-aligned `page i/N` paginator — both the title
+    # tab AND the pager get the accent shade.
+    frame = "┏━ [R]oots ━━━━━━━━━━━━━━━━━━━━━━━━━━ page 1/2 ━┓"
+    text = shade_box_title(colorize(frame), frame, "[R]oots")
+    want = f"{T.color('accent-fg')} on {T.color('accent')}"
+    shaded = sorted((frame[s.start:s.end]) for s in text.spans if str(s.style) == want)
+    assert shaded == [" [R]oots ", " page 1/2 "]   # title + pager, each with its spaces
+    assert text.plain == frame

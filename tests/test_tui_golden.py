@@ -132,7 +132,7 @@ def test_root_detail_pending_fits_and_shows_review():
     rows = built.split("\n")
     mascot_top = next(i for i, r in enumerate(rows) if "(\\__/)" in r)  # first mascot line
     mascot_row = next(i for i, r in enumerate(rows) if "(____)" in r)   # last mascot line
-    review_row = next(i for i, r in enumerate(rows) if "[V] Review" in r)
+    review_row = next(i for i, r in enumerate(rows) if "R[e]view" in r)
     assert review_row == mascot_row + 2, "expected one blank line between stats and Review"
     assert rows[mascot_row + 1].strip("│ ") == ""                      # the spacer is blank
     # A blank spacer row sits ABOVE the stats section too (below the top frame border).

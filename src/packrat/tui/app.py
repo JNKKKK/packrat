@@ -231,11 +231,18 @@ class Dashboard(FrameScreen):
         # Apply the base theme colors, then sweep the gem's gradient on top so the held
         # stone glints — and tint the "· N assets hoarded ·" count the SAME color so the
         # number glints with the gem (post-layout, live widget only — §Theming).
-        from .colorize import gem_gradient_color, recolor_gem, recolor_hoard_count
+        from .colorize import (gem_gradient_color, recolor_gem, recolor_hoard_count,
+                               shade_box_title)
         color = gem_gradient_color(self._gem_phase)
         text = colorize(frame)
         recolor_gem(text, frame, self._gem, color)
-        return recolor_hoard_count(text, frame, color)
+        recolor_hoard_count(text, frame, color)
+        # Focused box: shade its title tab + pager (a highlighted-tab look).
+        if self.focus_state.target == "roots":
+            shade_box_title(text, frame, "[R]oots")
+        elif self.focus_state.target == "queue":
+            shade_box_title(text, frame, "[Q]ueue")
+        return text
 
     def _sync_lens(self) -> None:
         snap = self.app.snapshot
@@ -692,7 +699,7 @@ class RootDetailScreen(FrameScreen):
         Binding("left", "page(-1)", show=False),
         Binding("right", "page(1)", show=False),
         Binding("enter", "result", show=False),
-        Binding("v", "focus_review", show=False),
+        Binding("e", "focus_review", show=False),   # R[e]view box
         Binding("j", "focus_jobs", show=False),
         Binding("r", "focus_section('running')", show=False),
         Binding("q", "focus_section('queued')", show=False),
@@ -711,7 +718,7 @@ class RootDetailScreen(FrameScreen):
     def __init__(self, root_name: str) -> None:
         super().__init__()
         self.root_name = root_name
-        # Two focus-able bordered boxes (like the dashboard): the Review box ([v]) and
+        # Two focus-able bordered boxes (like the dashboard): the R[e]view box ([e]) and
         # the Jobs panel ([J]). `focus` is which box is focused (None | "review" |
         # "jobs"); within the Jobs panel, [r]/[q]/[h] pick the sub-section (each with
         # its own cursor + page). Unfocused by default.
@@ -724,7 +731,7 @@ class RootDetailScreen(FrameScreen):
         self._loaded = False             # False until the first reload() populates data
 
     FOOTER_BASE = ("[s] scan  [d] dedup  [m] merge from…  [c] clean up  "
-                   "[v] review  [J] jobs  Esc")
+                   "[e] review  [J] jobs  Esc")
     FOOTER_REVIEW = ("[o] open in Explorer   [g] confirm stage   [k] cancel run   "
                      "Esc unfocus")
     # Stage-2 dedup also offers the bulk keep-suggested confirm (§8 B --keep-suggested).
@@ -785,6 +792,18 @@ class RootDetailScreen(FrameScreen):
         return screen(f"packrat · {d['name']}", body, detail_header_right(d),
                       footer=footer, width=geo.w, height=geo.h)
 
+    def _colorize(self, frame: str):
+        # Shade the focused box's title tab (accent tab), matching the dashboard boxes.
+        from .colorize import shade_box_title
+        text = colorize(frame)
+        # A focused root-detail box drops its key-hint brackets (no maximize), so shade
+        # the PLAIN title that _review_box/_jobs_panel render when focused.
+        if self.focus == "review":
+            shade_box_title(text, frame, "Review")
+        elif self.focus == "jobs":
+            shade_box_title(text, frame, "Jobs")
+        return text
+
     # -- box focus + per-section navigation (mirrors QueueMax) ------------
     def _sections(self) -> dict:
         from .screens.rootdetail import split_jobs
@@ -799,7 +818,7 @@ class RootDetailScreen(FrameScreen):
         return panel_section_rows(self._detail or {}, self._geo)[section]
 
     def action_focus_review(self) -> None:
-        # [v] focuses the Review box (always focus-able, even with no pending review —
+        # [e] focuses the R[e]view box (always focus-able, even with no pending review —
         # the box is a permanent section, like Jobs).
         self.focus = "review"
         self.refresh_frame()

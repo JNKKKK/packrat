@@ -62,16 +62,21 @@ def dashboard_body(
     fitted = fit(all_rows, roots_rows, mode="scroll", page=roots_page)
     root_lines = [*fitted.rows, DOTKEY]
     if focus == "roots":
+        # Focused: heavy border + a SHADED "[R]oots" title tab (colorize.shade_box_title).
+        # Title keeps its mixed case (not upper-cased) — the shade signals focus instead.
         pager = f"page {roots_page + 1}/{fitted.total_pages}"
-        roots_box = box("[R]OOTS", root_lines, geo.roots_w, right=pager, heavy=True)
+        roots_box = box("[R]oots", root_lines, geo.roots_w, right=pager, heavy=True)
     else:
         roots_box = box("[R]oots", root_lines, geo.roots_w)
 
     # -- Queue box (full width): running bar + queued preview, or idle message --
     if focus == "queue":
+        # Focused: heavy border + a SHADED "[Q]ueue" title tab (colorize.shade_box_title
+        # in the screen's _colorize hook). Title keeps mixed case — the shade signals
+        # focus, matching the Roots box.
         queue_lines, pager = _queue_preview(snap, geo, focused=True,
                                             cursor=queue_cursor, page=queue_page)
-        queue_box = box("[Q]UEUE", queue_lines, geo.queue_w, right=pager, heavy=True)
+        queue_box = box("[Q]ueue", queue_lines, geo.queue_w, right=pager, heavy=True)
     else:
         queue_lines, _ = _queue_preview(snap, geo, focused=False)
         queue_box = box("[Q]ueue", queue_lines, geo.queue_w)
