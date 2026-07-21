@@ -385,6 +385,20 @@ class _FakeClient:
     def submit_cleanup(self, root, **kw):
         self.calls.append(("cleanup", root, kw)); return 903
 
+    def cleanup_preview(self, root, mode="exact"):
+        self.calls.append(("cleanup_preview", root, mode))
+        return {"root_id": 1, "name": root, "kind": "library", "count": 3, "network": 0}
+
+    def stream_job(self, job_id):
+        # An EMPTY stream (records the call, yields no events). The exact-cleanup worker's
+        # `for ev in stream_job(...)` loop just exhausts and proceeds to count — same as a
+        # clean terminal. Crucially we must NOT yield a terminal 'done' here: the app's
+        # `_track_running` streams the RUNNING job too, and a terminal event would trigger
+        # `refresh_data` → re-attach → refetch storm (the SSE reconnect loop, §3).
+        self.calls.append(("stream_job", job_id))
+        return
+        yield  # noqa: unreachable — makes this a generator
+
     def submit_merge(self, source, into, dry_run=False):
         self.calls.append(("merge", source, into, dry_run)); return 904
 
@@ -422,7 +436,8 @@ def test_root_detail_scan_submits_online():
             assert t and t.severity == "information" and "job #901" in t.message
         return scenario
     fc = _drive_online(scenario_factory())
-    assert fc.calls and fc.calls[0][0] == "scan", fc.calls
+    # A scan was submitted (other calls like the running-job SSE `stream_job` may precede it).
+    assert any(c[0] == "scan" for c in fc.calls), fc.calls
 
 
 def test_root_detail_dedup_submits_online():
@@ -599,6 +614,97 @@ def test_cleanup_pending_card_confirms_via_cleanup_verb():
     # The submit went to cleanup (mode=perceptual, confirm), NOT dedup.
     assert any(c[0] == "cleanup" and c[2].get("confirm") for c in fc.calls), fc.calls
     assert not any(c[0] == "dedup" for c in fc.calls), fc.calls
+
+
+# --- fix: [c] one-shot cleanup (exact/undecodable) must APPLY, not just preview ---
+def _open_cleanup_mode(mode_row: int):
+    """Drive to RootDetailScreen, open the [c] choice modal, pick `mode_row`."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _screen(app) == "RootDetailScreen"
+        await pilot.press("c")
+        await pilot.pause()
+        assert _screen(app) == "ChoiceModal"
+        for _ in range(mode_row):
+            await pilot.press("down")
+        await pilot.press("enter")               # pick the mode
+        await pilot.pause()
+        # One-shot modes open a typed-count ConfirmModal (preview count fetched).
+        assert _screen(app) == "ConfirmModal", _screen(app)
+        for ch in "3":                            # _FakeClient.cleanup_preview → count 3
+            await pilot.press(ch)
+        await pilot.press("enter")                # confirm the count → apply submit
+        await pilot.pause()
+    return scenario
+
+
+def test_cleanup_undecodable_submits_apply_not_just_preview():
+    """[c] → undecodable → count-confirm must submit a cleanup job with apply=True (the
+    delete), not merely the read-only preview (the reported bug: 'done' but nothing
+    deleted)."""
+    fc = _drive_online(_open_cleanup_mode(2))     # row 2 = undecodable
+    cleanups = [c for c in fc.calls if c[0] == "cleanup"]
+    assert cleanups, fc.calls
+    assert any(c[2].get("apply") and c[2].get("mode") == "undecodable" for c in cleanups), fc.calls
+    # the count was fetched from the daemon's read-only preview first
+    assert any(c[0] == "cleanup_preview" and c[2] == "undecodable" for c in fc.calls), fc.calls
+
+
+def test_cleanup_exact_refreshes_then_submits_apply():
+    """[c] → trash-exact: the TUI first runs the PREVIEW job (which refreshes the trash
+    collection, §6.1) + streams it to done, THEN count-confirms and submits apply=True —
+    mirroring the CLI so a freshly-dropped trash file is absorbed before deletion."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        await pilot.press("c")
+        await pilot.pause()
+        await pilot.press("enter")               # pick row 0 = trash-exact
+        # The exact flow spawns a worker (submit preview → stream → count → modal); wait
+        # for the count-confirm modal to appear (worker + call_from_thread).
+        for _ in range(20):
+            if _screen(app) == "ConfirmModal":
+                break
+            await pilot.pause(0.02)
+        assert _screen(app) == "ConfirmModal", _screen(app)
+        for ch in "3":
+            await pilot.press(ch)
+        await pilot.press("enter")               # confirm the count → apply
+        await pilot.pause()
+    fc = _drive_online(scenario)
+    # A preview submit (mode=exact, no apply) + its stream ran BEFORE the apply.
+    assert any(c[0] == "cleanup" and c[2].get("mode") == "exact" and not c[2].get("apply")
+               for c in fc.calls), fc.calls
+    assert any(c[0] == "stream_job" for c in fc.calls), fc.calls
+    # …and the apply job (mode=exact, apply=True) was submitted after the count-confirm.
+    assert any(c[0] == "cleanup" and c[2].get("apply") and c[2].get("mode") == "exact"
+               for c in fc.calls), fc.calls
+
+
+def test_cleanup_undecodable_count_mismatch_does_not_apply():
+    """A wrong typed count aborts — no apply job is submitted (the delete-set gate)."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        await pilot.press("c")
+        await pilot.pause()
+        await pilot.press("down"); await pilot.press("down")   # undecodable
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _screen(app) == "ConfirmModal"
+        for ch in "99":                            # wrong count (preview says 3)
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+    fc = _drive_online(scenario)
+    assert not any(c[0] == "cleanup" and c[2].get("apply") for c in fc.calls), fc.calls
+
+
+def test_cleanup_perceptual_still_bare_submits_analyze():
+    """The perceptual mode is unchanged: a bare analyze submit (no apply, no count)."""
+    fc = _drive_online(_press_seq(["r", "r", "enter", "c", "down", "enter"]))
+    cleanups = [c for c in fc.calls if c[0] == "cleanup"]
+    assert cleanups, fc.calls
+    assert cleanups[0][2].get("mode") == "perceptual"
+    assert not cleanups[0][2].get("apply"), fc.calls
 
 
 # --- a confirmed JobCard action returns to the previous interface (after toast) ---

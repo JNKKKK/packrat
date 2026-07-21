@@ -415,24 +415,42 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     - **cleanup-perceptual:** ``{exact, perceptual, network}`` — exact-trash matches
       (delete on confirm) + staged perceptual candidates.
 
-    ``network`` counts how many of the stage's candidate paths sit on a non-recyclable
-    network share (deleted PERMANENTLY, no Recycle Bin — §10), so the confirm surface
-    (CLI + TUI) can warn before an irreversible delete. It's an upper bound over every
-    candidate in the stage (the actual delete set depends on kept/removed shortcuts,
-    resolved at confirm), which is the safe direction for a warning.
+    ``network`` counts how many files in the stage's **default delete set** sit on a
+    non-recyclable network share (deleted PERMANENTLY, no Recycle Bin — §10), so the
+    confirm surface (CLI + TUI) warns before an irreversible delete. It keys off each
+    action's ``default_action`` — the fate of a file **if the user does nothing** — NOT
+    every candidate path:
+    - **default-DELETE** rows (stage-1 exact dups, cleanup exact-trash) → in the default
+      delete set → their network paths are counted.
+    - **default-KEEP** rows (stages 2/3 near-dups, cleanup perceptual) → kept by default,
+      so a run where the user changed nothing (e.g. stage 3, everything kept) reports
+      ``network=0`` — fixing the false "N deleted PERMANENTLY" over files the user is
+      *keeping* (the reported bug). Deleting one is the deliberate act of removing its
+      shortcut, resolved authoritatively at ``--confirm`` (which re-reads shortcut
+      presence and prints its own accurate permanent-delete summary, §8 B Phase 6).
+    We deliberately do **not** stat the on-disk shortcuts here: this is a read-only
+    snapshot polled by the TUI, and eager per-candidate stats (esp. over SMB) are exactly
+    what the lazy-liveness design avoids (§8 B). (For default-KEEP the default-set count is
+    a lower bound on what a confirm might delete; the authoritative, shortcut-accurate
+    warning is the confirm job.)
     """
     if stage is None:
         rows = conn.execute(
-            "SELECT kind, group_no, path FROM review_actions WHERE run_id=?", (run_id,)
+            "SELECT kind, group_no, path, default_action FROM review_actions WHERE run_id=?",
+            (run_id,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT kind, group_no, path FROM review_actions WHERE run_id=? AND stage=?",
+            "SELECT kind, group_no, path, default_action FROM review_actions "
+            "WHERE run_id=? AND stage=?",
             (run_id, stage),
         ).fetchall()
     from . import fsutil
 
-    network = sum(1 for r in rows if fsutil.is_network_path(r["path"]))
+    # Scope the permanent-delete warning to the DEFAULT delete set (default_action=
+    # 'delete') so a default-KEEP stage the user hasn't edited warns about nothing.
+    network = sum(1 for r in rows
+                  if r["default_action"] == "delete" and fsutil.is_network_path(r["path"]))
     if run_type == "dedup":
         exact = sum(1 for r in rows if r["kind"] == "exact")
         groups = {r["group_no"] for r in rows if r["kind"] == "perceptual" and r["group_no"] is not None}

@@ -93,7 +93,18 @@ def test_add_root_form_structural():
     assert "Register a new root" in built
     assert "(•) library" in built and "( ) trash" in built     # Kind radio
     assert "[x] scan immediately after registering" in built
+    # --full is a togglable checkbox (unchecked here); --embed is gone (deferred to M7).
+    assert "[ ] --full" in built
+    assert "--embed" not in built
     assert r"\\tubie_nas\Res-v2\NewPhone" in built             # the typed path
+
+
+def test_add_root_form_full_checked():
+    """The --full checkbox reflects the toggled-on state."""
+    built = screen("packrat · Roots · add",
+                   add_root_body(path=r"D:\x", scan=True, full=True), "daemon ● up",
+                   footer="Esc")
+    assert "[x] --full" in built
 
 
 # --- §3 / §4 / §5: fixed-size structural checks ----------------------------
@@ -138,6 +149,22 @@ def test_root_detail_pending_fits_and_shows_review():
     # A blank spacer row sits ABOVE the stats section too (below the top frame border).
     assert rows[mascot_top - 1].strip("│ ") == ""                      # the top spacer
     assert mascot_top == 2                                             # border(0) + spacer(1)
+
+
+def test_root_detail_cleanup_review_shows_real_counts():
+    """A pending cleanup --trash-perceptual review renders its ACTUAL exact/perceptual
+    counts, not a dedup-shaped '0 to delete (exact) · 0 groups / 0 members'. Regression:
+    the Review box read dedup-only count keys for every run_type."""
+    d = fixtures.root_detail_cleanup_pending()
+    built = screen(f"packrat · {d['name']}", detail_body(d, now=NOW, jobs=[fixtures.CLEANUP_PENDING]),
+                   detail_header_right(d), footer="Esc")
+    _fixed(built)
+    assert "cleanup — awaiting review (perceptual)" in built
+    assert "4 exact-trash (will delete)" in built
+    assert "11 perceptual candidate(s)" in built
+    # the false dedup-shaped line must NOT appear
+    assert "0 groups / 0 members" not in built
+    assert "stage 1 of 3" not in built          # single-stage cleanup, not the dedup 3-stage
 
 
 def test_root_detail_clean_fits_and_shows_no_review():

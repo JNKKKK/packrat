@@ -748,15 +748,36 @@ def test_add_root_tab_navigates_fields():
         assert _scr(app) == "AddRootScreen"
         assert app.screen._field == "path"          # starts on the path field
         order = []
-        for _ in range(4):
+        for _ in range(5):
             await pilot.press("tab")
             order.append(app.screen._field)
-        assert order == ["name", "kind", "scan", "path"], order   # wraps
+        assert order == ["name", "kind", "scan", "full", "path"], order   # 5 fields, wraps
         await pilot.press("shift+tab")
-        assert app.screen._field == "scan"          # backwards
+        assert app.screen._field == "full"          # backwards
         # the ▸ cursor is actually shown on the focused field's line
         await pilot.press("tab")                    # → path
         assert any("▸" in ln and "Path" in ln for ln in app.screen.current_frame.split("\n"))
+    _drive(scenario)
+
+
+def test_add_root_full_toggles_and_reaches_verb():
+    """[Space] on the --full field toggles it, and register surfaces `--full` in the verb.
+    (--embed is deferred to M7, so the form no longer offers it.)"""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("a")
+        # Tab to the --full field (path→name→kind→scan→full) and toggle it on.
+        for _ in range(4):
+            await pilot.press("tab")
+        assert app.screen._field == "full"
+        assert app.screen.full is False
+        await pilot.press("space")
+        assert app.screen.full is True
+        # register reflects --scan --full; --embed is never present.
+        await pilot.press("enter")
+        await pilot.pause()
+        t = _toast_text(app)
+        assert "--scan" in t and "--full" in t
+        assert "--embed" not in t
     _drive(scenario)
 
 
@@ -777,9 +798,11 @@ def test_add_root_space_toggles_and_typing_edits():
         assert app.screen.scan is True
         await pilot.press("space")
         assert app.screen.scan is False
-        # Tab to name, type + backspace
+        # Tab to name, type + backspace (cycle: scan→full→path→name)
+        await pilot.press("tab")            # full
         await pilot.press("tab")            # path
         await pilot.press("tab")            # name
+        assert app.screen._field == "name"
         before = app.screen.root_name
         await pilot.press("Z")
         assert app.screen.root_name == before + "Z"

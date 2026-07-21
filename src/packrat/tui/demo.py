@@ -374,10 +374,14 @@ def root_detail(name: str) -> dict | None:
     if r is None:
         return None
     pending = None
-    if name == "Photos":                       # the actionable pending-review case
+    if name == "Photos":                       # the actionable pending-review case (dedup)
         pending = {"id": 77, "run_type": "dedup", "stage": 2,
                    "created_at": "2026-07-15T08:00:00",
                    "counts": {"to_delete_exact": 240, "groups": 18, "members": 47}}
+    elif name == "Camera":                      # a pending cleanup --trash-perceptual review
+        pending = {"id": 88, "run_type": "cleanup-perceptual", "stage": 1,
+                   "created_at": "2026-07-15T11:40:00",
+                   "counts": {"exact": 4, "perceptual": 11, "network": 0}}
     # This root's slice of the backlog (with blocked reasons) → the Jobs panel's
     # Queued section; Photos has two waiting behind its pending review.
     queued = [dict(j) for j in QUEUED if j.get("root_id") == r["id"]]

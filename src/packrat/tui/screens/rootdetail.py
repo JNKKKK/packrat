@@ -287,10 +287,21 @@ def _review_lines(d: dict, *, focused: bool) -> list[str]:
                 "[b] confirm · keep suggested   [k] cancel run")
     else:
         hint = "[o] open in Explorer   [g] confirm stage   [k] cancel run"
+    # The counts dict is SHAPED BY run_type (queries._review_counts): dedup carries
+    # {to_delete_exact, groups, members}; cleanup-perceptual carries {exact, perceptual}.
+    # Branch like the CLI's _review_count_summary — reading dedup keys for a cleanup run
+    # rendered a false "0 to delete · 0 groups / 0 members" (the whole staged set as zero).
+    if run == "cleanup-perceptual":
+        header = f"{WARN} cleanup — awaiting review (perceptual)"
+        counts = (f"  {c.get('exact', 0)} exact-trash (will delete) · "
+                  f"{c.get('perceptual', 0)} perceptual candidate(s) (delete-default)")
+    else:
+        header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
+        counts = (f"  {c.get('to_delete_exact', 0)} to delete (exact) · "
+                  f"{c.get('groups', 0)} groups / {c.get('members', 0)} members (default-keep)")
     return [
-        f"{WARN} {run} — awaiting review (stage {stage} of 3)",
-        f"  {c.get('to_delete_exact', 0)} to delete (exact) · "
-        f"{c.get('groups', 0)} groups / {c.get('members', 0)} members (default-keep)",
+        header,
+        counts,
         f"  review: {d['path']}\\_packrat_review\\",
         _hints(hint, focused),
     ]

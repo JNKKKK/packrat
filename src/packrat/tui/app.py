@@ -486,6 +486,7 @@ class AddRootScreen(FrameScreen):
         self.root_name = ""
         self.kind = "library"     # toggled between library/trash on the Kind field
         self.scan = True          # toggled on the scan field
+        self.full = False         # --full re-hash, toggled on the full field
         self.field_idx = 0        # index into ADD_ROOT_FIELDS ([Tab] focus order)
 
     @property
@@ -497,7 +498,7 @@ class AddRootScreen(FrameScreen):
                   "[Enter] register   Esc cancel")
         geo = self._geo = self.geo_for(footer)
         body = add_root_body(path=self.path, name=self.root_name, kind=self.kind,
-                             scan=self.scan, focus_field=self._field, geo=geo)
+                             scan=self.scan, full=self.full, focus_field=self._field, geo=geo)
         return screen("packrat · Roots · add", body, self.app.header_right,
                       footer=footer, width=geo.w, height=geo.h)
 
@@ -511,12 +512,15 @@ class AddRootScreen(FrameScreen):
         self.refresh_frame()
 
     def action_toggle(self) -> None:
-        """[Space] toggles the focused choice field (Kind radio / scan checkbox)."""
+        """[Space] toggles the focused choice field (Kind radio / scan|full checkbox)."""
         if self._field == "kind":
             self.kind = "trash" if self.kind == "library" else "library"
             self.refresh_frame()
         elif self._field == "scan":
             self.scan = not self.scan
+            self.refresh_frame()
+        elif self._field == "full":
+            self.full = not self.full
             self.refresh_frame()
         # a text field's space is handled by on_key (below), not a toggle.
 
@@ -562,23 +566,41 @@ class AddRootScreen(FrameScreen):
             self.root_name += text
         self.refresh_frame()
 
+    def _back(self) -> None:
+        """Pop the form back to the Roots interface that opened it.
+
+        Fired via ``run_verb(then=…)`` right after the register toast is posted, so
+        pressing [Enter] returns the user to the previous page instead of leaving them
+        on a now-submitted form (matching JobCard's back-after-action behavior, §5).
+        Guarded on ``is_active`` + a non-empty stack so a bubbled key can't pop the
+        wrong screen."""
+        if self.is_active and self.app.screen_stack:
+            self.app.pop_screen()
+
     def action_register(self) -> None:
         parts = [f"packrat roots register {self.path}"]
         if self.root_name:
             parts.append(f"--name {self.root_name}")
+        # --full only makes sense with a scan of a library root; a trash root is never
+        # scanned, so scan/full drop out for it (mirrors the CLI + the form's own note).
+        do_scan = self.scan and self.kind == "library"
         if self.kind == "trash":
             parts.append("--kind trash")
         elif self.scan:
             parts.append("--scan")
-        path, name, kind, scan = self.path, self.root_name, self.kind, self.scan
+            if self.full:
+                parts.append("--full")
+        path, name, kind, full = self.path, self.root_name, self.kind, self.full
 
         def submit():
             # register_root returns {root, job_id}; report the scan job id if any.
             resp = self.app.client.register_root(
-                path, name=name or None, kind=kind, scan=(scan and kind == "library"))
+                path, name=name or None, kind=kind,
+                scan=do_scan, full=(full and do_scan))
             return resp.get("job_id")
 
-        self.app.run_verb(" ".join(parts), title="register root", submit=submit)
+        self.app.run_verb(" ".join(parts), title="register root", submit=submit,
+                          then=self._back)
 
 
 # ---------------------------------------------------------------------------
@@ -961,10 +983,121 @@ class RootDetailScreen(FrameScreen):
             flag = self.CLEANUP_MODES[idx][1]
             mode = {"--trash-exact": "exact", "--trash-perceptual": "perceptual",
                     "--undecodable": "undecodable"}[flag]
-            self.app.run_verb(f"packrat cleanup {root} {flag}", title="clean up",
-                              submit=lambda: self.app.client.submit_cleanup(root, mode=mode))
+            cmd = f"packrat cleanup {root} {flag}"
+            if mode == "perceptual":
+                # Stateful analyze → pause: the bare submit IS the real step; the user
+                # reviews staging and then confirms via the Review box's [g] (§6.2). No
+                # count-confirm here — perceptual matches stage for review, not a tally.
+                self.app.run_verb(cmd, title="clean up",
+                                  submit=lambda: self.app.client.submit_cleanup(root, mode=mode))
+            else:
+                # One-shot modes (exact / undecodable): a bare submit only PREVIEWS
+                # (counts + logs, deletes nothing — cleanup.py `_preview`). The delete
+                # happens on a SECOND job with `apply=True`, gated by a typed count
+                # confirmation — mirroring the CLI's preview → confirm → apply flow.
+                self._cleanup_one_shot(root, mode, cmd)
 
         self.app.push_screen(ChoiceModal(options, title=f"clean up {root}"), after)
+
+    @staticmethod
+    def _cleanup_what(mode: str) -> str:
+        return "undecodable file(s)" if mode == "undecodable" else "file(s) matching trashed content"
+
+    def _cleanup_one_shot(self, root: str, mode: str, cmd: str) -> None:
+        """Count-confirm → apply for a one-shot cleanup mode (exact / undecodable, §6.2).
+
+        A bare ``submit_cleanup`` for these modes runs only the read-only preview leaf
+        (it logs "would delete … Nothing deleted"), so the TUI must — like the CLI —
+        fetch the count, require a typed count-confirmation (with the §10 network
+        permanent-delete warning), and then submit the real ``apply=True`` job.
+
+        **Exact mode refreshes the trash collection first** (§6.1), exactly like the CLI:
+        a freshly-dropped trash-folder file must be absorbed into the trashed set *before*
+        we count/delete its library re-appearances, or the TUI would silently delete fewer
+        files than the same CLI command. That refresh runs inside a daemon PREVIEW job, so
+        we stream it to completion off the UI thread, then count over the now-current set
+        (:meth:`_cleanup_exact_refresh_then_confirm`). **Undecodable mode never refreshes**
+        (it targets the folder's own undecodables, independent of the trashed set — §9.1),
+        so it counts directly. **Offline** (demo, no daemon) degrades to a plain y/n confirm.
+        """
+        if self.app.offline:
+            note = " (their assets are marked trashed)" if mode == "undecodable" else ""
+            self.app.confirm_verb(
+                f"Delete the matching {self._cleanup_what(mode)} in {root}?{note} "
+                f"They move to the Recycle Bin.",
+                cmd, count=None, network=0,
+                submit=lambda: self.app.client.submit_cleanup(root, mode=mode, apply=True))
+            return
+        if mode == "exact":
+            self.app.notify(f"{cmd}\nrefreshing the trash collection, then counting…",
+                            title="clean up", severity="information")
+            self._cleanup_exact_refresh_then_confirm(root, cmd)
+            return
+        # undecodable: no trash refresh → a read-only count is already current.
+        prev = self._fetch_cleanup_preview(root, "undecodable", cmd)
+        if prev is not None:
+            self._offer_cleanup_delete(root, "undecodable", cmd, prev)
+
+    def _fetch_cleanup_preview(self, root: str, mode: str, cmd: str) -> dict | None:
+        """Read the daemon's read-only ``/cleanup/preview`` count; toast + None on failure."""
+        try:
+            return self.app.client.cleanup_preview(root, mode=mode)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a toast, never crash
+            self.app.notify(f"{cmd}\ncouldn't count files to delete: {exc}",
+                            title="clean up", severity="error")
+            return None
+
+    def _offer_cleanup_delete(self, root: str, mode: str, cmd: str, prev: dict) -> None:
+        """Open the typed count-confirm for a one-shot cleanup (or a 'nothing to delete' toast).
+
+        Called on the UI thread — directly for undecodable, via ``call_from_thread`` from
+        the exact-mode refresh worker. ``prev`` is the ``/cleanup/preview`` dict (count +
+        network) read AFTER any refresh, so the count matches what ``apply`` will delete."""
+        count = int(prev.get("count", 0))
+        network = int(prev.get("network", 0))
+        what = self._cleanup_what(mode)
+        if count == 0:
+            self.app.notify(f"{cmd}\nno {what} — nothing to delete.",
+                            title="clean up", severity="information")
+            return
+        note = " (their assets are marked trashed)" if mode == "undecodable" else ""
+        self.app.confirm_verb(
+            f"Delete {count} {what} in {root}?{note} They move to the Recycle Bin.",
+            cmd, count=count, network=network,
+            submit=lambda: self.app.client.submit_cleanup(root, mode=mode, apply=True))
+
+    @work(thread=True, exclusive=True, group="cleanup-preview")
+    def _cleanup_exact_refresh_then_confirm(self, root: str, cmd: str) -> None:
+        """Run the exact-cleanup PREVIEW job (which refreshes trash, §6.1), wait for it to
+        finish, then read the now-current count + open the confirm — all off the UI thread.
+
+        The preview job's ``_preview`` leaf refreshes-and-empties the trash roots and
+        commits before it reports, so by the time its SSE stream reaches a terminal event
+        the refreshed trashed set is durable; the follow-up ``cleanup_preview`` GET then
+        counts over it. A dropped/absent stream just falls through to the count (safe —
+        the worst case is a slightly stale count, same as before this fix)."""
+        try:
+            job_id = self.app.client.submit_cleanup(root, mode="exact")   # preview → refresh
+            try:
+                for ev in self.app.client.stream_job(job_id):
+                    if ev.get("type") in ("done", "error") or ev.get("status") in (
+                            "done", "error", "cancelled", "interrupted"):
+                        break
+            except Exception:  # noqa: BLE001 - dropped stream → just count what we have
+                pass
+            prev = self.app.client.cleanup_preview(root, mode="exact")
+        except Exception as exc:  # noqa: BLE001 - report, never crash the worker
+            try:
+                self.app.call_from_thread(
+                    self.app.notify, f"{cmd}\ncouldn't refresh/count: {exc}",
+                    title="clean up", severity="error")
+            except Exception:
+                pass
+            return
+        try:
+            self.app.call_from_thread(self._offer_cleanup_delete, root, "exact", cmd, prev)
+        except Exception:
+            pass   # app tearing down
 
     def _has_review(self) -> bool:
         return bool(self._detail and self._detail.get("pending_review"))

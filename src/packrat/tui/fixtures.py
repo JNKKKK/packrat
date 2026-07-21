@@ -323,3 +323,29 @@ def root_detail_clean() -> dict:
         "undecodable_current": 0,
         "problem_files": [],
     }
+
+
+def root_detail_cleanup_pending() -> dict:
+    """Photos with a pending ``cleanup --trash-perceptual`` review (§6.2).
+
+    Its ``counts`` carry the CLEANUP shape (``{exact, perceptual, network}``), NOT the
+    dedup shape — so the Review box must branch on ``run_type`` to render real numbers
+    (regression: it read dedup keys → a false "0 to delete · 0 groups / 0 members")."""
+    return {
+        "id": 3, "name": "Photos", "path": r"E:\Photos2", "kind": "library",
+        "enabled": 1, "last_full_scan_at": "2026-07-14T20:00:00",
+        "last_scan_at": "2026-07-15T09:00:00",
+        "photos": 8600, "videos": 300, "instances": 8900,
+        "size_bytes": 41_300_000_000,
+        "pending_review": {
+            "id": 88, "run_type": "cleanup-perceptual", "stage": 1,
+            "created_at": "2026-07-15T11:40:00",
+            "counts": {"exact": 4, "perceptual": 11, "network": 4},
+        },
+        "last_dedup_at": None, "last_cleanup_at": None,
+        "running_job": None,
+        "queued_jobs": [],
+        "last_scan": None,
+        "undecodable_current": 0,
+        "problem_files": [],
+    }

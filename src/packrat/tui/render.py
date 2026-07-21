@@ -113,6 +113,13 @@ def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None
 
 
 # --- StatusDot / RootRow (§1, §2) -----------------------------------------
+# The root NAME column width, shared by both row renderers (dashboard Roots box +
+# the maximized Roots interface). The name is a root's primary human handle (§8 A1),
+# so it gets the generous fixed space and the path — a grow cell — absorbs whatever
+# is left; widening this directly trades path width for name width.
+NAME_W = 24
+
+
 def root_dot(r: dict) -> str:
     """The ◉/◐/○ (or blank for trash) freshness dot for a root row."""
     return tokens.status_dot(r["kind"], r.get("last_scan_at"), r.get("last_dedup_at"))
@@ -135,7 +142,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
         width,
         [
             Cell(cur, width=1, style="highlighted" if selected else None),
-            Cell(r["name"], width=16),
+            Cell(r["name"], width=NAME_W),
             Cell(r["path"], grow=1, elide="middle"),   # absorbs the middle
             Cell(dot, width=1, style=_dot_style(dot)),
             Cell(count, width=7, align="right", style="dim" if r["kind"] == "trash" else None),
@@ -175,7 +182,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False, path_w: int = 20
         width,
         [
             Cell(cur, width=1, style="highlighted" if selected else None),
-            Cell(r["name"], width=16),
+            Cell(r["name"], width=NAME_W),
             Cell(r["path"], grow=1, elide="middle"),    # absorbs the middle
             dot_cell,
             count_cell,

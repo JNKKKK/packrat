@@ -287,6 +287,36 @@ def test_review_counts_reports_network_delete_set(seeded):
         database.close()
 
 
+def test_review_counts_network_zero_when_stage_defaults_to_keep(seeded):
+    """A default-KEEP stage (dedup stage 2/3, near-dups) reports network=0 when the user
+    changes nothing — the permanent-delete warning must NOT fire over files that are kept
+    by default. Regression: confirming stage 3 with everything kept still warned
+    '⚠ N on a network share — deleted PERMANENTLY' over the KEPT network files."""
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+            "VALUES (?, 'dedup', 'pending', 3, 'staged', '2026-07-20T00:00:00')", (rid,)
+        ).lastrowid
+        # Stage-3 (minor-edits) perceptual candidates, default KEEP, on a UNC share.
+        for i, path in enumerate((r"\\nas\photos\edit1.jpg", r"\\nas\photos\edit2.jpg")):
+            database.execute(
+                "INSERT INTO review_actions(run_id, stage, folder, kind, reason, "
+                "default_action, asset_id, instance_id, path, group_no, member_no, shortcut_name) "
+                "VALUES (?, 3, 'with_minor_edits', 'perceptual', 'perceptual', 'keep', "
+                "1, 1, ?, 1, ?, ?)", (run_id, path, i + 1, f"group0001_{i+1:04d}.lnk"),
+            )
+        d = queries.root_detail(queries.roots_snapshot()[0]["name"])
+        counts = d["pending_review"]["counts"]
+        assert counts["members"] == 2 and counts["groups"] == 1
+        # Kept-by-default network files must NOT be counted as permanent deletions.
+        assert counts["network"] == 0
+    finally:
+        database.close()
+
+
 def test_status_snapshot_assets_total_reconciles_with_split(seeded):
     """The headline `assets` total = photos + videos (ACTIVE), so it reconciles with the
     split shown beside it; trashed assets are counted separately, not folded in."""

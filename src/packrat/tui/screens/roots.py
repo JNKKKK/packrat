@@ -44,7 +44,7 @@ def roots_body(roots: list[dict], *, now: str, geo: Geometry = REFERENCE,
 
 
 def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
-                  scan: bool = True, full: bool = False, embed: bool = False,
+                  scan: bool = True, full: bool = False,
                   focus_field: str = "path", error: str | None = None,
                   geo: Geometry = REFERENCE) -> list[str]:
     """The §2.2 add-root (register) form body.
@@ -54,6 +54,10 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
     navigation is visible; an inline ``error`` (a ``RootError``) shows under the
     path (component-plan: validate inline on Enter). The form fields are fixed-width;
     only the rule line spans ``geo``'s content width.
+
+    ``--embed`` is intentionally NOT offered — the embedding pass is deferred to M7
+    (a plain scan writes no embeddings), so the form exposes only the flags that do
+    something today: ``scan`` and its ``--full`` re-hash. Both are togglable fields.
     """
     def radio(on: bool) -> str:
         return "(•)" if on else "( )"
@@ -93,13 +97,16 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
         f"  Kind   {cur('kind')}{radio(kind == 'library')} library    {radio(kind == 'trash')} trash",
         "",
         # scan line has no label; the marker replaces the leading 2-space indent.
-        f"{cur('scan')}{check(scan)} scan immediately after registering   "
-        f"{radio(full)} --full   {radio(embed)} --embed",
+        f"{cur('scan')}{check(scan)} scan immediately after registering",
+        # --full is its own focusable checkbox, left-aligned WITH the scan line (marker at
+        # col 0, checkbox at col 2) so the two stack as a clean two-item list.
+        f"{cur('full')}{check(full)} --full  (re-hash every file, not just new/changed)",
         "",
-        "  ‹trash roots are never scanned; --full/--embed apply only with scan›",
+        "  ‹trash roots are never scanned; --full applies only with scan›",
     ]
     return lines
 
 
-# The [Tab] focus order across the add-root form fields (§2.2).
-ADD_ROOT_FIELDS = ("path", "name", "kind", "scan")
+# The [Tab] focus order across the add-root form fields (§2.2). `--embed` is omitted —
+# the embedding pass is deferred (M7), so the form only offers flags that do something.
+ADD_ROOT_FIELDS = ("path", "name", "kind", "scan", "full")
