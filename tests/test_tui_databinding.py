@@ -259,6 +259,34 @@ def test_review_card_bodies_reflect_reconciled_state(seeded, packrat_home):
         database.close()
 
 
+def test_review_counts_reports_network_delete_set(seeded):
+    """The pending review's counts carry a `network` tally (files on a non-recyclable
+    share, deleted PERMANENTLY — §10) so the confirm surface can warn. Regression: the
+    TUI confirm never surfaced the permanent-delete warning."""
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+            "VALUES (?, 'dedup', 'pending', 1, 'staged', '2026-07-20T00:00:00')", (rid,)
+        ).lastrowid
+        # Two stage-1 exact-delete candidates: one on a UNC share, one local.
+        for path in (r"\\nas\photos\dup.jpg", r"C:\photos\dup2.jpg"):
+            database.execute(
+                "INSERT INTO review_actions(run_id, stage, folder, kind, reason, "
+                "default_action, asset_id, instance_id, path, shortcut_name) "
+                "VALUES (?, 1, 'exact_dup_to_delete', 'exact', 'exact-external', 'delete', "
+                "1, 1, ?, 'g0001_0001.lnk')", (run_id, path),
+            )
+        d = queries.root_detail(queries.roots_snapshot()[0]["name"])
+        counts = d["pending_review"]["counts"]
+        assert counts["to_delete_exact"] == 2
+        assert counts["network"] == 1              # only the \\nas UNC path counts
+    finally:
+        database.close()
+
+
 def test_status_snapshot_binds_to_dashboard(seeded):
     snap = queries.status_snapshot()
     frame = screen("packrat", dashboard_body(snap, now=NOW),

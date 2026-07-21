@@ -367,6 +367,7 @@ def roots_register(
     if job_id and not detach:
         final = stream_job(client, job_id, label="scan")
         typer.echo(f"scan {final}")
+        _exit_if_failed(final)
     elif job_id:
         typer.echo("  scan running in the daemon — `packrat jobs` to check.")
 
@@ -498,6 +499,7 @@ def scan(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +551,7 @@ def dedup(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +591,7 @@ def merge(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +662,7 @@ def cleanup(
         if json_out:
             import json
             typer.echo(json.dumps(client.get_job(job_id), indent=2))
+        _exit_if_failed(final)
         return
 
     # One-shot modes (exact / undecodable): preview (count) → typed confirm → apply.
@@ -693,6 +698,7 @@ def cleanup(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(apply_job), indent=2))
+    _exit_if_failed(final)
 
 
 def _mode_flag(mode: str) -> str:
@@ -730,6 +736,7 @@ def trash_refresh(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------
@@ -762,6 +769,7 @@ def untrash(
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------
@@ -868,9 +876,30 @@ def _detail(exc: DaemonError) -> str:
     try:
         import json
         _code, _, body = msg.partition(": ")
-        return json.loads(body).get("detail", msg)
+        parsed = json.loads(body)
+        # A well-formed FastAPI error body is {"detail": …}; tolerate a list/str/other
+        # JSON body (would otherwise AttributeError on .get) by falling back to the raw.
+        return parsed.get("detail", msg) if isinstance(parsed, dict) else msg
     except (ValueError, TypeError):
         return msg
+
+
+#: Streamed-job terminal statuses that mean the work did NOT succeed. `detached` (a
+#: Ctrl-C view detach — the job keeps running) is deliberately EXCLUDED: it's not a
+#: failure, so it stays exit 0.
+_FAILED_STATUSES = {"error", "cancelled", "interrupted"}
+
+
+def _exit_if_failed(final: str) -> None:
+    """Exit non-zero when a streamed job ended in a non-success terminal state (§11).
+
+    ``stream_job`` returns the durable terminal status; a mutating command must
+    propagate a failed/cancelled/interrupted job as a non-zero exit so scripts and CI
+    (``packrat scan && packrat dedup``) don't treat a failed job as success. A clean
+    Ctrl-C ``detached`` and a ``done`` both stay exit 0.
+    """
+    if final in _FAILED_STATUSES:
+        raise typer.Exit(1)
 
 
 def _review_verb(pr: dict) -> str:

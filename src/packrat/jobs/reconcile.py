@@ -91,8 +91,14 @@ def reconcile_on_startup(db: Database) -> dict:
         if job["type"] not in ("dedup", "cleanup"):
             continue
         params = _params(job["params_json"])
-        if params.get("confirm") or params.get("cancel"):
-            continue  # not an analyze — leave the pending run for a re-run
+        # Only an interrupted *analyze* rolls back its own half-built staging. A
+        # confirm/cancel job owns no fresh staging (leave its pending run for a
+        # --confirm re-run), and a DRY-RUN owns NOTHING — it opens no review_run and
+        # touches no staging (§8 B). Critically, dry-run does NOT acquire the root
+        # (owned_root→None), so it can legitimately run while a REAL review is pending
+        # on that root; rolling back here would destroy that unrelated review's staging.
+        if params.get("confirm") or params.get("cancel") or params.get("dry_run"):
+            continue
         rolled = _rollback_analyze(db, params.get("root_id"))
         summary["rolled_back_runs"].extend(rolled)
 

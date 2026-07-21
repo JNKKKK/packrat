@@ -16,10 +16,13 @@ Endpoints (all under token auth except ``/health``):
 - ``POST /merge``             — resolve ``--into`` + submit a merge job (§8 C).
 - ``POST /shutdown``          — graceful stop (§11 ``daemon stop``).
 
-The app is built by :func:`build_app`, which wires the DB, config, queue, and runs
-startup reconciliation *before* serving (§3). :func:`run_daemon` binds the fixed
-loopback port — the bind itself is the single-instance lock of the auto-spawn
-handshake (§3): if the port is taken, another daemon already won.
+:func:`run_daemon` binds the fixed loopback port **first** — the bind is the
+single-instance lock of the auto-spawn handshake (§3): if the port is taken, another
+daemon already won and this process exits immediately having touched no shared state.
+Only *after* winning the bind does it build the app (:func:`build_app` wires the DB,
+config, queue, and runs startup reconciliation) and write the token — so a losing
+daemon in a spawn race can never corrupt the winner's in-flight job or clobber its
+token.
 """
 
 from __future__ import annotations
@@ -27,6 +30,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue as _queue
+
+#: How often the SSE stream wakes to heartbeat / re-check terminal state (seconds).
+#: Bounds how long a still-running-but-quiet stream holds an executor thread between
+#: liveness checks; also the max lag before a dropped sentinel is noticed.
+_SSE_HEARTBEAT_S = 15.0
 
 from .. import __version__, build as build_mod, config as config_mod, db as db_mod, paths, queries
 from ..jobs import JobQueue
@@ -213,7 +222,21 @@ def build_app(token: str, *, db_file=None, config_path=None):
                             "blocked": holder})
             try:
                 while True:
-                    ev = await loop.run_in_executor(None, sub.q.get)
+                    # Poll with a timeout rather than block forever: a timed `get` lets
+                    # us (a) emit a periodic heartbeat comment so a dead/half-open client
+                    # is detected (the yield raises when the peer is gone → `finally`
+                    # unsubscribes and frees this executor thread), and (b) never leak the
+                    # executor thread even if the sentinel is dropped (a full slow-client
+                    # queue) — the loop re-checks the job's terminal state each tick.
+                    try:
+                        ev = await loop.run_in_executor(
+                            None, lambda: sub.q.get(timeout=_SSE_HEARTBEAT_S))
+                    except _queue.Empty:
+                        current = queries.job_detail(job_id)
+                        if current and current["status"] not in ("running", "queued"):
+                            break  # job ended but our sentinel was dropped — stop cleanly
+                        yield ": keepalive\n\n"   # SSE comment; raises if the client is gone
+                        continue
                     if ev is None:  # sentinel: job finished, subscribers closed
                         break
                     yield _sse(ev.to_dict())
@@ -448,53 +471,89 @@ def _stop_server(app):
         server.should_exit = True
 
 
+def _bind_single_instance(port: int):
+    r"""Acquire the single-instance lock by binding the fixed loopback port (§3).
+
+    Returns the bound+listening socket, or ``None`` if the port is already taken
+    (another daemon won the auto-spawn race — the caller exits without touching any
+    shared state). This is the RACE GATE: binding must happen **before** any
+    destructive startup work (reconciliation, queue pump, token/state write), so a
+    losing daemon can never flip the winner's running job to interrupted, roll back
+    its staging, or clobber its token. We bind here rather than letting uvicorn bind
+    inside ``server.run`` precisely so the lock is held before ``build_app`` runs.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # NOTE: deliberately NO SO_REUSEADDR — we WANT a second bind on the same port to
+    # fail so the loser detects the winner (SO_REUSEADDR on Windows would let both
+    # bind and break the single-instance guarantee).
+    try:
+        sock.bind((HOST, port))
+        sock.listen()
+    except OSError as exc:
+        log.info("could not bind %s:%d (%s) — another daemon likely won", HOST, port, exc)
+        sock.close()
+        return None
+    return sock
+
+
 def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> int:
     """Run the daemon in the foreground (the detached process's entrypoint).
 
-    Binds the loopback port (single-instance lock). Writes the token *before*
-    accepting requests, then the daemon-state file. Returns a process exit code.
+    Order matters for the auto-spawn race (§3): **bind the loopback port FIRST**
+    (the single-instance lock), and only then do any startup work — reconciliation,
+    the queue pump, and the token/state write. A daemon that loses the bind exits
+    immediately (code 3) having touched no shared state, so it can never corrupt the
+    winner's in-flight job or clobber its token. Returns a process exit code.
     """
     import uvicorn
 
-    # 1. Generate + write the token BEFORE we start serving (§3 handshake).
-    token = token_mod.generate_token()
-
-    app = build_app(token, db_file=db_file, config_path=config_path)
-
-    # log_config=None: don't let uvicorn install its own handlers. Its loggers
-    # then propagate to the root logger, whose date-rotating handler
-    # (packrat.daemon.__main__._setup_logging) owns daemon.log — so access/error
-    # lines land in the same midnight-rotated file as packrat's own logs.
-    config = uvicorn.Config(
-        app, host=HOST, port=port, log_level="info", loop="asyncio", log_config=None
-    )
-    server = uvicorn.Server(config)
-    app.state._uvicorn_server = server
-
-    # uvicorn binds the socket in server.run(); if the port is taken, another
-    # daemon already won the race — we exit non-zero and the client connects to
-    # the winner (§3 bind-or-connect). Write token/state only after a successful
-    # bind, via the lifespan startup hook below.
-    @app.on_event("startup")
-    def _on_start():
-        token_mod.write_token(token, paths.token_path())
-        current_state().write()
-        log.info("packrat daemon up on %s:%d (pid=%d)", HOST, port, current_state().pid)
-
-    @app.on_event("shutdown")
-    def _on_stop():
-        clear_state()
-        # Signal a running job to checkpoint and join it before closing the DB.
-        # Its row is reconciled to 'interrupted' on next start (§3 clean-stop).
-        app.state.queue.shutdown()
-        app.state.db.close()
-        log.info("packrat daemon stopped")
+    # 1. RACE GATE: bind the port before anything destructive (§3). Loser → exit.
+    lock_sock = _bind_single_instance(port)
+    if lock_sock is None:
+        return 3
 
     try:
-        server.run()
-    except OSError as exc:
-        # Address already in use → a daemon already owns the port. Not an error
-        # from the user's perspective; the client will connect to the winner.
-        log.info("could not bind %s:%d (%s) — another daemon likely won", HOST, port, exc)
-        return 3
+        # 2. Now that we hold the lock, generate the token and build the app
+        #    (reconciliation + queue pump run inside build_app — safe post-lock).
+        token = token_mod.generate_token()
+        app = build_app(token, db_file=db_file, config_path=config_path)
+
+        # log_config=None: don't let uvicorn install its own handlers. Its loggers
+        # then propagate to the root logger, whose date-rotating handler
+        # (packrat.daemon.__main__._setup_logging) owns daemon.log — so access/error
+        # lines land in the same midnight-rotated file as packrat's own logs.
+        config = uvicorn.Config(
+            app, host=HOST, port=port, log_level="info", loop="asyncio", log_config=None
+        )
+        server = uvicorn.Server(config)
+        app.state._uvicorn_server = server
+
+        # We already hold the lock, so token/state can be written up front — but keep
+        # it in the lifespan hook so it's torn down symmetrically by _on_stop. Since
+        # the port is ours, this hook can no longer race a second daemon.
+        @app.on_event("startup")
+        def _on_start():
+            token_mod.write_token(token, paths.token_path())
+            current_state().write()
+            log.info("packrat daemon up on %s:%d (pid=%d)", HOST, port, current_state().pid)
+
+        @app.on_event("shutdown")
+        def _on_stop():
+            clear_state()
+            # Signal a running job to checkpoint and join it before closing the DB.
+            # Its row is reconciled to 'interrupted' on next start (§3 clean-stop).
+            app.state.queue.shutdown()
+            app.state.db.close()
+            log.info("packrat daemon stopped")
+
+        # Hand uvicorn our pre-bound listening socket so it does NOT bind again
+        # (Server.run(sockets=[...]) → startup(sockets=...) skips create_server).
+        server.run(sockets=[lock_sock])
+    finally:
+        try:
+            lock_sock.close()
+        except OSError:
+            pass
     return 0

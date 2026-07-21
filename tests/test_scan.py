@@ -303,6 +303,55 @@ def test_enumeration_prunes_and_suppresses_ignored_subtree(tmp_path):
     assert not en.is_suppressed(str(lib / "a.png"))
 
 
+def test_enumeration_per_entry_error_suppresses_subtree(tmp_path, monkeypatch):
+    # A per-entry stat()/is_dir() OSError (a NAS blip, §10.1) must SUPPRESS the
+    # containing directory so deletion-detection can't read the unreadable file as
+    # "deleted" and forget its fingerprints. (Regression: a bare `continue` left the
+    # file neither enumerated nor suppressed → silently forgotten.)
+    from packrat.config import Config
+    from packrat.ignore import IgnoreSet
+    from packrat.jobs import scan as scan_mod
+    from packrat.jobs.scan import enumerate_root
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    import numpy as np
+    from PIL import Image
+
+    Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(lib / "a.png")
+
+    real_scandir = os.scandir
+
+    class _BadStat:
+        """A DirEntry-like wrapper whose stat() raises, else delegates."""
+
+        def __init__(self, entry):
+            self._e = entry
+            self.name = entry.name
+
+        def is_dir(self, *, follow_symlinks=True):
+            return self._e.is_dir(follow_symlinks=follow_symlinks)
+
+        def stat(self, *, follow_symlinks=True):
+            raise OSError("simulated NAS stat timeout")
+
+    class _CM:
+        def __init__(self, path):
+            self._it = list(real_scandir(path))
+
+        def __enter__(self):
+            return [_BadStat(e) if e.name == "a.png" else e for e in self._it]
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(scan_mod.os, "scandir", lambda p: _CM(p))
+    ignore = IgnoreSet.build(Config(), [])
+    en = enumerate_root(str(lib), ignore)
+    assert not en.candidates                      # a.png couldn't be stat'd → not a candidate
+    assert en.is_suppressed(str(lib / "a.png"))   # but its subtree is suppressed (not forgotten)
+
+
 def test_scan_dry_run_writes_nothing(queue_and_db, tiny_photos):
     q, database = queue_and_db
     root = register(database, str(tiny_photos))

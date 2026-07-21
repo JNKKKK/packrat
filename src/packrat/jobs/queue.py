@@ -83,6 +83,11 @@ class JobQueue:
         self._worker: threading.Thread | None = None
         self._subscribers: dict[int, list[_Subscriber]] = {}
         self._sub_lock = threading.Lock()
+        # Set by shutdown() so the worker's cancel-checkpoint lands the job
+        # 'interrupted' (resumable) rather than 'cancelled' (terminal) — a clean
+        # `daemon stop` is a resumable interruption, NOT a cancel (§3). It also
+        # stops _pump from launching new work into the teardown.
+        self._stopping = False
 
     # -- submission ------------------------------------------------------
     def submit(self, job_type: str, params: dict) -> int:
@@ -130,6 +135,12 @@ class JobQueue:
         and on startup. A no-op while a job is already running (the finishing job re-pumps).
         """
         with self._lock:
+            if self._stopping:
+                # Tearing down: don't launch new work into the shutdown race (a fresh
+                # worker wouldn't be joined by shutdown(), and a queued destructive
+                # --confirm must never auto-run unattended — §3). The pump-on-finish
+                # from the current job's teardown reaches here and correctly no-ops.
+                return
             if self._running_job_id is not None:
                 return
             queued = self._safe_query(
@@ -166,7 +177,7 @@ class JobQueue:
 
         Caller holds ``self._lock``.
         """
-        self.db.execute(
+        self._safe_write(
             "UPDATE jobs SET status='running', started_at=? WHERE id=?",
             (now_iso(), job_id),
         )
@@ -218,9 +229,19 @@ class JobQueue:
         try:
             spec.handler(ctx)
         except CancelledError:
-            log.info("job %d cancelled", job_id)
-            self._finish(job_id, "cancelled", error=None, result=ctx.result)
-            self._broadcast(ProgressEvent(job_id, "state", status="cancelled"))
+            # A CancelledError raised because the daemon is STOPPING is a resumable
+            # interruption, not a user cancel (§3): land it 'interrupted' so a merge/
+            # dedup keeps its resumable plan. A genuine user cancel (not stopping) is
+            # terminal 'cancelled' and discards the plan.
+            if self._stopping:
+                log.info("job %d interrupted by daemon stop (resumable)", job_id)
+                self._finish(job_id, "interrupted", error="daemon stopped",
+                             result=ctx.result)
+                self._broadcast(ProgressEvent(job_id, "state", status="interrupted"))
+            else:
+                log.info("job %d cancelled", job_id)
+                self._finish(job_id, "cancelled", error=None, result=ctx.result)
+                self._broadcast(ProgressEvent(job_id, "state", status="cancelled"))
         except Exception as exc:  # noqa: BLE001 - jobs must never crash the daemon
             log.exception("job %d failed", job_id)
             self._finish(job_id, "error", error=str(exc), result=ctx.result)
@@ -365,12 +386,18 @@ class JobQueue:
             return len(rows)
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
-        """Cancel any running job and join the worker (clean daemon/test teardown).
+        """Signal the running job to checkpoint and join the worker (clean teardown).
 
-        A graceful ``daemon stop`` signals cancel and lets the worker checkpoint;
-        the resulting row is reconciled to ``interrupted`` on next start (§3).
+        A graceful ``daemon stop`` is a **resumable interruption, not a cancel** (§3):
+        we set ``_stopping`` *before* signalling the shared cancel event, so when the
+        worker's checkpoint raises ``CancelledError`` it lands the job ``interrupted``
+        (resumable — a merge/dedup keeps its plan), never ``cancelled`` (which would
+        discard it). ``_stopping`` also makes ``_pump`` a no-op so no new work starts
+        into the teardown. A job that doesn't checkpoint within ``timeout`` is left
+        ``running`` and reconciled to ``interrupted`` on next start — same outcome.
         """
         with self._lock:
+            self._stopping = True
             if self._cancel_event is not None:
                 self._cancel_event.set()
             worker = self._worker
@@ -432,6 +459,12 @@ class JobQueue:
                 subs.remove(sub)
                 if not subs:
                     self._subscribers.pop(sub.job_id, None)
+        # Wake any thread blocked in this sub's `q.get()` (the SSE reader's executor
+        # thread) — once unsubscribed, the job-end `_close_subscribers` will never see
+        # this sub to push the sentinel, so we must push it here or that thread leaks
+        # forever (a mid-stream disconnect of a still-running job). Idempotent: the
+        # bounded queue drops a second sentinel via `push`/`close`'s Full guard.
+        sub.close()
 
     def _broadcast(self, ev: ProgressEvent) -> None:
         with self._sub_lock:

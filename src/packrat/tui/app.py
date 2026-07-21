@@ -975,10 +975,15 @@ class RootDetailScreen(FrameScreen):
 
     def action_confirm_review(self) -> None:
         if self._review_actionable():
-            verb = _review_verb(self._detail["pending_review"])
+            pr = self._detail["pending_review"]
+            verb = _review_verb(pr)
             root = self.root_name
+            # Warn when the stage's delete set includes files on a non-recyclable
+            # network share (permanent, no Recycle Bin — §10). `network` is the §10 gate.
+            network = (pr.get("counts") or {}).get("network", 0)
             self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
                                   f"packrat {verb} {root} --confirm",
+                                  network=network,
                                   submit=lambda: self._submit_review(verb, root, confirm=True))
 
     def action_confirm_keep_suggested(self) -> None:
@@ -987,9 +992,11 @@ class RootDetailScreen(FrameScreen):
         unless the Review box is focused AND the run is a stage-2 dedup."""
         if self._review_actionable() and self._is_stage2_dedup():
             root = self.root_name
+            network = (self._detail["pending_review"].get("counts") or {}).get("network", 0)
             self.app.confirm_verb(
                 f"Confirm stage 2 for {root}, keeping packrat's suggested lead in each group?",
                 f"packrat dedup {root} --confirm --keep-suggested",
+                network=network,
                 submit=lambda: self.app.client.submit_dedup(
                     root, confirm=True, keep_suggested=True))
 
@@ -1248,12 +1255,23 @@ class JobCard(FrameScreen):
             self.app.run_verb(f"explorer {target}", title="open in Explorer",
                               submit=submit, then=self._back)
 
+    def _review_network_count(self, root: str) -> int:
+        """How many of the pending review's current-stage delete candidates sit on a
+        network share (permanent delete — §10). Read from the live root detail; any
+        failure → 0 (no warning, never blocks the confirm)."""
+        try:
+            detail, _ = self.app.root_detail(root)
+            return int(((detail or {}).get("pending_review") or {}).get("counts", {}).get("network", 0))
+        except Exception:  # noqa: BLE001 - the warning is best-effort
+            return 0
+
     def action_confirm_review(self) -> None:
         if self._pending():
             root = self.job.get("root_name", "")
             verb = self._verb()
             self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
                                   f"packrat {verb} {root} --confirm",
+                                  network=self._review_network_count(root),
                                   submit=lambda: self._submit_review(root, confirm=True),
                                   then=self._back)
 
@@ -1295,7 +1313,18 @@ class PackratApp(App):
         super().__init__(ansi_color=True)
         self.client = client
         self.offline = offline or client is None
-        self._now = now or fixtures.REFERENCE_NOW
+        # `now` drives every relative time (reltime): last-scan, job ages, card headers.
+        # ONLINE it must track the wall clock (`_now=None` → the property returns live
+        # now_iso()); a FIXED value is used only when explicitly pinned (tests) or in the
+        # offline demo, whose sample timestamps are relative to fixtures.REFERENCE_NOW.
+        # (Regression: defaulting to REFERENCE_NOW online froze the clock at a fixture
+        # date, so a just-finished job rendered as a future calendar date.)
+        if now is not None:
+            self._now = now
+        elif self.offline:
+            self._now = fixtures.REFERENCE_NOW
+        else:
+            self._now = None   # live wall clock (see the `now` property)
         # A COMPLETE zeroed snapshot, not `{}` — the pure builders index required keys
         # directly, so an empty dict would KeyError before the first fetch / when the
         # daemon is down (the fallback client at run() exists precisely for that case).
@@ -1313,7 +1342,15 @@ class PackratApp(App):
 
     @property
     def now(self) -> str:
-        return self._now
+        """The reference 'now' for relative-time rendering (§12).
+
+        A pinned value (tests) or the offline demo's fixed reference when set;
+        otherwise the LIVE wall clock, so online timestamps age against real time.
+        """
+        if self._now is not None:
+            return self._now
+        from ..util import now_iso
+        return now_iso()
 
     def on_mount(self) -> None:
         self.refresh_data()

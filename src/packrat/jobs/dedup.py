@@ -135,8 +135,8 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
     """
     root_id = ctx.params.get("root_id")
     run = ctx.db.query_one(
-        "SELECT id, status, stage FROM review_runs WHERE root_id=? AND run_type='dedup' "
-        "ORDER BY id DESC LIMIT 1", (root_id,),
+        "SELECT id, status, stage, deleted_count FROM review_runs "
+        "WHERE root_id=? AND run_type='dedup' ORDER BY id DESC LIMIT 1", (root_id,),
     )
     result = {"op": "dedup", "action": action}
     if run is not None:
@@ -150,10 +150,20 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
         result.update({"review_status": run["status"], "stage": run["stage"],
                        "run_id": int(run["id"]),
                        "to_delete_exact": exact, "groups": len(groups), "members": members})
-        # A confirm that recycled files records the numeric deleted total (durable, so
-        # the lifetime-deduped metric aggregates it across completed dedup jobs).
+        # A confirm records the number of files it recycled into result_json.deleted;
+        # the lifetime-deduped metric SUMS that across every completed dedup job (§12).
+        # `deleted_count` is an "applied-but-not-yet-reported" accumulator on the run:
+        # each stage's apply bumps it (§8 B Phase 7), and here — when a confirm job lands
+        # its result — we DRAIN it (report the value, then reset to 0 durably). This
+        # (a) never double-counts across the per-stage confirm jobs of one auto-advancing
+        # run, and (b) lets a crash-resumed confirm (which skipped the apply block) still
+        # credit the deletions its crashed predecessor applied but never reported.
         if action == "confirm":
-            result["deleted"] = getattr(ctx, "_dedup_deleted", 0)
+            result["deleted"] = int(run["deleted_count"] or 0)
+            if result["deleted"]:
+                ctx.db.execute(
+                    "UPDATE review_runs SET deleted_count=0 WHERE id=?", (int(run["id"]),)
+                )
         if run["status"] == "pending":
             if action == "confirm":
                 # A confirm APPLIES its stage, then auto-advances the cursor to the next
@@ -293,15 +303,21 @@ def _confirm(ctx: JobContext) -> None:
             _applied_json(root, run_id, stage, actions, intended, outcomes, cancelled=False),
         )
         review.remove_tree(stage_dir)
+        stage_deleted = outcomes["exact_deleted"] + outcomes["perceptual_deleted"]
+        # Commit the apply marker AND accumulate the recycled-file total onto the run
+        # in ONE transaction. Persisting the count durably (not just on the ctx) is what
+        # lets a crash-resumed --confirm — which skips this apply block entirely (the
+        # `stage_phase == 'applied'` guard above) — still report the right deleted total
+        # into the lifetime-deduped metric (§8 B Phase 7). Otherwise the resumed run
+        # read 0 and the metric silently undercounted every crash-interrupted confirm.
         with db.transaction() as conn:
-            conn.execute("UPDATE review_runs SET stage_phase='applied' WHERE id=?", (run_id,))
+            conn.execute(
+                "UPDATE review_runs SET stage_phase='applied', "
+                "deleted_count = deleted_count + ? WHERE id=?",
+                (stage_deleted, run_id),
+            )
         if keep_suggested:
             ctx.log("  (--keep-suggested: kept each group's suggested lead, ignored shortcut edits.)")
-        # Accumulate this confirm's deleted total on the ctx so _set_dedup_result can
-        # persist it (feeds the dashboard's lifetime-deduped metric — every file this
-        # confirm recycled, exact-dup collapses + perceptual/edit deletions).
-        ctx._dedup_deleted = getattr(ctx, "_dedup_deleted", 0) + \
-            outcomes["exact_deleted"] + outcomes["perceptual_deleted"]
         _report_stage_confirm(ctx, stage, outcomes)
 
     # Advance to the next non-empty stage, or finalize after the last.
@@ -825,6 +841,14 @@ def _materialize(ctx, root_path, run_id, stage, actions):
             log.warning("could not stage %s -> %s: %s", act["shortcut_name"], act["path"], exc)
 
     with db.transaction() as conn:
+        # Idempotent re-materialize: clear any rows already persisted for this
+        # (run_id, stage) before inserting. The apply-then-advance crash window
+        # (§8 B Phase 7) can commit a stage's review_actions, then crash before the
+        # stage-cursor UPDATE — on resume this stage is re-materialized, and without
+        # this DELETE the rows would DOUBLE (there is no unique index on the plan),
+        # double-counting members and mis-listing the audit. DELETE-then-INSERT makes
+        # the stage's plan a clean replace.
+        conn.execute("DELETE FROM review_actions WHERE run_id=? AND stage=?", (run_id, stage))
         for act in staged:
             conn.execute(
                 "INSERT INTO review_actions(run_id, stage, folder, kind, reason, default_action, "

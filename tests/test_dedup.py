@@ -440,11 +440,97 @@ def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
     review.remove_tree(_stage_dir(lib, 1))
     files_before = database.query_one("SELECT COUNT(*) c FROM file_instances")["c"]
 
+    # A real crash after the apply transaction would have committed deleted_count=1
+    # (stage 1 collapsed a_copy.png). Mimic that so we can assert it's credited.
+    database.execute("UPDATE review_runs SET deleted_count=1 WHERE id=?", (run["id"],))
+    files_before = database.query_one("SELECT COUNT(*) c FROM file_instances")["c"]
+
     # Re-confirm: must NOT re-apply stage 1; should stage stage 2 and pause.
-    _run(q, database, "dedup", root_id=root["id"], confirm=True)
+    jid = _run(q, database, "dedup", root_id=root["id"], confirm=True)
     run2 = _run_row(database, root["id"])
     assert run2 is not None and run2["stage"] == 2 and run2["stage_phase"] == "staged"
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == files_before
+    # The resumed confirm SKIPPED the apply block, but still credits the deletions its
+    # crashed predecessor applied — result_json.deleted must be 1, not 0 (regression:
+    # the lifetime-deduped metric silently undercounted crash-interrupted confirms).
+    import json as _json
+    r = _json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid,))["result_json"])
+    assert r["deleted"] == 1, r
+    # And the accumulator is drained so a later stage-2 confirm can't double-count it.
+    assert _run_row(database, root["id"])["deleted_count"] == 0
+
+
+def test_reconcile_interrupted_dry_run_spares_unrelated_pending_review(queue_and_db, tmp_path):
+    """An interrupted dedup --dry-run must NOT roll back a real pending review on the
+    same root (§8 B). dry-run owns no root, so it can run alongside a pending review;
+    reconcile treating it like an interrupted analyze would delete that review's staging.
+    """
+    import json as _json
+
+    from packrat.jobs.reconcile import reconcile_on_startup
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 1)
+    import shutil
+
+    shutil.copy(lib / "a.png", lib / "a_copy.png")     # exact dup → a real pending review
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])      # opens a pending review, stages stage 1
+    run = _run_row(database, root["id"])
+    assert run is not None and run["status"] == "pending"
+    stage_dir = _stage_dir(lib, 1)
+    assert os.path.isdir(stage_dir)                     # staging exists
+
+    # Simulate a dedup --dry-run that was RUNNING on this root when the daemon died.
+    database.execute(
+        "INSERT INTO jobs(type, root_id, status, params_json) VALUES ('dedup', ?, 'running', ?)",
+        (root["id"], _json.dumps({"root_id": root["id"], "dry_run": True})),
+    )
+    reconcile_on_startup(database)
+
+    # The pending review + its staging must be untouched (dry-run rolls back nothing).
+    run2 = _run_row(database, root["id"])
+    assert run2 is not None and run2["status"] == "pending", "real review wrongly rolled back"
+    assert os.path.isdir(stage_dir), "real review's staging wrongly deleted by a dry-run rollback"
+
+
+def test_dedup_multistage_deleted_totals_do_not_double_count(queue_and_db, tmp_path):
+    """Each per-stage confirm job reports ONLY its own deletions (drain-on-report), so
+    the lifetime metric summing across a run's confirm jobs never double-counts (§8 B)."""
+    import json as _json
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    import shutil
+
+    _photo(lib / "a.png", 1)
+    shutil.copy(lib / "a.png", lib / "a_copy.png")        # exact dup → stage 1 (1 delete)
+    _photo(lib / "a.jpg", 1, kind="JPEG", quality=80)     # recompress → stage 2
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    _run(q, database, "dedup", root_id=root["id"])         # stage 1 staged
+
+    j1 = _run(q, database, "dedup", root_id=root["id"], confirm=True)   # apply stage 1 → stage 2
+    r1 = _json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (j1,))["result_json"])
+    # Remove a.jpg's shortcut so stage 2 deletes it (default-KEEP → remove to delete).
+    run = _run_row(database, root["id"])
+    for a in _stage_actions(database, run["id"], 2):
+        if os.path.basename(a["path"]) == "a.jpg":
+            os.remove(os.path.join(_stage_dir(lib, 2), a["shortcut_name"]))
+    j2 = _run(q, database, "dedup", root_id=root["id"], confirm=True)   # apply stage 2 → complete
+    r2 = _json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (j2,))["result_json"])
+
+    # Each job reports its OWN stage's deletions; summed = 2 total, no double-count.
+    assert r1["deleted"] == 1 and r2["deleted"] == 1
+    total = database.query_one(
+        "SELECT COALESCE(SUM(json_extract(result_json,'$.deleted')),0) c FROM jobs "
+        "WHERE type='dedup' AND status='done' AND json_extract(result_json,'$.deleted') IS NOT NULL"
+    )["c"]
+    assert total == 2, total
 
 
 @win_only

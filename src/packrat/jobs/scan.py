@@ -160,7 +160,15 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
             child_rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
+            except OSError as exc:
+                # A per-entry error (NAS blip, §10.1) means we can't authoritatively
+                # classify this entry. Suppress the CONTAINING directory's subtree so
+                # deletion-detection never mistakes an unreadable file/subtree for a
+                # deletion and forgets its fingerprints (the §10.1 fail-safe applied at
+                # entry granularity, not just whole-directory-listing granularity).
+                log.warning("entry error under %s (%s): %s — suppressing subtree",
+                            canon_dir, entry.name, exc)
+                en.suppressed.add(os.path.normcase(canon_dir))
                 continue
             if is_dir:
                 child_abs = os.path.join(canon_dir, entry.name)
@@ -178,7 +186,13 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
                 continue
             try:
                 st = entry.stat()
-            except OSError:
+            except OSError as exc:
+                # Couldn't read this file's metadata this pass (NAS blip). The file may
+                # well still exist, so suppress the containing directory rather than let
+                # deletion-detection forget its instance on incomplete data (§10.1).
+                log.warning("stat error under %s (%s): %s — suppressing subtree",
+                            canon_dir, entry.name, exc)
+                en.suppressed.add(os.path.normcase(canon_dir))
                 continue
             attrs = getattr(st, "st_file_attributes", 0)
             if is_junk_dirent(st.st_size, attrs) is not None:

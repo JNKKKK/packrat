@@ -98,6 +98,22 @@ def test_cooperative_cancel(queue_and_db):
     assert _wait_terminal(database, jid) == "cancelled"
 
 
+def test_clean_stop_lands_interrupted_not_cancelled(queue_and_db):
+    """A graceful shutdown() is a resumable interruption, not a cancel (§3).
+
+    The worker checkpoints on the shared cancel event, but because the daemon is
+    STOPPING the job must land 'interrupted' (resumable — a merge/dedup keeps its
+    plan), never 'cancelled' (which discards it). Regression: shutdown() reused the
+    cancel event with no _stopping flag, so a checkpointing job wrongly went terminal.
+    """
+    q, database = queue_and_db
+    jid = q.submit("sleeper", {"steps": 200, "delay_s": 0.02})
+    time.sleep(0.1)                       # let it start + emit a step
+    q.shutdown()                          # graceful stop → checkpoint → interrupted
+    row = database.query_one("SELECT status FROM jobs WHERE id=?", (jid,))
+    assert row["status"] == "interrupted", row["status"]
+
+
 # ---------------------------------------------------------------------------
 # prioritize (§3/§11) — bump a queued job to the front of the dequeue order
 # ---------------------------------------------------------------------------

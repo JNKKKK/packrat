@@ -82,14 +82,48 @@ def leaf_name(path: str) -> str:
 
 
 def is_network_path(path: str) -> bool:
-    """True if ``path`` is on a UNC / network share (no Recycle Bin — §10).
+    r"""True if ``path`` is on a UNC / network share (no Recycle Bin — §10).
 
-    A best-effort classifier: a leading ``\\\\`` is UNC; a mapped drive letter is
-    resolved via Win32 when available. M1 doesn't delete, so this is only used for
-    report hints; the delete-path warning lands with dedup/cleanup (M3/M4).
+    Two cases, both meaning "no Recycle Bin → a delete here is PERMANENT" (§10,
+    §10.1 — most roots live on the Synology NAS, commonly *mapped drives*):
+
+    - **UNC** (``\\server\share\…`` or the extended ``\\?\UNC\…``) — a leading
+      ``\\`` that is not the ``\\?\`` local extended prefix.
+    - **Mapped network drive** (``Z:\…``) — a drive letter whose Win32
+      :func:`GetDriveTypeW` reports ``DRIVE_REMOTE``. This is the case a pure UNC
+      check misses, and it is exactly the "confirm summary must warn on a
+      non-recyclable path" gate (§10). Resolved via ctypes (no dependency);
+      any failure falls back to False (best-effort, never blocks the delete).
     """
     if path.startswith("\\\\") and not path.startswith("\\\\?\\"):
         return True
     if path.startswith("\\\\?\\UNC\\"):
         return True
+    if _IS_WINDOWS:
+        return _is_remote_drive(path)
     return False
+
+
+#: GetDriveType return code for a network-mapped drive (winbase.h DRIVE_REMOTE).
+_DRIVE_REMOTE = 4
+
+
+def _is_remote_drive(path: str) -> bool:
+    r"""True if ``path``'s drive letter is a mapped network drive (``DRIVE_REMOTE``).
+
+    Strips any ``\\?\`` extended prefix, extracts the ``X:\`` root, and asks Win32
+    ``GetDriveTypeW``. Non-drive-letter paths (already handled UNC, relative, or a
+    device path) and any ctypes failure return False."""
+    p = path
+    if p.startswith("\\\\?\\"):
+        p = p[4:]
+    # Need a real drive-letter root ("X:") to classify.
+    if len(p) < 2 or p[1] != ":" or not p[0].isalpha():
+        return False
+    root = f"{p[0]}:\\"
+    try:
+        import ctypes
+
+        return ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root)) == _DRIVE_REMOTE
+    except Exception:  # noqa: BLE001 - classification is best-effort (§10)
+        return False

@@ -23,6 +23,25 @@ def _drive(coro_fn):
     asyncio.run(runner())
 
 
+def test_online_now_tracks_wall_clock_not_fixture_date():
+    # Regression: online mode froze `now` at fixtures.REFERENCE_NOW, corrupting every
+    # relative time. Online (no pinned now) it must return the LIVE wall clock; offline
+    # keeps the fixed reference its sample timestamps are relative to.
+    from packrat.tui import fixtures
+    from packrat.util import now_iso
+
+    online = PackratApp(client=object(), offline=False)
+    assert online._now is None                       # not pinned online
+    assert online.now[:4] == now_iso()[:4]           # live wall-clock year, not the fixture's
+    assert online.now != fixtures.REFERENCE_NOW
+
+    offline = PackratApp(offline=True)
+    assert offline.now == fixtures.REFERENCE_NOW      # demo data is relative to this
+
+    pinned = PackratApp(offline=True, now="2020-01-02T03:04:05")
+    assert pinned.now == "2020-01-02T03:04:05"        # an explicit pin always wins
+
+
 def _screen(app) -> str:
     return type(app.screen).__name__
 

@@ -198,7 +198,7 @@ class DaemonClient:
 
     def cleanup_preview(self, folder: str, mode: str = "exact") -> dict:
         """Read-only count for a one-shot cleanup mode's confirm (§6.2, §9.1)."""
-        return self._get(f"/cleanup/preview?root={folder}&mode={mode}")
+        return self._get("/cleanup/preview", params={"root": folder, "mode": mode})
 
     def submit_merge(self, source: str, into: str, *, dry_run: bool = False) -> int:
         """Submit a merge job (§8 C); returns the job id (always enqueued, §3).
@@ -222,16 +222,21 @@ class DaemonClient:
     # -- snapshots -------------------------------------------------------
     def status(self, root: str | None = None) -> dict:
         if root:
-            return self._get(f"/status?root={root}")
+            return self._get("/status", params={"root": root})
         return self._get("/status")
 
     def roots(self) -> list[dict]:
         return self._get("/roots")["roots"]
 
     # -- helpers ---------------------------------------------------------
-    def _get(self, path: str) -> dict:
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        # Query values (e.g. a root path/name) go through httpx `params=` so they are
+        # percent-encoded — a Windows folder like `Save 50% Off` or one containing
+        # `&`/`#`/`=` must not be interpolated raw into the query string (it would
+        # split/truncate and resolve the wrong root, or none).
         try:
-            r = httpx.get(f"{self.base}{path}", headers=self._headers(), timeout=self.timeout)
+            r = httpx.get(f"{self.base}{path}", params=params,
+                          headers=self._headers(), timeout=self.timeout)
         except (httpx.HTTPError, OSError) as exc:
             raise DaemonNotRunning(str(exc)) from exc
         if r.status_code >= 400:

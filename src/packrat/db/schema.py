@@ -35,9 +35,13 @@ from __future__ import annotations
 #: v8 adds jobs.priority (plain ADD COLUMN): `packrat jobs prioritize <id>` bumps a
 #: queued job to the front of the runnable-first dequeue (ORDER BY priority DESC,
 #: enqueued_at, id — §3/§11). Default 0 = normal FIFO.
-#: v3/v4/v5/v7/v8 additions to EXISTING tables need the migration pass in init_db
+#: v9 adds review_runs.deleted_count (plain ADD COLUMN): a durable running total of
+#: files recycled across a dedup run's applied stages, committed at apply time so a
+#: crash-resumed --confirm (which skips the already-applied stage) still reports its
+#: deleted count into the lifetime-deduped metric (§8 B Phase 7). Default 0.
+#: v3/v4/v5/v7/v8/v9 additions to EXISTING tables need the migration pass in init_db
 #: (CREATE IF NOT EXISTS can't alter a table). See connection._migrate_columns / _migrate_jobs_v7.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
@@ -165,6 +169,11 @@ CREATE TABLE IF NOT EXISTS review_runs (
     status        TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
     stage         INTEGER NOT NULL DEFAULT 1,  -- dedup stage cursor 1..3 (cleanup: 1)
     stage_phase   TEXT,                        -- staged | applied (§8 B Phase 7)
+    deleted_count INTEGER NOT NULL DEFAULT 0,  -- files recycled but NOT YET reported into
+                                               -- result_json.deleted: bumped at each stage's
+                                               -- apply, drained (→0) when a confirm job records
+                                               -- its result, so a crash-resumed confirm still
+                                               -- credits the lifetime metric without double-count (§8 B)
     created_at    TEXT,
     confirmed_at  TEXT
 );

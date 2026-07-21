@@ -405,28 +405,38 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     them), so counting all rows would report already-deleted exact dups as still
     "to delete". Cleanup is single-stage (``stage=1``) so the filter is a no-op there.
 
-    - **dedup:** ``{to_delete_exact, groups, members}`` — for the current stage:
-      exact deletions (stage 1) or near-dup group/member totals (stages 2/3).
-    - **cleanup-perceptual:** ``{exact, perceptual}`` — exact-trash matches (delete on
-      confirm) + staged perceptual candidates.
+    - **dedup:** ``{to_delete_exact, groups, members, network}`` — for the current
+      stage: exact deletions (stage 1) or near-dup group/member totals (stages 2/3).
+    - **cleanup-perceptual:** ``{exact, perceptual, network}`` — exact-trash matches
+      (delete on confirm) + staged perceptual candidates.
+
+    ``network`` counts how many of the stage's candidate paths sit on a non-recyclable
+    network share (deleted PERMANENTLY, no Recycle Bin — §10), so the confirm surface
+    (CLI + TUI) can warn before an irreversible delete. It's an upper bound over every
+    candidate in the stage (the actual delete set depends on kept/removed shortcuts,
+    resolved at confirm), which is the safe direction for a warning.
     """
     if stage is None:
         rows = conn.execute(
-            "SELECT kind, group_no FROM review_actions WHERE run_id=?", (run_id,)
+            "SELECT kind, group_no, path FROM review_actions WHERE run_id=?", (run_id,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT kind, group_no FROM review_actions WHERE run_id=? AND stage=?",
+            "SELECT kind, group_no, path FROM review_actions WHERE run_id=? AND stage=?",
             (run_id, stage),
         ).fetchall()
+    from . import fsutil
+
+    network = sum(1 for r in rows if fsutil.is_network_path(r["path"]))
     if run_type == "dedup":
         exact = sum(1 for r in rows if r["kind"] == "exact")
         groups = {r["group_no"] for r in rows if r["kind"] == "perceptual" and r["group_no"] is not None}
         members = sum(1 for r in rows if r["kind"] == "perceptual")
-        return {"to_delete_exact": exact, "groups": len(groups), "members": members}
+        return {"to_delete_exact": exact, "groups": len(groups), "members": members,
+                "network": network}
     exact = sum(1 for r in rows if r["kind"] == "exact")
     perceptual = sum(1 for r in rows if r["kind"] == "perceptual")
-    return {"exact": exact, "perceptual": perceptual}
+    return {"exact": exact, "perceptual": perceptual, "network": network}
 
 
 def _reconcile_review_state(conn, job_type: str, params: dict, result: dict):

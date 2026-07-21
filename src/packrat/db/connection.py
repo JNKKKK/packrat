@@ -190,6 +190,11 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "result_json", "TEXT"),
     # v8: `jobs prioritize <id>` — higher priority is dequeued first (§3/§11).
     ("jobs", "priority", "INTEGER NOT NULL DEFAULT 0"),
+    # v9: durable "applied-but-not-yet-reported" recycled-file accumulator, so a
+    # crash-resumed dedup --confirm (which skips the already-applied stage) still
+    # credits its deleted count into the lifetime-deduped metric without double-
+    # counting across a run's per-stage confirm jobs (§8 B Phase 7).
+    ("review_runs", "deleted_count", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
