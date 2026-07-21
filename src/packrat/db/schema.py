@@ -190,12 +190,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_runs_pending_root
 -- path is the AUTHORITATIVE target; asset_id/instance_id/survivor_instance_id
 -- are reference-only and MUST tolerate becoming dangling (NOT cascade-linked).
 -- `stage` tags which dedup stage the action belongs to (--confirm applies
--- WHERE stage=cursor); NULL for single-stage cleanup.
+-- WHERE stage=cursor). Single-stage cleanup writes stage=1 (its run's cursor is also
+-- 1), so the same stage-scoped count query (_review_counts) works for both — do NOT
+-- write NULL here for cleanup or those counts read as 0.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS review_actions (
     id                       INTEGER PRIMARY KEY,
     run_id                   INTEGER NOT NULL REFERENCES review_runs(id) ON DELETE CASCADE,
-    stage                    INTEGER,         -- dedup 1|2|3 (NULL for cleanup)
+    stage                    INTEGER,         -- dedup 1|2|3; cleanup writes 1 (see above)
     folder                   TEXT NOT NULL,   -- exact_dup_to_delete|suspect_recompression|with_minor_edits|perceptually_identified_trash
     kind                     TEXT,            -- exact|perceptual
     reason                   TEXT,            -- exact-internal|exact-external|perceptual|cleanup-perceptual

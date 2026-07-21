@@ -67,36 +67,44 @@ def register(
     except OSError as exc:
         raise RootError(f"not readable: {canon} ({exc})") from exc
 
-    # 2. Overlap check — reject if this path is, contains, or is contained by a root.
-    for row in db.query("SELECT id, name, path FROM roots"):
-        existing = row["path"]
-        if fsutil.is_within(canon, existing) or fsutil.is_within(existing, canon):
-            if fsutil.paths_equal(canon, existing):
-                raise RootError(f"already registered as root {row['name']!r}: {existing}")
-            raise RootError(
-                f"overlaps existing root {row['name']!r} ({existing}); "
-                "a folder may not be nested inside or contain another root"
-            )
-
-    # 3. Unique-name check (case-insensitive) — leaf name or explicit --name.
     handle = name or fsutil.leaf_name(canon)
     if not handle:
         raise RootError(f"cannot derive a name from {canon}; pass --name")
-    clash = db.query_one("SELECT name FROM roots WHERE name = ? COLLATE NOCASE", (handle,))
-    if clash is not None:
-        raise RootError(
-            f"root name {handle!r} already in use; pick a differently-named folder "
-            "or pass --name <label>"
-        )
-
-    # 4. Insert.
     globs_json = json.dumps(ignore_globs) if ignore_globs else None
-    cur = db.execute(
-        "INSERT INTO roots(path, name, kind, enabled, ignore_globs, last_full_scan_at) "
-        "VALUES (?, ?, ?, 1, ?, NULL)",
-        (canon, handle, kind, globs_json),
-    )
-    row = db.query_one("SELECT * FROM roots WHERE id = ?", (int(cur.lastrowid),))
+
+    # Steps 2-4 run in ONE transaction under the DB write lock, so the overlap +
+    # unique-name checks and the INSERT are ATOMIC — two concurrent registers of
+    # overlapping/nesting paths (whose distinct path/name would slip past the DB's own
+    # UNIQUE constraints) can't both pass their checks and insert (§8 A1 TOCTOU).
+    with db.transaction() as conn:
+        # 2. Overlap check — reject if this path is, contains, or is contained by a root.
+        for row in conn.execute("SELECT id, name, path FROM roots").fetchall():
+            existing = row["path"]
+            if fsutil.is_within(canon, existing) or fsutil.is_within(existing, canon):
+                if fsutil.paths_equal(canon, existing):
+                    raise RootError(f"already registered as root {row['name']!r}: {existing}")
+                raise RootError(
+                    f"overlaps existing root {row['name']!r} ({existing}); "
+                    "a folder may not be nested inside or contain another root"
+                )
+
+        # 3. Unique-name check (case-insensitive) — leaf name or explicit --name.
+        clash = conn.execute(
+            "SELECT name FROM roots WHERE name = ? COLLATE NOCASE", (handle,)
+        ).fetchone()
+        if clash is not None:
+            raise RootError(
+                f"root name {handle!r} already in use; pick a differently-named folder "
+                "or pass --name <label>"
+            )
+
+        # 4. Insert.
+        cur = conn.execute(
+            "INSERT INTO roots(path, name, kind, enabled, ignore_globs, last_full_scan_at) "
+            "VALUES (?, ?, ?, 1, ?, NULL)",
+            (canon, handle, kind, globs_json),
+        )
+        row = conn.execute("SELECT * FROM roots WHERE id = ?", (int(cur.lastrowid),)).fetchone()
     return dict(row)
 
 

@@ -158,3 +158,32 @@ def test_scan_never_touches_trash_root(queue_and_db, tmp_path):
     _png(trash / "junk.png", 9)
     root = register(database, str(trash), kind="trash")
     _run(q, database, "scan", expect="error", root_id=root["id"])
+
+
+def test_empty_file_network_fallback_permanently_deletes(tmp_path, monkeypatch):
+    """When recycle() ERRORS on a NETWORK path (no Recycle Bin), _empty_file falls back
+    to a permanent os.remove so the trash inbox is still emptied (§6.1/§10). A LOCAL
+    recycle failure (locked file) is left in place + reported."""
+    from packrat import trash
+
+    f = tmp_path / "junk.png"
+    f.write_bytes(b"x")
+
+    def boom_recycle(path):
+        raise OSError("no Recycle Bin on this volume")
+
+    monkeypatch.setattr(trash.shortcuts, "recycle", boom_recycle)
+
+    # Network path → permanent delete fallback empties it.
+    monkeypatch.setattr(trash.fsutil, "is_network_path", lambda p: True)
+    summary = {"emptied": 0, "undeletable": 0}
+    trash._empty_file(str(f), summary)
+    assert not f.exists() and summary == {"emptied": 1, "undeletable": 0}
+
+    # Local path → left in place + reported undeletable (no permanent delete).
+    g = tmp_path / "locked.png"
+    g.write_bytes(b"y")
+    monkeypatch.setattr(trash.fsutil, "is_network_path", lambda p: False)
+    summary = {"emptied": 0, "undeletable": 0}
+    trash._empty_file(str(g), summary)
+    assert g.exists() and summary == {"emptied": 0, "undeletable": 1}

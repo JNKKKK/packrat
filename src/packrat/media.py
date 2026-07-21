@@ -206,11 +206,15 @@ def _decode_still(
         from PIL import Image
 
         src = BytesIO(data) if data is not None else fsutil.extended(path)
-        img = Image.open(src)
-        captured_at = _exif_capture_time(img)
-        if getattr(img, "is_animated", False):
-            img.seek(0)  # first frame for animated GIF / multi-page TIFF (§9.1)
-        return np.asarray(img.convert("RGB")), captured_at
+        # `with` so the underlying file handle is released promptly — the streamed
+        # fallback path (data is None) opens a real file, and leaking it exhausts fds /
+        # pins SMB handles over a large scan of oversized photos. np.asarray copies the
+        # pixels out, so the array outlives the closed image.
+        with Image.open(src) as img:
+            captured_at = _exif_capture_time(img)
+            if getattr(img, "is_animated", False):
+                img.seek(0)  # first frame for animated GIF / multi-page TIFF (§9.1)
+            return np.asarray(img.convert("RGB")), captured_at
 
 
 def _exif_capture_time(img) -> str | None:

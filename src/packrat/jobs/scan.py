@@ -377,7 +377,13 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
         profiler.file_done(medium)
         if fp.undecodable:
             _note_undecodable(fp)
-        return "undecodable" if fp.undecodable else "backfilled"
+            return "undecodable"
+        # A hit on a TRASHED asset is a trash re-appearance regardless of whether we
+        # also (back)filled its perceptual data — report it as matches_trashed so the
+        # banner's trash signal is honest (backfill leaves status='trashed' untouched).
+        if asset["status"] == "trashed":
+            return "matches_trashed"
+        return "backfilled"
 
     # Plain exact-dup hit — attach the instance and stop (§8 A2 step 6 / Phase 4).
     with profiler.timer("shared", "db"):

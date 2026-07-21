@@ -376,6 +376,46 @@ def test_scan_attaches_to_trashed_asset_without_unflip(queue_and_db, tiny_photos
     assert row["status"] == "trashed"
 
 
+def test_scan_backfill_of_trashed_asset_reports_matches_trashed(queue_and_db, tiny_photos):
+    """A hit on a TRASHED, not-yet-fingerprinted asset (the merge-created-then-trashed
+    case) reports matches_trashed even though scan also backfills its perceptual data —
+    the banner's trash signal must be honest (the backfill branch used to mislabel it)."""
+    q, database = queue_and_db
+    root = register(database, str(tiny_photos))
+    _run_scan(q, database, root["id"])
+    a = database.query_one(
+        "SELECT a.id FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
+        "WHERE fi.filename='b.png' LIMIT 1"
+    )
+    # Make it look merge-created-then-trashed: trashed, its perceptual rows gone (so it's
+    # NOT fully fingerprinted), and its instances dropped so the on-disk file re-appears.
+    database.execute("UPDATE assets SET status='trashed' WHERE id=?", (a["id"],))
+    database.execute("DELETE FROM phash WHERE asset_id=?", (a["id"],))
+    database.execute("DELETE FROM file_instances WHERE asset_id=?", (a["id"],))
+    # Incremental re-scan → the file hits the trashed asset, takes the backfill branch
+    # (fills phash), and is reported as matches_trashed (not 'backfilled').
+    res = _rescan_capture(q, database, root["id"])
+    assert res["matches_trashed"] >= 1, res
+    # The asset stayed trashed and its phash was re-filled.
+    assert database.query_one("SELECT status FROM assets WHERE id=?", (a["id"],))["status"] == "trashed"
+    assert database.query_one("SELECT COUNT(*) c FROM phash WHERE asset_id=?", (a["id"],))["c"] == 1
+
+
+def _rescan_capture(q, database, root_id) -> dict:
+    """Run a scan and return its result_json counts."""
+    import json as _json
+    jid = q.submit("scan", {"root_id": root_id})
+    import time as _time
+    deadline = _time.monotonic() + 30.0
+    while _time.monotonic() < deadline:
+        row = database.query_one("SELECT status, result_json FROM jobs WHERE id=?", (jid,))
+        if row and row["status"] not in ("queued", "running"):
+            assert row["status"] == "done", row["status"]
+            return _json.loads(row["result_json"] or "{}")
+        _time.sleep(0.02)
+    raise AssertionError("scan did not finish")
+
+
 def test_scan_profile_emits_report(queue_and_db, tiny_photos):
     q, database = queue_and_db
     root = register(database, str(tiny_photos))

@@ -507,7 +507,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
 
     all_ids = {aid for c in clusters for aid in c}
     insts = _surviving_instances(db, all_ids, root_id)
-    quals = _asset_qualities(db, all_ids)
+    quals = _asset_qualities(db, all_ids, min_frame_quality=ctx.config.video.min_frame_quality)
     rank = _asset_rank_fields(db, all_ids)  # pixels/size/duration/codec/media_type
     hint = ctx.config.review.low_quality_hint
     folder = _STAGE_FOLDER[stage]
@@ -714,8 +714,14 @@ def _surviving_instances(db, asset_ids, root_id):
     return chosen
 
 
-def _asset_qualities(db, asset_ids):
-    """Per-asset quality scalar for the manifest hint (photo PDQ q / video min frame q)."""
+def _asset_qualities(db, asset_ids, *, min_frame_quality: int = 0):
+    """Per-asset quality scalar for the manifest hint (photo PDQ q / video frame q).
+
+    Video: the min over frames that CLEAR ``min_frame_quality`` — i.e. the frames the
+    matcher would actually compare (§5.3 "min across *comparable* frames"), so a single
+    dark/transition frame (already excluded from matching) doesn't drag the hint down and
+    over-flag the pair low-confidence. Falls back to the overall min when NO frame clears
+    the gate (nothing comparable → report the honest worst quality)."""
     if not asset_ids:
         return {}
     ph = ",".join("?" for _ in asset_ids)
@@ -723,9 +729,13 @@ def _asset_qualities(db, asset_ids):
     for r in db.query(f"SELECT asset_id, quality FROM phash WHERE asset_id IN ({ph})", tuple(asset_ids)):
         if r["quality"] is not None:
             q[int(r["asset_id"])] = int(r["quality"])
+    # Comparable-frame min: MIN over frames >= the gate; the CASE fallback yields the
+    # overall MIN for an asset whose every frame is below the gate.
     for r in db.query(
-        f"SELECT asset_id, MIN(quality) mq FROM vphash WHERE asset_id IN ({ph}) GROUP BY asset_id",
-        tuple(asset_ids),
+        f"SELECT asset_id, "
+        f"  COALESCE(MIN(CASE WHEN quality >= ? THEN quality END), MIN(quality)) mq "
+        f"FROM vphash WHERE asset_id IN ({ph}) GROUP BY asset_id",
+        (min_frame_quality, *asset_ids),
     ):
         if r["mq"] is not None:
             q[int(r["asset_id"])] = int(r["mq"])

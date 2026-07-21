@@ -21,13 +21,18 @@ def status_snapshot() -> dict:
     """Global rollup (§11): asset counts, trashed, per-root, running/interrupted jobs."""
     conn = _ro()
     try:
-        assets = conn.execute("SELECT COUNT(*) c FROM assets").fetchone()["c"]
+        # `assets` = the ACTIVE collection (what's on disk and kept), so it reconciles
+        # with the photo/video split shown beside it (assets == photos + videos, both
+        # media types being photo|video). Trashed assets are trash MEMORY (often fileless
+        # — zero instances) and are counted separately on their own `trashed` line, not
+        # folded into the headline "N assets hoarded" total.
         photos = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE media_type='photo' AND status='active'"
         ).fetchone()["c"]
         videos = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE media_type='video' AND status='active'"
         ).fetchone()["c"]
+        assets = photos + videos
         trashed = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE status='trashed'"
         ).fetchone()["c"]

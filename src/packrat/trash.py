@@ -181,12 +181,31 @@ def _empty_file(path: str, summary: dict) -> None:
     Its fingerprint is already committed, so a delete that fails (locked / permission
     denied) is non-fatal — leave the file and report it; a later refresh retries the
     delete (a DB no-op). Permanent on a NAS/SMB trash root (no Recycle Bin, §10).
+
+    **Network fallback:** Windows provides no Recycle Bin for network locations, so
+    ``send2trash`` may *error* there rather than hard-delete (§10). Since §6.1 mandates
+    that a trash root is emptied — and permanently on NAS/SMB anyway — a recycle failure
+    on a **network path** falls back to a permanent ``os.remove``. On a LOCAL volume a
+    failure is a genuine problem (locked file), so leave it and report it, as before.
     """
     try:
         shortcuts.recycle(path)
         summary["emptied"] += 1
+        return
     except FileNotFoundError:
-        pass  # already gone (e.g. a prior interrupted refresh removed it)
+        return  # already gone (e.g. a prior interrupted refresh removed it)
     except Exception as exc:  # noqa: BLE001 - never block the whole refresh on one stuck file
-        summary["undeletable"] += 1
-        log.warning("could not empty trash file %s: %s", path, exc)
+        recycle_err = exc
+    # Recycle failed. On a network share (no Recycle Bin) empty it permanently — that's
+    # exactly what §6.1/§10 promise for NAS trash; anywhere else, leave + report it.
+    if fsutil.is_network_path(path):
+        try:
+            os.remove(fsutil.extended(path))
+            summary["emptied"] += 1
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            recycle_err = exc
+    summary["undeletable"] += 1
+    log.warning("could not empty trash file %s: %s", path, recycle_err)

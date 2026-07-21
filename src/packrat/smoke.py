@@ -474,10 +474,14 @@ def _report_results(results, deps, all_exts, files, json_out) -> int:
         # Highlight the ⚠ cells the test exists to resolve.
         print("\n⚠ cells to confirm (§9.1): avif, heic/heif, RAW (esp. cr3), and the pdqhash wheel.")
 
-    # Exit non-zero only if a *decode or hash* hard-failed on a present sample
-    # (perceptual/embed 'skip' from a missing optional dep is not a failure).
+    # Exit non-zero if hash/decode/PERCEPTUAL hard-FAILED on a present sample. A 'skip'
+    # (a missing optional dep) is NOT a failure. Perceptual is included because a broken
+    # `pdqhash` wheel that crashes on decoded pixels (fail, not skip) is exactly a ⚠ cell
+    # this gate exists to catch (§9.1) — "non-zero on any format failure" (§11). Embed
+    # stays advisory (opt-in, §7) and never gates the exit code.
     hard_fail = any(
-        r.stages.get("hash") == "fail" or r.stages.get("decode") == "fail" for r in results
+        r.stages.get(stage) == "fail"
+        for r in results for stage in ("hash", "decode", "perceptual")
     )
     return 1 if hard_fail else 0
 

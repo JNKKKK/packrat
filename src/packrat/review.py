@@ -89,9 +89,16 @@ def audit_run_dir(run_type: str, root_name: str, run_id: int) -> str:
 
 
 def _safe_name(name: str) -> str:
-    """Sanitize a root name for use as a directory component."""
-    keep = "".join(c if c.isalnum() or c in " ._-" else "_" for c in name)
-    return keep.strip() or "root"
+    r"""Sanitize a root name for use as a directory component.
+
+    Keeps alnum + `` ._-`` (others → ``_``), then neutralizes a name that is all dots
+    (``.`` / ``..``) — those are path-traversal components that would escape the audit
+    dir (a root named ``..`` would write ``audit\{run_type}\..\{run_id}`` one level up).
+    """
+    keep = "".join(c if c.isalnum() or c in " ._-" else "_" for c in name).strip()
+    if not keep or set(keep) <= {"."}:   # empty, ".", "..", "..." → not a usable dir name
+        return "root"
+    return keep
 
 
 def write_audit(run_dir: str, filename: str, obj: dict) -> str:

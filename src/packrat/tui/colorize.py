@@ -43,9 +43,11 @@ ROLE_PATTERNS: list[tuple[str, str]] = [
     # error: ✗
     ("error", re.escape(tokens.CROSS)),
     # accent: the ▸ selection cursor, `[k]`-style key hints (1–6 chars in brackets:
-    # covers [r] [q] [x] [ ] [Enter] [Tab] [Esc], but NOT [undecodable]/(trash))
+    # covers [r] [q] [x] [ ] [Enter] [Tab] [Esc], but NOT [undecodable]/(trash)).
+    # `[^\]\n]` — no newline inside, so an unclosed `[` at a line end can't run the
+    # accent span across the frame's `│\n│` borders onto the next line.
     ("accent", re.escape(tokens.CURSOR)),
-    ("accent", r"\[[^\]]{1,6}\]"),
+    ("accent", r"\[[^\]\n]{1,6}\]"),
     # accent: a FOCUSED panel's heavy border (┏━┓┃┗┛). Only a focused Panel uses
     # the heavy box glyphs — the outer AppFrame + unfocused panels use light ones
     # — so tinting every heavy glyph colors exactly the focused box's frame.
@@ -55,7 +57,8 @@ ROLE_PATTERNS: list[tuple[str, str]] = [
     ("error", r"○(?= down)"),
     # dim ‹guillemet asides› — LAST so a whole ‹…› span reads dim even when it wraps a
     # `[k]` hint (an inactive section's dimmed action hints), overriding the accent above.
-    ("dim", r"‹[^›]*›"),
+    # `[^›\n]` so an unclosed ‹ can't run the dim span across line borders.
+    ("dim", r"‹[^›\n]*›"),
 ]
 
 

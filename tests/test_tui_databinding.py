@@ -287,6 +287,22 @@ def test_review_counts_reports_network_delete_set(seeded):
         database.close()
 
 
+def test_status_snapshot_assets_total_reconciles_with_split(seeded):
+    """The headline `assets` total = photos + videos (ACTIVE), so it reconciles with the
+    split shown beside it; trashed assets are counted separately, not folded in."""
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        # Trash one asset (a fileless trash-memory entry, as a refresh flip would leave).
+        aid = database.query_one("SELECT id FROM assets LIMIT 1")["id"]
+        database.execute("UPDATE assets SET status='trashed' WHERE id=?", (aid,))
+        snap = queries.status_snapshot()
+        assert snap["assets"] == snap["photos"] + snap["videos"]   # total == active split
+        assert snap["trashed"] == 1                                # trashed counted apart
+    finally:
+        database.close()
+
+
 def test_status_snapshot_binds_to_dashboard(seeded):
     snap = queries.status_snapshot()
     frame = screen("packrat", dashboard_body(snap, now=NOW),
