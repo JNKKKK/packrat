@@ -588,7 +588,7 @@ def test_root_detail_running_job_gets_live_eta():
 # --- fix #3: a cleanup-perceptual review card confirms via `cleanup`, not dedup ---
 def test_cleanup_pending_card_confirms_via_cleanup_verb():
     from packrat.tui import fixtures as fx
-    from packrat.tui.app import JobCard
+    from packrat.tui.frames import JobCard
 
     fc = _FakeClient()
 
@@ -713,7 +713,7 @@ def test_jobcard_action_pops_back_after_toast():
     the card back to the interface that opened it — the user shouldn't be left on a
     now-stale card. Declining (n) posts no toast and stays put."""
     from packrat.tui import fixtures as fx
-    from packrat.tui.app import JobCard
+    from packrat.tui.frames import JobCard
 
     fc = _FakeClient()
 

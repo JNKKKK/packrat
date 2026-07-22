@@ -899,7 +899,7 @@ def test_job_card_covers_every_shape():
 
 def test_scan_card_scrolls_problem_files():
     """A scan card lists its undecodable/read-error files and ↑/↓ scrolls them (§12)."""
-    from packrat.tui.app import JobCard
+    from packrat.tui.frames import JobCard
 
     async def scenario(app, pilot):
         dashcam = next(j for j in demo.RECENT if j["id"] == 591)   # 14 undec + 3 read-err
