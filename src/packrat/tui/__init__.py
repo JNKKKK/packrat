@@ -13,8 +13,9 @@ Layered as a **pure render core + thin Textual widgets**:
 - :mod:`packrat.tui.render`    — pure ``dict → line`` content renderers.
 - :mod:`packrat.tui.data`      — pure relative-time + TUI-side ETA helpers.
 - :mod:`packrat.tui.nav`       — focus→maximize state machine.
-- ``screens`` (pure ``dict → line`` builders) / ``modals`` / ``frames`` (the Textual
-  screen classes) / ``app`` (the :class:`~packrat.tui.app.PackratApp` + entrypoint).
+- ``screens`` (pure ``dict → line`` builders) / ``modals`` / ``frames`` (a package of
+  Textual screen classes, one module per screen over a shared ``frames.base``) /
+  ``app`` (the :class:`~packrat.tui.app.PackratApp` + entrypoint).
 
 The pure layers (everything except ``modals`` / ``frames`` / ``app``) import
 **without** Textual, so they render headless (and are golden-frame testable as plain
