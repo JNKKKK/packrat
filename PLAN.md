@@ -2569,9 +2569,13 @@ sample dataset (no daemon) for demoing/development.
 A **pure render core + thin Textual widgets** (`src/packrat/tui/`): `tokens` (sizes, glyphs, color
 roles, `Theme`), `layout` (CJK-aware `row`/`fit`/`middle_elide` with a `cell_width(row)==width`
 invariant), `geometry` (terminal size → layout budgets), `framing` (frame/box composition), `render` +
-`screens/*` (pure `dict → line` builders), `data` (the `DataSource` liveness seam), `nav`, `colorize`,
-`modals`. The pure layers import **without** Textual and are tested as plain strings; the Textual
-screens each display one pre-composed frame and own only key routing / focus / liveness.
+`screens/*` (pure `dict → line` builders), `data` (relative-time + TUI-side ETA helpers), `nav`,
+`colorize`. The Textual layer is `modals`, the `frames/*` package (one Textual screen controller per
+screen over a shared `frames.base`, each paired with its `screens/*` builder of the same name), and
+`app` (the `PackratApp` + entrypoint). The pure layers import **without** Textual and are tested as
+plain strings; the Textual screens each display one pre-composed frame and own only key routing / focus
+/ liveness (a light poll timer + the running job's SSE stream — the app drives fetch/subscribe directly,
+no separate subscription object).
 
 **Key invariants:**
 - **Full-terminal responsive layout.** The frame fills the whole terminal and reflows via a **surplus
