@@ -18,11 +18,14 @@ Ranking keys (best = greatest tuple, all components DESC):
   output size is a clean monotonic quality proxy), the larger file. Size is compared
   only within a format because it lies across them (an efficient HEIC master is smaller
   than a bloated JPEG export) — exactly what the format rank handles.
-- **Video:** pixels → effective-bitrate BAND → codec weight. Effective bitrate =
-  ``size/duration_s × codec_weight``: a more-efficient codec's bits are worth more, so
-  an HEVC master beats an H.264 re-export at equal resolution+quality. Bitrates within
-  ``video_bitrate_tie_pct`` share a log-scale band so the next key breaks the tie
-  instead of a coin-flip on a noisy diff.
+- **Video:** pixels → effective-bitrate BAND → codec weight → raw effective bitrate.
+  Effective bitrate = ``size/duration_s × codec_weight``: a more-efficient codec's bits
+  are worth more, so an HEVC master beats an H.264 re-export at equal resolution+quality.
+  Bitrates within ``video_bitrate_tie_pct`` share a log-scale band so the *codec weight*
+  breaks a cross-codec near-tie instead of a coin-flip on a noisy diff. The final raw
+  bitrate then breaks a *same-codec* near-tie (band + weight both tied): higher bitrate
+  at equal resolution+codec is a clean quality dial, the video analogue of file ``size``
+  within one photo format. It sits last, so it never reverses the cross-codec decision.
 
 Ties on the full key fall to a stable smallest-normcase-path tiebreak (deterministic
 across runs).
@@ -49,7 +52,8 @@ _EFFICIENT_LOSSY_PHOTO_EXTS = frozenset({"heic", "heif", "avif"})
 # level "decided once you consider key[:i+1]"; a full tuple tie falls to the path
 # tiebreak (`_PATH_TIEBREAK`). Reported as stage-2 lead-pick stats (§8 B).
 _PHOTO_LEAD_LEVELS = ("resolution", "resolution + format", "resolution + format + size")
-_VIDEO_LEAD_LEVELS = ("resolution", "resolution + bitrate", "resolution + bitrate + codec")
+_VIDEO_LEAD_LEVELS = ("resolution", "resolution + bitrate", "resolution + bitrate + codec",
+                      "resolution + bitrate + codec + fine bitrate")
 _PATH_TIEBREAK = "path tiebreak (identical rank)"
 
 
@@ -78,11 +82,19 @@ def _photo_lead_key(inst, r) -> tuple:
 
 
 def _video_lead_key(r, config) -> tuple:
-    """Video keep-lead ranking key (best = greatest): (pixels, bitrate band, codec weight). §8 B."""
+    """Video keep-lead ranking key (best = greatest): (pixels, bitrate band, codec weight, eff). §8 B.
+
+    The final component is the *raw* (unbanded) effective bitrate. It can only fire once
+    the band **and** the codec weight both tie — i.e. same codec, effective bitrates
+    within ``video_bitrate_tie_pct``. There, higher raw bitrate is a clean quality dial
+    (analogous to file ``size`` within one photo format), so it breaks the near-tie
+    rather than a coin-flip on the path. It can never reverse the cross-codec weight
+    decision, which sits ahead of it.
+    """
     pixels = (r.get("width") or 0) * (r.get("height") or 0)
     weight = config.match.codec_weights.get((r.get("codec") or "").lower(), 1.0)
     eff = _effective_bitrate(r.get("size"), r.get("duration_s"), weight)
-    return (pixels, _log_band(eff, config.match.video_bitrate_tie_pct), weight)
+    return (pixels, _log_band(eff, config.match.video_bitrate_tie_pct), weight, eff)
 
 
 def _group_lead_and_level(members, rank, config) -> tuple:

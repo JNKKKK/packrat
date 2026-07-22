@@ -1423,16 +1423,22 @@ blowup.
        *(An earlier residual-entropy `detail_score` signal was tried and dropped: it cost ~40% of
        scan CPU, and once banded to tame its high-quality-JPEG noise it only ever agreed with `size`
        within a format — so `size` alone is simpler and equivalent. See §14.)*
-     - **Video:** resolution → **effective-bitrate band** → **codec-efficiency weight** → stable path.
-       Effective bitrate = `size / duration_s × codec_weight` (`match.codec_weights`, §9.2): a
-       more-efficient codec's bits are worth more, so an HEVC master beats an H.264 re-export at equal
-       resolution+quality. Dividing by `duration_s` removes the length bias within the duration
-       tolerance (a slightly-longer clip at equal quality has a bigger file, not more detail). Two
-       effective bitrates within `match.video_bitrate_tie_pct` (default 10%) share a **log-scale band**
-       (a "tie"), so the codec weight then the path decide — not a coin-flip on a noisy diff.
-       *Accepted caveat:* bitrate lies **across codecs** (HEVC is ~2× H.264-efficient), which the
-       weight *reduces* but doesn't cure — surfaced in the manifest (codec + bitrate shown) for
-       hand-override, not solved. No `duration_s`/`codec` → falls back to raw size / weight 1.0.
+     - **Video:** resolution → **effective-bitrate band** → **codec-efficiency weight** → **raw
+       effective bitrate** → stable path. Effective bitrate = `size / duration_s × codec_weight`
+       (`match.codec_weights`, §9.2): a more-efficient codec's bits are worth more, so an HEVC master
+       beats an H.264 re-export at equal resolution+quality. Dividing by `duration_s` removes the
+       length bias within the duration tolerance (a slightly-longer clip at equal quality has a bigger
+       file, not more detail). Two effective bitrates within `match.video_bitrate_tie_pct` (default
+       10%) share a **log-scale band** (a "tie"): the codec weight then decides a **cross-codec**
+       near-tie (prefer the more-efficient/modern encoding at indistinguishable effective quality).
+       The band + weight both tie only when the codecs are equally efficient (typically the *same*
+       codec) — there the trailing **raw effective bitrate** breaks the tie, since higher bitrate at
+       equal resolution+codec is a clean quality dial (the video analogue of file `size` within one
+       photo format). Because it sits *after* the weight it can never reverse the cross-codec pick; it
+       only replaces a path coin-flip on a same-codec near-tie. *Accepted caveat:* bitrate lies
+       **across codecs** (HEVC is ~2× H.264-efficient), which the weight *reduces* but doesn't cure —
+       surfaced in the manifest (codec + bitrate shown) for hand-override, not solved. No
+       `duration_s`/`codec` → falls back to raw size / weight 1.0.
      **This is a hint by default:** the stage stays default-**KEEP** (you still delete a member by
      removing its shortcut); the marker itself never deletes anything and never changes a default.
      **Stage 3 (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want

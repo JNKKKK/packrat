@@ -1,4 +1,4 @@
-"""Video stage-2 keep-lead ranking (§8 B): resolution → effective-bitrate band → codec.
+"""Video stage-2 keep-lead ranking (§8 B): resolution → bitrate band → codec → raw bitrate.
 
 Unit-level: drives ``dedup._pick_lead`` + the band/effective-bitrate helpers with
 synthetic rank rows, so no video decode is needed. The codec-weight fixes the
@@ -81,13 +81,35 @@ def test_video_lead_duration_normalizes_size():
     cfg = Config()
     m = _members(1, 2)
     # Asset 2 is a hair longer (within the duration tolerance) so its FILE is bigger,
-    # but per-second bitrate is essentially equal → must not win on raw size alone;
-    # equal band → stable tiebreak picks the smaller path (asset 1).
+    # but per-second bitrate is *exactly* equal → must not win on raw size alone;
+    # fully-tied key (band + weight + raw eff) → stable tiebreak picks the smaller path.
+    # (42_000_000/10.5 == 40_000_000/10.0 == 4_000_000 exactly, so the raw-bitrate
+    # tiebreak also ties and the decision genuinely falls to the path.)
     rank = _rank(
         **{"1": {"width": 1920, "height": 1080, "size": 40_000_000, "duration_s": 10.0, "codec": "h264"},
-           "2": {"width": 1920, "height": 1080, "size": 41_200_000, "duration_s": 10.3, "codec": "h264"}},
+           "2": {"width": 1920, "height": 1080, "size": 42_000_000, "duration_s": 10.5, "codec": "h264"}},
     )
     assert dedup._pick_lead(m, rank, cfg) == 1
+
+
+def test_video_lead_same_codec_raw_bitrate_breaks_band_tie():
+    """Same codec + resolution, effective bitrates within the tie band but NOT equal:
+    the trailing raw effective bitrate breaks the tie (higher bitrate = better master),
+    NOT the path. Both clips sit in one log band, so the old key would have fallen to
+    the path tiebreak (asset 1, smaller path) — the raw-bitrate tiebreak flips it."""
+    cfg = Config()
+    m = _members(1, 2)
+    # 4_050_000 vs 4_300_000 eff (h264, weight 1.0): ~6% apart → same log band 160.
+    # Asset 2 has the higher bitrate but the LARGER path, so a win proves raw bitrate
+    # (not path) decided.
+    rank = _rank(
+        **{"1": {"width": 1920, "height": 1080, "size": 40_500_000, "duration_s": 10.0, "codec": "h264"},
+           "2": {"width": 1920, "height": 1080, "size": 43_000_000, "duration_s": 10.0, "codec": "h264"}},
+    )
+    assert dedup._log_band(4_050_000, 10.0) == dedup._log_band(4_300_000, 10.0)  # same band
+    lead, level = dedup._group_lead_and_level(m, rank, cfg)
+    assert lead == 2  # higher raw bitrate wins, despite the larger path
+    assert level == "resolution + bitrate + codec + fine bitrate"
 
 
 def test_video_lead_config_weights_override():
