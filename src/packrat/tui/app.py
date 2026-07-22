@@ -29,7 +29,7 @@ from .data import EtaEstimator, reltime
 from .framing import screen
 from .geometry import REF_H, REF_W, Geometry
 from .layout import wrap_hints
-from .modals import ChoiceModal, ConfirmModal
+from .modals import ChoiceModal, ConfirmModal, TrashRefreshModal
 from .nav import DashboardFocus
 from .screens import jobcard
 from .screens.dashboard import dashboard_body, queue_preview_pages
@@ -369,7 +369,7 @@ class Dashboard(FrameScreen):
         if fs.target == "roots":
             roots = self.app.sorted_roots()
             if roots:
-                self.app.push_screen(RootDetailScreen(roots[fs.roots_cursor]["name"]))
+                self.app.open_root(roots[fs.roots_cursor]["name"])
         elif fs.target == "queue":
             job = self._selected_queue_job()
             if job:
@@ -461,7 +461,7 @@ class RootsMax(FrameScreen):
     def action_open(self) -> None:
         roots = self._ordered()
         if roots:
-            self.app.push_screen(RootDetailScreen(roots[self.cursor]["name"]))
+            self.app.open_root(roots[self.cursor]["name"])
 
 
 class AddRootScreen(FrameScreen):
@@ -1683,6 +1683,37 @@ class PackratApp(App):
             if r.get("name") == name:
                 return r.get("path")
         return None
+
+    def _root_kind(self, name: str) -> str | None:
+        """The ``kind`` (library|trash) of a root by name (current snapshot), or None."""
+        for r in self.snapshot.get("roots", []):
+            if r.get("name") == name:
+                return r.get("kind")
+        return None
+
+    def open_root(self, name: str) -> None:
+        """Open a root the right way for its kind (§6.1 — trash has no detail screen).
+
+        A **library** root opens its RootDetailScreen (scan/dedup/merge/cleanup). A
+        **trash** root has no detail — its only meaningful action is *refresh the
+        collection* — so it opens the packrat-with-a-trash-can confirm modal instead;
+        confirming maps to ``packrat trash refresh <root>``. Centralized so every
+        entry point (Dashboard roots box, RootsMax list) treats trash roots alike."""
+        if self._modal_on_top():
+            return
+        if self._root_kind(name) == "trash":
+            self._confirm_trash_refresh(name)
+        else:
+            self.push_screen(RootDetailScreen(name))
+
+    def _confirm_trash_refresh(self, name: str) -> None:
+        """Push the trash mascot modal; on [y] submit ``trash refresh <name>`` (§6.1)."""
+        def after(ok):
+            if ok:
+                self.run_verb(f"packrat trash refresh {name}", title="trash refresh",
+                              submit=lambda: self.client.submit_trash_refresh(name))
+
+        self.push_screen(TrashRefreshModal(name), after)
 
     def root_detail(self, name: str):
         """Return ``(detail_dict, jobs)`` for a root by name (offline → demo)."""

@@ -45,6 +45,25 @@ def modal_lines(title: str, message: str, footer: str, *, extra: list[str] | Non
     return box(title, fitted.rows, MODAL_W)
 
 
+def trash_refresh_modal_lines(root_name: str, footer: str) -> list[str]:
+    """Compose the trash-root refresh modal's inset (pure): mascot on top, prompt below.
+
+    The packrat-with-a-trash-can mascot (:func:`render.trash_refresh_mascot_lines`)
+    sits at the top; beneath it, the question naming ``root_name``, then the footer
+    pinned to the bottom row. Same 60×11 inset as :func:`modal_lines`."""
+    from . import render
+    from .layout import middle_elide
+    inner_w = MODAL_W - 4
+    mascot = render.trash_refresh_mascot_lines(root_name, width=inner_w)
+    # Keep the prompt to ONE line so the footer always survives the clip: the mascot
+    # (5) + blank + prompt (1) + blank + footer (1) = 8 ≤ MODAL_H-2 (9). Middle-elide a
+    # long NAS root name so its drive + leaf stay legible (§12 path rule).
+    prompt = middle_elide(f"Absorb + empty {root_name} now?", inner_w)
+    body = mascot + ["", prompt, ""]
+    fitted = fit(body + [footer], MODAL_H - 2, mode="clip")
+    return box("refresh trash?", fitted.rows, MODAL_W)
+
+
 class Modal(ModalScreen):
     """Base overlay: a centered inset within the fixed frame, ``Esc`` to close.
 
@@ -155,6 +174,41 @@ class ConfirmModal(Modal):
 
     def _resolve_count(self, value: str) -> None:
         self.dismiss(value.strip() == str(self.count))
+
+    def default_result(self):
+        return False
+
+
+class TrashRefreshModal(Modal):
+    r"""The trash-root confirm: a packrat-with-a-trash-can mascot + ``[y]/[n]`` (§6.1).
+
+    Shown when the user picks a **trash** root (Dashboard roots box / RootsMax) —
+    a trash root has no detail screen, its only action is *refresh the collection*.
+    Dismisses ``True`` on ``[y]``/``[Enter]`` (→ ``packrat trash refresh <root>``),
+    ``False`` on ``[n]``/``Esc``. A bool result, like :class:`ConfirmModal`, so it
+    slots into the app's confirm→act flow.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", show=False),
+        Binding("y", "yes", show=False),
+        Binding("n", "cancel", show=False),
+        Binding("enter", "yes", show=False),
+    ]
+
+    def __init__(self, root_name: str):
+        super().__init__()
+        self.root_name = root_name
+        self.footer = "[y] yes   [n] no   Esc cancel"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal"):
+            yield Static(
+                colorize("\n".join(trash_refresh_modal_lines(self.root_name, self.footer))),
+                id="modal-frame", markup=False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
 
     def default_result(self):
         return False

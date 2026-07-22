@@ -130,6 +130,63 @@ def test_refresh_idempotent_rerun(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# single-root refresh  (trash refresh <root>)
+# ---------------------------------------------------------------------------
+def test_refresh_single_root_only_absorbs_that_root(queue_and_db, tmp_path):
+    """`trash refresh <root>` (root_id param) absorbs ONLY that trash root, not the others."""
+    q, database = queue_and_db
+    t1 = tmp_path / "Trash1"
+    t1.mkdir()
+    _png(t1 / "a.png", 11)
+    r1 = register(database, str(t1), kind="trash")
+    t2 = tmp_path / "Trash2"
+    t2.mkdir()
+    _png(t2 / "b.png", 12)
+    register(database, str(t2), kind="trash")
+
+    # Scope to r1: exactly one trashed asset appears (t2 untouched).
+    _run(q, database, "trash-refresh", root_id=r1["id"])
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE status='trashed'")["c"] == 1
+
+    # A bare refresh then absorbs the remaining root too → two total.
+    _run(q, database, "trash-refresh")
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE status='trashed'")["c"] == 2
+
+
+def test_refresh_single_root_disabled_is_noop(queue_and_db, tmp_path):
+    """A disabled trash root absorbs nothing — the handler never falls back to all-roots.
+
+    (jobs.root_id is a FK, so a *nonexistent* id can't even be enqueued; the real
+    defensive case the handler's ``enabled=1`` filter guards is a disabled root.)"""
+    q, database = queue_and_db
+    t1 = tmp_path / "Trash1"
+    t1.mkdir()
+    _png(t1 / "a.png", 13)
+    r1 = register(database, str(t1), kind="trash")
+    t2 = tmp_path / "Trash2"
+    t2.mkdir()
+    _png(t2 / "b.png", 15)
+    register(database, str(t2), kind="trash")
+    database.execute("UPDATE roots SET enabled=0 WHERE id=?", (r1["id"],))
+
+    # Scoped to the DISABLED r1 → nothing absorbed; must NOT spill over to t2.
+    _run(q, database, "trash-refresh", root_id=r1["id"])
+    assert database.query_one("SELECT COUNT(*) c FROM assets")["c"] == 0
+
+
+def test_refresh_single_root_rejects_library_id(queue_and_db, tmp_path):
+    """Pointing the single-root refresh at a LIBRARY root's id absorbs nothing (kind gate)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _png(lib / "keep.png", 14)
+    lib_root = register(database, str(lib))  # library kind
+    _run(q, database, "trash-refresh", root_id=lib_root["id"])
+    # The library file is NOT absorbed as trash (kind='trash' filter excludes it).
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE status='trashed'")["c"] == 0
+
+
+# ---------------------------------------------------------------------------
 # emptying (Windows shell APIs)
 # ---------------------------------------------------------------------------
 @win_only

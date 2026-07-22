@@ -66,6 +66,41 @@ def logo_lines(assets: int, *, gem: str = LOGO_GEMS[0],
     return lines
 
 
+# --- Trash-refresh mascot (§6.1 / trash-root modal) ------------------------
+# The packrat clutching a trash can (🗑️) — shown when the user picks a *trash*
+# root (which has no detail screen; §6.1 refresh is its only action). Mirrors the
+# root-detail FOLDER_ICON mascot: plain ASCII body so the colorizer leaves it
+# default, with a wide (2-cell) emoji held in the `(>…<)` claw. The 🗑️ carries a
+# VS16 (U+FE0F) so it renders as an emoji AND measures 2 cells under cell_width,
+# making `(>🗑️<)` exactly 8 cells like every other body row (the golden-frame
+# width contract — verified, same trick as 📁 in screens/rootdetail.py).
+TRASH_MASCOT = (
+    "  (\\__/)",
+    "  (o..o)",
+    "  (>🗑️<)",
+    "  / || \\",
+    "  (____)",
+)
+
+
+def trash_refresh_mascot_lines(root_name: str, *, width: int) -> list[str]:
+    """Body lines for the trash-root refresh modal (pure): mascot + prompt (§6.1).
+
+    The mascot's middle rows sit beside a short "ready to hoard away the junk you
+    dropped" caption; below it, the actual question naming the trash ``root_name``.
+    ``width`` is the modal's inner content width; every returned line is ≤ ``width``
+    cells (the caller pads to exactly ``width``). The caption is dropped on a very
+    narrow inset so the mascot never wraps."""
+    caption = ["", "ready to hoard away", "the junk you dropped", "", ""]
+    gap = 3
+    body: list[str] = []
+    for i, art in enumerate(TRASH_MASCOT):
+        cap = caption[i] if i < len(caption) else ""
+        line = f"{art}{' ' * gap}{cap}" if cap else art
+        body.append(middle_elide(line, width))
+    return body
+
+
 # --- size formatting -------------------------------------------------------
 def fmt_size(n: int | None) -> str:
     """Human-readable byte size (``12.4 GB`` / ``840 MB`` / ``0 B``) for the UI.

@@ -712,6 +712,8 @@ def _mode_flag(mode: str) -> str:
 # ---------------------------------------------------------------------------
 @trash_app.command("refresh")
 def trash_refresh(
+    root: Optional[str] = typer.Argument(
+        None, help="A registered trash root (path or --name) to refresh. Omit to refresh ALL trash roots."),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
@@ -721,18 +723,22 @@ def trash_refresh(
     forever), and moves the file to the Recycle Bin (permanent on NAS/SMB). No
     `--dry-run` — refresh is never a no-op; browse the folders in Explorer first
     to preview.
+
+    Pass a `<root>` (path or --name) to refresh just that one trash root; with no
+    argument, every registered trash root is refreshed as one logical set.
     """
     client = _client_or_spawn()
     try:
-        job_id = client.submit_trash_refresh()
+        job_id = client.submit_trash_refresh(root)
     except DaemonError as exc:
         typer.echo(f"cannot refresh trash: {_detail(exc)}", err=True)
         raise typer.Exit(1)
+    label = f"trash refresh {root}" if root else "trash refresh"
     if detach:
-        typer.echo("submitted trash refresh — running in the daemon; `packrat jobs` to check.")
+        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
         return
-    final = stream_job(client, job_id, label="trash refresh")
-    typer.echo(f"trash refresh {final}")
+    final = stream_job(client, job_id, label=label)
+    typer.echo(f"{label} {final}")
     if json_out:
         import json
         typer.echo(json.dumps(client.get_job(job_id), indent=2))

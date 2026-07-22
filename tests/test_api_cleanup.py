@@ -93,6 +93,36 @@ def test_trash_refresh_endpoint(client, tmp_path):
     assert d["status"] == "done" and d["type"] == "trash-refresh"
 
 
+def test_trash_refresh_single_root_passes_root_id(client, tmp_path):
+    """`trash refresh <root>` resolves the trash root + carries its id in params (§6.1)."""
+    trash = tmp_path / "Trash"
+    trash.mkdir()
+    reg = client.post("/roots", json={"path": str(trash), "kind": "trash"}, headers=_h()).json()
+    r = client.post("/trash/refresh", json={"root": "Trash"}, headers=_h())
+    assert r.status_code == 200
+    d = _wait(client, r.json()["job_id"])
+    assert d["status"] == "done" and d["type"] == "trash-refresh"
+    # The resolved root's id is frozen into the job's params + jobs.root_id.
+    import json
+    assert json.loads(d["params_json"])["root_id"] == reg["root"]["id"]
+    assert d.get("root_id") == reg["root"]["id"]
+
+
+def test_trash_refresh_rejects_library_root_400(client, tmp_path):
+    """A library root is not a trash inbox → 400 (its files are scanned, not consumed)."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    client.post("/roots", json={"path": str(lib), "name": "Lib"}, headers=_h())
+    r = client.post("/trash/refresh", json={"root": "Lib"}, headers=_h())
+    assert r.status_code == 400
+    assert "trash root" in r.json()["detail"]
+
+
+def test_trash_refresh_unknown_root_404(client):
+    r = client.post("/trash/refresh", json={"root": "ghost"}, headers=_h())
+    assert r.status_code == 404
+
+
 def test_untrash_endpoint(client, tmp_path):
     f = tmp_path / "recovered.png"
     import numpy as np

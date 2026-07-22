@@ -20,7 +20,9 @@ from .registry import JobSpec, register_job
 
 
 def _run_trash_refresh(ctx: JobContext) -> None:
-    summary = trash.refresh_trash(ctx)
+    # `root_id` scopes the refresh to one trash root (the `trash refresh <root>` verb
+    # / TUI mascot modal); absent → every trash root (§6.1, the cleanup/merge default).
+    summary = trash.refresh_trash(ctx, root_id=ctx.params.get("root_id"))
     ctx.set_result({
         "op": "trash-refresh", **summary,
         "summary": f"{summary.get('new_trashed', 0)} new trashed · "

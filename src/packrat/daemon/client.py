@@ -211,9 +211,14 @@ class DaemonClient:
             "/merge", {"source": source, "into": into, "dry_run": dry_run},
         )["job_id"])
 
-    def submit_trash_refresh(self) -> int:
-        """Submit a ``trash refresh`` job (§6.1); returns the job id (always enqueued)."""
-        return int(self._post("/trash/refresh", {})["job_id"])
+    def submit_trash_refresh(self, root: str | None = None) -> int:
+        """Submit a ``trash refresh`` job (§6.1); returns the job id (always enqueued).
+
+        ``root`` (path/--name) scopes the refresh to a single trash root; ``None``
+        refreshes every trash root. A non-trash / unknown root comes back as HTTP
+        400/404 → :class:`DaemonError`.
+        """
+        return int(self._post("/trash/refresh", {"root": root})["job_id"])
 
     def submit_untrash(self, path: str, *, dry_run: bool = False) -> int:
         """Submit an ``untrash`` job (§6.3); returns the job id (always enqueued)."""

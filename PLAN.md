@@ -685,10 +685,12 @@ drive). They are all consulted together as one logical trashed set.
 
 This is the step that turns files-sitting-in-a-trash-folder into permanent trashed fingerprints.
 It is invoked automatically at the start of **`cleanup`** and **`merge`** (and exposed directly
-as `packrat trash refresh`). Steps:
+as `packrat trash refresh [<root>]` — §11). Steps:
 
-1. For **every** registered `kind='trash'` root, enumerate its files (same allowlist/ignore rules
-   as scan). For each file:
+1. For **every** registered `kind='trash'` root (or, when `packrat trash refresh <root>` scopes it,
+   that **single** trash root — §11), enumerate its files (same allowlist/ignore rules as scan).
+   `cleanup`/`merge` always invoke the all-roots form; only the standalone verb (and the TUI's
+   trash-root modal) may scope to one. For each file:
    - Compute BLAKE3 + perceptual signature (photo PDQ; video per-frame PDQ). **No embedding.**
    - Resolve against `assets.content_hash`:
      - **New content** → create an asset with `status='trashed'`, `trashed_at`,
@@ -2311,7 +2313,16 @@ then empty those folders (to Recycle Bin). Runs automatically inside `cleanup` a
 exposed standalone for when you've just dropped junk into a trash folder (§6.1).
 
 ```
-packrat trash refresh [--json]
+packrat trash refresh [<root>] [--json]
+
+Arguments
+  <root>                 OPTIONAL. A registered trash root (path or --name) to refresh on its own.
+                         Must resolve to a kind='trash' root (a library root is rejected — its
+                         files are indexed by `scan`, not consumed). Omit it to refresh EVERY trash
+                         root as one logical set (the original behavior, and what `cleanup`/`merge`
+                         always invoke). This single-root form is what the TUI issues when you pick a
+                         trash root — a trash root has no detail screen, so selecting it opens a
+                         confirm modal that runs exactly this verb (§12, §1.6 parity).
 
 Options
   --json                 Machine-readable report of what was absorbed/emptied.
@@ -2521,7 +2532,12 @@ sample dataset (no daemon) for demoing/development.
 - **Roots interface** (maximized): the full root list with a `[s]` **sort cycle** (recent /
   most-assets / photos / videos, client-side over the id-ascending snapshot), `[a]` **add-root form**
   (§2.2 register flow — Tab between fields, radios/checkboxes, paste-aware path input), `[Enter]` opens
-  root detail. Dot legend + `page i/N` share the header line.
+  root detail. Dot legend + `page i/N` share the header line. **Trash-root exception:** a `kind='trash'`
+  root has **no detail screen** (detail is scan/dedup/merge/cleanup — all library-only), so `[Enter]`
+  on one instead opens a **confirm modal** (the packrat mascot clutching a trash can) asking to absorb +
+  empty that folder; confirming issues `packrat trash refresh <root>` (§6.1). Same guard from either
+  entry point — the dashboard Roots box and this maximized list — so a trash root is never mistaken for
+  a browsable library root (§1.6: the modal action is exactly the CLI verb, nothing TUI-only).
 - **Root detail** (§3): a **3-column stats header** (a folder ASCII icon · assets/photos/videos +
   total size on disk · last-scan / full-scan / last-dedup recency), then **two focus-able bordered boxes** —
   a **Review box** (`[v]`; ⚠ awaiting review, or a calm "No pending review") and a **Jobs panel**

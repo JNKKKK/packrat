@@ -43,6 +43,13 @@ def test_rootless_labels():
     assert job_label("untrash", {"path": "/x/y/IMG.jpg", "dry_run": True}) == "untrash IMG.jpg (dry-run)"
 
 
+def test_trash_refresh_single_root_label():
+    # `trash refresh <root>` names the scoped root; the per-root panel drops it.
+    assert job_label("trash-refresh", {"root_id": 4}, root_name="_Trash") == "trash refresh _Trash"
+    assert job_label("trash-refresh", {"root_id": 4}, root_name="_Trash",
+                     include_root=False) == "trash refresh"
+
+
 def test_merge_labels():
     # merge shows "<src-leaf> → <dest-root>" (§12).
     assert job_label("merge", {"source": r"E:\iphone_dump", "root_id": 1}, root_name="iPhone") \

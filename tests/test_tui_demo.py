@@ -329,6 +329,68 @@ async def _to_photos_detail(app, pilot):
     await pilot.press("enter")
 
 
+# The leaf name of the first trash root in the demo data (for the guard tests).
+_TRASH_NAME = next(r["name"] for r in demo.status_snapshot()["roots"] if r["kind"] == "trash")
+
+
+async def _select_trash_root_in_rootsmax(app, pilot):
+    """Open RootsMax and move the ▸ cursor onto the first trash-root row."""
+    await pilot.press("r")
+    await pilot.press("r")                          # maximize → RootsMax
+    for _ in range(len(demo.ROOTS) + 2):
+        sel = [ln for ln in app.screen.current_frame.split("\n") if "▸" in ln]
+        if sel and _TRASH_NAME in sel[0]:
+            return
+        await pilot.press("down")
+    raise AssertionError(f"could not select trash root {_TRASH_NAME!r} in RootsMax")
+
+
+def test_trash_root_opens_mascot_modal_not_detail():
+    """[Enter] on a TRASH root opens the mascot refresh modal, never RootDetailScreen (§6.1)."""
+    async def scenario(app, pilot):
+        await _select_trash_root_in_rootsmax(app, pilot)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _scr(app) == "TrashRefreshModal", _scr(app)
+        # The mascot + the named prompt are on screen.
+        txt = _modal_text(app)
+        assert "refresh trash?" in txt and _TRASH_NAME in txt
+        # Esc backs out to the roots list, submitting nothing.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert _scr(app) == "RootsMax"
+        assert "trash refresh" not in _toast_text(app)
+    _drive(scenario)
+
+
+def test_trash_root_confirm_maps_to_refresh_verb():
+    """Confirming the mascot modal ([y]) surfaces `packrat trash refresh <root>` (§1.6)."""
+    async def scenario(app, pilot):
+        await _select_trash_root_in_rootsmax(app, pilot)
+        await pilot.press("enter")
+        assert _scr(app) == "TrashRefreshModal"
+        await pilot.press("y")
+        await pilot.pause()
+        assert _scr(app) == "RootsMax"                       # modal dismissed
+        assert f"packrat trash refresh {_TRASH_NAME}" in _toast_text(app)
+    _drive(scenario)
+
+
+def test_trash_root_dashboard_box_also_guarded():
+    """The Dashboard roots box drills through the SAME guard (open_root) → mascot modal."""
+    async def scenario(app, pilot):
+        await pilot.press("r")                          # focus the dashboard Roots box
+        for _ in range(len(demo.ROOTS) + 2):
+            sel = [ln for ln in app.screen.current_frame.split("\n") if "▸" in ln]
+            if sel and _TRASH_NAME in sel[0]:
+                break
+            await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _scr(app) == "TrashRefreshModal", _scr(app)
+    _drive(scenario)
+
+
 def test_root_detail_jobs_panel_focus_and_sections():
     """[J] focuses the bordered Jobs panel; [r]/[q]/[h] pick its sub-sections."""
     async def scenario(app, pilot):

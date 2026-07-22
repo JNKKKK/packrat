@@ -55,22 +55,41 @@ def _new_summary() -> dict:
     }
 
 
-def refresh_trash(ctx) -> dict:
-    r"""Absorb + empty every registered trash root (§6.1). Returns a summary dict.
+def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
+    r"""Absorb + empty registered trash roots (§6.1). Returns a summary dict.
 
     Always runs for real (there is no dry-run refresh, §6.1). Cooperatively
     cancellable at the per-file checkpoint; a cancel leaves already-processed files
     absorbed+emptied and the rest untouched (re-run re-processes survivors).
+
+    ``root_id`` scopes the refresh to a **single** trash root (the standalone
+    ``trash refresh <root>`` verb / the TUI's trash-root mascot modal); ``None``
+    (the default, and what ``cleanup``/``merge`` always pass) processes **every**
+    registered trash root as one logical set. The all-roots contract is unchanged.
     """
     db = ctx.db
     summary = _new_summary()
-    trash_roots = [
-        dict(r)
-        for r in db.query("SELECT * FROM roots WHERE kind='trash' AND enabled=1 ORDER BY id")
-    ]
-    if not trash_roots:
-        ctx.log("trash refresh: no trash roots registered — nothing to absorb.")
-        return summary
+    if root_id is not None:
+        trash_roots = [
+            dict(r)
+            for r in db.query(
+                "SELECT * FROM roots WHERE id=? AND kind='trash' AND enabled=1", (root_id,)
+            )
+        ]
+        if not trash_roots:
+            # The server validates the arg before enqueue, but the daemon is the
+            # authoritative contract (§1.6): a stale/disabled/non-trash id must not
+            # silently fall through to an all-roots refresh.
+            ctx.log(f"trash refresh: no enabled trash root with id {root_id} — nothing to absorb.")
+            return summary
+    else:
+        trash_roots = [
+            dict(r)
+            for r in db.query("SELECT * FROM roots WHERE kind='trash' AND enabled=1 ORDER BY id")
+        ]
+        if not trash_roots:
+            ctx.log("trash refresh: no trash roots registered — nothing to absorb.")
+            return summary
 
     # Enumerate every trash root up front (one scandir round-trip per directory,
     # §10.1), then process the combined worklist so progress spans all roots.

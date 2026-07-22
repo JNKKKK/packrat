@@ -412,8 +412,29 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/trash/refresh", dependencies=[Depends(require_token)])
     def submit_trash_refresh(body: dict):
-        """Submit a ``trash refresh`` job (§6.1) — absorb + empty the trash roots."""
-        return {"job_id": queue.submit("trash-refresh", {})}
+        """Submit a ``trash refresh`` job (§6.1) — absorb + empty the trash roots.
+
+        A ``root`` arg (path/--name) scopes the refresh to that **single** trash
+        root (the ``trash refresh <root>`` verb / TUI mascot modal); it must resolve
+        to a ``kind='trash'`` root (a library root's files are indexed by ``scan``,
+        not consumed) — else 400/404. Omitting it refreshes **every** trash root, the
+        original behavior.
+        """
+        arg = body.get("root")
+        params: dict = {}
+        if arg:
+            try:
+                row = roots_mod.resolve_root(database, arg)
+            except roots_mod.RootError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
+            if row["kind"] != "trash":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{row['name']!r} is a {row['kind']} root; "
+                           "trash refresh targets a trash root",
+                )
+            params["root_id"] = row["id"]
+        return {"job_id": queue.submit("trash-refresh", params)}
 
     @app.post("/untrash", dependencies=[Depends(require_token)])
     def submit_untrash(body: dict):
