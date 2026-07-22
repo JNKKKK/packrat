@@ -208,7 +208,7 @@ def _perceptual_candidates(ctx, root_id: int) -> list[dict]:
 
     if not best:
         return []
-    quals = _asset_qualities(db, set(best) | {t for t, _ in best.values()})
+    quals = matcher.asset_qualities(db, set(best) | {t for t, _ in best.values()})
     hint = cfg.review.low_quality_hint
 
     candidates: list[dict] = []
@@ -231,24 +231,6 @@ def _perceptual_candidates(ctx, root_id: int) -> list[dict]:
                 "shortcut_name": f"{seq:04d}.lnk",
             })
     return candidates
-
-
-def _asset_qualities(db, asset_ids):
-    """Per-asset quality scalar (photo PDQ quality / video min comparable-frame quality)."""
-    if not asset_ids:
-        return {}
-    ph = ",".join("?" for _ in asset_ids)
-    q: dict[int, int] = {}
-    for r in db.query(f"SELECT asset_id, quality FROM phash WHERE asset_id IN ({ph})", tuple(asset_ids)):
-        if r["quality"] is not None:
-            q[int(r["asset_id"])] = int(r["quality"])
-    for r in db.query(
-        f"SELECT asset_id, MIN(quality) mq FROM vphash WHERE asset_id IN ({ph}) GROUP BY asset_id",
-        tuple(asset_ids),
-    ):
-        if r["mq"] is not None:
-            q[int(r["asset_id"])] = int(r["mq"])
-    return q
 
 
 # ===========================================================================
@@ -300,59 +282,65 @@ def _preview(ctx: JobContext, *, mode: str, dry_run: bool) -> None:
 # DEFAULT EXACT APPLY (CLI submits after the user confirms the preview count)
 # ===========================================================================
 def _apply_default_exact(ctx: JobContext) -> None:
-    root = _resolve_library_root(ctx)
-    _reject_if_held(ctx, root)
-    root_id = int(root["id"])
-    exact = _exact_match_instances(ctx.db, root_id)
-    if not exact:
-        ctx.log(f"cleanup {root['name']}: no exact trash matches to delete.")
-        return
-    ctx.db.backup_labeled(f"precleanup-{root_id}")
-    out = _new_out()
-    ctx.set_total(len(exact))
-    done = 0
-    for m in exact:
-        ctx.check_cancelled()
-        done += 1
-        ctx.progress(done, message=os.path.basename(m["path"]))
-        _delete_one(ctx.db, m, out, trash_reason=None)  # asset already trashed
-    ctx.log(
-        f"cleanup {root['name']}: deleted {out['deleted']} exact-trash file(s) "
-        f"({out['network']} permanent on network), {out['already_gone']} already gone."
+    """One-shot delete of exact-trash re-appearances (assets already ``trashed``)."""
+    _apply_oneshot(
+        ctx, mode="exact",
+        find=_exact_match_instances, backup="precleanup", trash_reason=None,
+        empty_msg="no exact trash matches to delete.",
+        done_msg=lambda root, out: (
+            f"cleanup {root['name']}: deleted {out['deleted']} exact-trash file(s) "
+            f"({out['network']} permanent on network), {out['already_gone']} already gone."
+        ),
     )
-    ctx._cleanup_outcome = {"deleted": out["deleted"], "already_gone": out["already_gone"],
-                            "summary": f"exact · {out['deleted']} deleted"}
 
 
 # ===========================================================================
 # UNDECODABLE APPLY (§9.1) — delete the folder's undecodable files + mark trashed
 # ===========================================================================
 def _apply_undecodable(ctx: JobContext) -> None:
+    """One-shot delete of the folder's undecodable files; mark each asset ``trashed``."""
+    _apply_oneshot(
+        ctx, mode="undecodable",
+        find=_undecodable_instances, backup="precleanup-undec",
+        # Recycle the file, then mark its asset trashed (fingerprints—only the hash—
+        # retained, so a re-import of the same corrupt bytes is excluded from merge).
+        trash_reason="cleanup-undecodable",
+        empty_msg="no undecodable files to delete.",
+        done_msg=lambda root, out: (
+            f"cleanup --undecodable {root['name']}: deleted {out['deleted']} "
+            f"undecodable file(s) ({out['network']} permanent on network), "
+            f"{out['already_gone']} already gone — their assets are now trashed."
+        ),
+    )
+
+
+def _apply_oneshot(ctx: JobContext, *, mode, find, backup, trash_reason, empty_msg, done_msg):
+    """Shared skeleton for the two one-shot applies (exact / undecodable).
+
+    ``find(db, root_id)`` returns the target instances; ``backup`` is the DB-backup
+    label prefix; ``trash_reason`` is passed to :func:`_delete_one` (``None`` = the
+    asset is already trashed, exact mode). ``done_msg(root, out)`` composes the
+    completion log; the outcome summary uses the same ``deleted`` tally either way
+    (``_delete_one`` always bumps ``out['deleted']``)."""
     root = _resolve_library_root(ctx)
     _reject_if_held(ctx, root)
     root_id = int(root["id"])
-    undec = _undecodable_instances(ctx.db, root_id)
-    if not undec:
-        ctx.log(f"cleanup {root['name']}: no undecodable files to delete.")
+    targets = find(ctx.db, root_id)
+    if not targets:
+        ctx.log(f"cleanup {root['name']}: {empty_msg}")
         return
-    ctx.db.backup_labeled(f"precleanup-undec-{root_id}")
+    ctx.db.backup_labeled(f"{backup}-{root_id}")
     out = _new_out()
-    ctx.set_total(len(undec))
+    ctx.set_total(len(targets))
     done = 0
-    for m in undec:
+    for m in targets:
         ctx.check_cancelled()
         done += 1
         ctx.progress(done, message=os.path.basename(m["path"]))
-        # Recycle the file, then mark its asset trashed (fingerprints—only the hash—
-        # retained, so a re-import of the same corrupt bytes is excluded from merge).
-        _delete_one(ctx.db, m, out, trash_reason="cleanup-undecodable")
-    ctx.log(
-        f"cleanup --undecodable {root['name']}: deleted {out['undecodable_deleted']} "
-        f"undecodable file(s) ({out['network']} permanent on network), "
-        f"{out['already_gone']} already gone — their assets are now trashed."
-    )
-    ctx._cleanup_outcome = {"deleted": out["undecodable_deleted"], "already_gone": out["already_gone"],
-                            "summary": f"undecodable · {out['undecodable_deleted']} deleted"}
+        _delete_one(ctx.db, m, out, trash_reason=trash_reason)
+    ctx.log(done_msg(root, out))
+    ctx._cleanup_outcome = {"deleted": out["deleted"], "already_gone": out["already_gone"],
+                            "summary": f"{mode} · {out['deleted']} deleted"}
 
 
 # ===========================================================================

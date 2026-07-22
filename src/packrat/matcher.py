@@ -300,3 +300,31 @@ def load_signatures(db, *, asset_ids=None, statuses=("active",)) -> Signatures:
         vs.frames.append((int(r["frame_index"]), r["pdq_bits"], r["quality"] or 0))
     sig.videos.extend(by_asset.values())
     return sig
+
+
+def asset_qualities(db, asset_ids, *, min_frame_quality: int = 0) -> dict[int, int]:
+    """Per-asset PDQ quality scalar for the review low-confidence hint (§5.3).
+
+    Photo → the asset's single ``phash.quality``. Video → the MIN over frames that
+    clear ``min_frame_quality`` (the frames the matcher would actually compare — a
+    dark/transition frame already excluded from matching shouldn't drag the hint
+    down), falling back to the overall MIN when no frame clears the gate. Passing
+    ``min_frame_quality=0`` (the default) reduces the video branch to a plain MIN over
+    all frames — what cleanup wants (its single wider cutoff has no frame gate).
+    """
+    if not asset_ids:
+        return {}
+    ph = ",".join("?" for _ in asset_ids)
+    q: dict[int, int] = {}
+    for r in db.query(f"SELECT asset_id, quality FROM phash WHERE asset_id IN ({ph})", tuple(asset_ids)):
+        if r["quality"] is not None:
+            q[int(r["asset_id"])] = int(r["quality"])
+    for r in db.query(
+        f"SELECT asset_id, "
+        f"  COALESCE(MIN(CASE WHEN quality >= ? THEN quality END), MIN(quality)) mq "
+        f"FROM vphash WHERE asset_id IN ({ph}) GROUP BY asset_id",
+        (min_frame_quality, *asset_ids),
+    ):
+        if r["mq"] is not None:
+            q[int(r["asset_id"])] = int(r["mq"])
+    return q
