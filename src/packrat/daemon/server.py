@@ -81,6 +81,28 @@ class RegisterRootRequest(BaseModel):
     embed: bool = False
 
 
+def _resolve_root_or_400(database, arg: str, *, require_kind: str, verb: str) -> dict:
+    """Resolve a root arg to a row of ``require_kind`` or raise the HTTP error (§8 A1/§11).
+
+    The submit routes that target a specific root (scan/dedup/cleanup/trash-refresh)
+    share this: 404 if the arg resolves to no root, 400 if it resolves to the wrong
+    kind. Keeping the CLI a thin client, the daemon is the authoritative validator.
+    The wrong-kind message names ``require_kind`` (asserted by the API tests).
+    """
+    from fastapi import HTTPException
+
+    try:
+        row = roots_mod.resolve_root(database, arg)
+    except roots_mod.RootError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if row["kind"] != require_kind:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{row['name']!r} is a {row['kind']} root; {verb} targets a {require_kind} root",
+        )
+    return row
+
+
 def build_app(token: str, *, db_file=None, config_path=None):
     """Construct the FastAPI app with all runtime wired up.
 
@@ -298,15 +320,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
             arg = body.get("root")
             if not arg:
                 raise HTTPException(status_code=400, detail="scan needs a <root> or --all")
-            try:
-                row = roots_mod.resolve_root(database, arg)
-            except roots_mod.RootError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
-            if row["kind"] == "trash":
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{row['name']!r} is a trash root; scan never indexes trash folders",
-                )
+            row = _resolve_root_or_400(database, arg, require_kind="library", verb="scan")
             params["root_id"] = row["id"]
         return {"job_id": queue.submit("scan", params)}
 
@@ -321,15 +335,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
         arg = body.get("root")
         if not arg:
             raise HTTPException(status_code=400, detail="dedup needs a <folder> (path or --name)")
-        try:
-            row = roots_mod.resolve_root(database, arg)
-        except roots_mod.RootError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-        if row["kind"] != "library":
-            raise HTTPException(
-                status_code=400,
-                detail=f"{row['name']!r} is a {row['kind']} root; dedup targets a library root",
-            )
+        row = _resolve_root_or_400(database, arg, require_kind="library", verb="dedup")
         params = {
             "root_id": row["id"],
             "confirm": bool(body.get("confirm")),
@@ -352,15 +358,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
         arg = body.get("root")
         if not arg:
             raise HTTPException(status_code=400, detail="cleanup needs a <folder> (path or --name)")
-        try:
-            row = roots_mod.resolve_root(database, arg)
-        except roots_mod.RootError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
-        if row["kind"] != "library":
-            raise HTTPException(
-                status_code=400,
-                detail=f"{row['name']!r} is a {row['kind']} root; cleanup targets a library root",
-            )
+        row = _resolve_root_or_400(database, arg, require_kind="library", verb="cleanup")
         mode = body.get("mode") or "exact"
         if mode not in ("exact", "perceptual", "undecodable"):
             raise HTTPException(status_code=400, detail=f"unknown cleanup mode {mode!r}")
@@ -423,16 +421,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
         arg = body.get("root")
         params: dict = {}
         if arg:
-            try:
-                row = roots_mod.resolve_root(database, arg)
-            except roots_mod.RootError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
-            if row["kind"] != "trash":
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{row['name']!r} is a {row['kind']} root; "
-                           "trash refresh targets a trash root",
-                )
+            row = _resolve_root_or_400(database, arg, require_kind="trash", verb="trash refresh")
             params["root_id"] = row["id"]
         return {"job_id": queue.submit("trash-refresh", params)}
 

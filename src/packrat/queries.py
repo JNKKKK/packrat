@@ -213,22 +213,9 @@ def root_detail(root_arg: str) -> dict | None:
     Resolves ``root_arg`` as path-then-name (§11) via a read-only connection, then
     reports its counts + scan recency + any pending review run.
     """
-    from . import fsutil
-
     conn = _ro()
     try:
-        rows = conn.execute("SELECT * FROM roots").fetchall()
-        canon = fsutil.canonicalize(root_arg)
-        match = None
-        for r in rows:
-            if fsutil.paths_equal(canon, r["path"]):
-                match = r
-                break
-        if match is None:
-            for r in rows:
-                if r["name"].lower() == root_arg.lower():
-                    match = r
-                    break
+        match = _resolve_root_ro(conn, root_arg)
         if match is None:
             return None
         rid = match["id"]

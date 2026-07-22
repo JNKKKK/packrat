@@ -20,6 +20,7 @@ and streams; Ctrl-C detaches the view without stopping the job.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from typing import List, Optional
@@ -237,7 +238,6 @@ def status(
             raise typer.Exit(1)
         d = resp["root_detail"]
         if json_out:
-            import json
             typer.echo(json.dumps(d, indent=2))
             return
         typer.echo(f"[{d['id']}] {d['name']}  {d['path']}  ({d['kind']})")
@@ -271,7 +271,6 @@ def status(
         return
     snap = client.status()
     if json_out:
-        import json
         typer.echo(json.dumps(snap, indent=2))
         return
     typer.echo(f"assets: {snap['assets']}  (photos {snap['photos']} · videos {snap['videos']})")
@@ -321,7 +320,6 @@ def _roots_list(*, json_out: bool) -> None:
     client = _client_or_spawn()
     rs = client.roots()
     if json_out:
-        import json
         typer.echo(json.dumps(rs, indent=2))
         return
     if not rs:
@@ -360,7 +358,6 @@ def roots_register(
         raise typer.Exit(1)
     row = resp["root"]
     if json_out:
-        import json
         typer.echo(json.dumps(resp, indent=2))
         raise typer.Exit(0)
     typer.echo(f"registered root [{row['id']}] {row['name']}  {row['path']}  ({row['kind']}) — not yet scanned.")
@@ -394,7 +391,6 @@ def _jobs_list(*, limit: int, json_out: bool) -> None:
     client = _client_or_spawn()
     js = client.list_jobs(limit)
     if json_out:
-        import json
         typer.echo(json.dumps(js, indent=2))
         return
     if not js:
@@ -407,9 +403,8 @@ def _jobs_list(*, limit: int, json_out: bool) -> None:
         line = f"  [{j['id']}] {stamp}  {label:28s} {j['status']:11s} {j.get('done', 0)}/{j.get('total')}"
         result = j.get("result_json")
         if result:
-            import json as _json
             try:
-                summary = _json.loads(result).get("summary")
+                summary = json.loads(result).get("summary")
             except (ValueError, TypeError):
                 summary = None
             if summary:
@@ -485,22 +480,13 @@ def scan(
         typer.echo("give a <root> or --all, not both.", err=True)
         raise typer.Exit(2)
     client = _client_or_spawn()
-    try:
-        job_id = client.submit_scan(
+    _run_streamed_job(
+        client,
+        lambda: client.submit_scan(
             path, all_roots=all_roots, full=full, embed=embed, dry_run=dry_run, profile=profile
-        )
-    except DaemonError as exc:
-        typer.echo(f"cannot scan: {_detail(exc)}", err=True)
-        raise typer.Exit(1)
-    if detach:
-        typer.echo("submitted scan — running in the daemon; `packrat jobs` to check.")
-        return
-    final = stream_job(client, job_id, label="scan")
-    typer.echo(f"scan {final}")
-    if json_out:
-        import json
-        typer.echo(json.dumps(client.get_job(job_id), indent=2))
-    _exit_if_failed(final)
+        ),
+        verb="scan", label="scan", detach=detach, json_out=json_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -538,21 +524,12 @@ def dedup(
     client = _client_or_spawn()
     label = ("dedup --confirm --keep-suggested" if confirm and keep_suggested
              else "dedup --confirm" if confirm else "dedup --cancel" if cancel else "dedup")
-    try:
-        job_id = client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run,
-                                     keep_suggested=keep_suggested)
-    except DaemonError as exc:
-        typer.echo(f"cannot dedup: {_detail(exc)}", err=True)
-        raise typer.Exit(1)
-    if detach:
-        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
-        return
-    final = stream_job(client, job_id, label=label)
-    typer.echo(f"{label} {final}")
-    if json_out:
-        import json
-        typer.echo(json.dumps(client.get_job(job_id), indent=2))
-    _exit_if_failed(final)
+    _run_streamed_job(
+        client,
+        lambda: client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run,
+                                    keep_suggested=keep_suggested),
+        verb="dedup", label=label, detach=detach, json_out=json_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -579,20 +556,11 @@ def merge(
     """
     client = _client_or_spawn()
     label = "merge --dry-run" if dry_run else "merge"
-    try:
-        job_id = client.submit_merge(source, into, dry_run=dry_run)
-    except DaemonError as exc:
-        typer.echo(f"cannot merge: {_detail(exc)}", err=True)
-        raise typer.Exit(1)
-    if detach:
-        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
-        return
-    final = stream_job(client, job_id, label=label)
-    typer.echo(f"{label} {final}")
-    if json_out:
-        import json
-        typer.echo(json.dumps(client.get_job(job_id), indent=2))
-    _exit_if_failed(final)
+    _run_streamed_job(
+        client,
+        lambda: client.submit_merge(source, into, dry_run=dry_run),
+        verb="merge", label=label, detach=detach, json_out=json_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -648,22 +616,13 @@ def cleanup(
     if mode == "perceptual" or confirm or cancel or dry_run:
         label = ("cleanup --cancel" if cancel else "cleanup --confirm" if confirm
                  else "cleanup --dry-run" if dry_run else f"cleanup --{_mode_flag(mode)}")
-        try:
-            job_id = client.submit_cleanup(
+        _run_streamed_job(
+            client,
+            lambda: client.submit_cleanup(
                 folder, mode=mode, confirm=confirm, cancel=cancel, dry_run=dry_run
-            )
-        except DaemonError as exc:
-            typer.echo(f"cannot cleanup: {_detail(exc)}", err=True)
-            raise typer.Exit(1)
-        if detach:
-            typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
-            return
-        final = stream_job(client, job_id, label=label)
-        typer.echo(f"{label} {final}")
-        if json_out:
-            import json
-            typer.echo(json.dumps(client.get_job(job_id), indent=2))
-        _exit_if_failed(final)
+            ),
+            verb="cleanup", label=label, detach=detach, json_out=json_out,
+        )
         return
 
     # One-shot modes (exact / undecodable): preview (count) → typed confirm → apply.
@@ -697,7 +656,6 @@ def cleanup(
     final = stream_job(client, apply_job, label=f"cleanup --{flag}")
     typer.echo(f"cleanup {final}")
     if json_out:
-        import json
         typer.echo(json.dumps(client.get_job(apply_job), indent=2))
     _exit_if_failed(final)
 
@@ -729,21 +687,12 @@ def trash_refresh(
     argument, every registered trash root is refreshed as one logical set.
     """
     client = _client_or_spawn()
-    try:
-        job_id = client.submit_trash_refresh(root)
-    except DaemonError as exc:
-        typer.echo(f"cannot refresh trash: {_detail(exc)}", err=True)
-        raise typer.Exit(1)
     label = f"trash refresh {root}" if root else "trash refresh"
-    if detach:
-        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
-        return
-    final = stream_job(client, job_id, label=label)
-    typer.echo(f"{label} {final}")
-    if json_out:
-        import json
-        typer.echo(json.dumps(client.get_job(job_id), indent=2))
-    _exit_if_failed(final)
+    _run_streamed_job(
+        client,
+        lambda: client.submit_trash_refresh(root),
+        verb="refresh trash", label=label, detach=detach, json_out=json_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -763,20 +712,11 @@ def untrash(
     and writes nothing to disk — only DB rows.
     """
     client = _client_or_spawn()
-    try:
-        job_id = client.submit_untrash(path, dry_run=dry_run)
-    except DaemonError as exc:
-        typer.echo(f"cannot untrash: {_detail(exc)}", err=True)
-        raise typer.Exit(1)
-    if detach:
-        typer.echo("submitted untrash — running in the daemon; `packrat jobs` to check.")
-        return
-    final = stream_job(client, job_id, label="untrash")
-    typer.echo(f"untrash {final}")
-    if json_out:
-        import json
-        typer.echo(json.dumps(client.get_job(job_id), indent=2))
-    _exit_if_failed(final)
+    _run_streamed_job(
+        client,
+        lambda: client.submit_untrash(path, dry_run=dry_run),
+        verb="untrash", label="untrash", detach=detach, json_out=json_out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +811,31 @@ def _client_or_spawn() -> DaemonClient:
         raise typer.Exit(1)
 
 
+def _run_streamed_job(client, submit, *, verb: str, label: str, detach: bool, json_out: bool):
+    """Submit a job, then either detach or stream it to completion (§3, §11).
+
+    The shared tail of every mutating CLI verb: call ``submit()`` (a thunk that returns
+    the new job id) and map a :class:`DaemonError` to ``cannot <verb>: …`` + exit 1;
+    with ``--detach`` print the submitted notice and return; else stream the progress,
+    echo the terminal status, dump ``--json`` detail, and propagate a failed status as a
+    non-zero exit. ``verb`` names the op for the error line; ``label`` is the stream/echo
+    label (often the same, but e.g. ``dedup --confirm`` differs).
+    """
+    try:
+        job_id = submit()
+    except DaemonError as exc:
+        typer.echo(f"cannot {verb}: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if detach:
+        typer.echo(f"submitted {label} — running in the daemon; `packrat jobs` to check.")
+        return
+    final = stream_job(client, job_id, label=label)
+    typer.echo(f"{label} {final}")
+    if json_out:
+        typer.echo(json.dumps(client.get_job(job_id), indent=2))
+    _exit_if_failed(final)
+
+
 def _is_auth_error(exc: DaemonError) -> bool:
     """True if a ``DaemonError`` is a 401 (token rejected) — the orphaned-daemon signal (§3).
 
@@ -885,7 +850,6 @@ def _detail(exc: DaemonError) -> str:
     """Pull the human message out of a ``DaemonError`` ("<code>: <json/text>")."""
     msg = str(exc)
     try:
-        import json
         _code, _, body = msg.partition(": ")
         parsed = json.loads(body)
         # A well-formed FastAPI error body is {"detail": …}; tolerate a list/str/other
