@@ -139,7 +139,6 @@ register_job(
     JobSpec(
         type="untrash",
         handler=_run_untrash,
-        mutating=True,
         owned_root=None,  # targets no root — arbitrary bytes to hash (§6.3)
     )
 )

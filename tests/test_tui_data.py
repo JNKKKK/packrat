@@ -1,4 +1,4 @@
-"""Tests for the TUI data/liveness layer's pure logic (reltime, ETA, DataSource).
+"""Tests for the TUI data/liveness layer's pure logic (reltime, ETA).
 
 These are clock-free (``now`` is passed explicitly) so they're deterministic —
 the same discipline the golden-frame tests rely on. They also pin the fixture
@@ -8,7 +8,7 @@ timestamps to the exact relative-time strings the mockups show.
 from __future__ import annotations
 
 from packrat.tui import fixtures
-from packrat.tui.data import DataSource, EtaEstimator, fmt_eta, reltime
+from packrat.tui.data import EtaEstimator, fmt_eta, reltime
 
 NOW = fixtures.REFERENCE_NOW  # 2026-07-15T13:30:00
 
@@ -86,35 +86,3 @@ def test_fmt_eta_shapes():
     assert fmt_eta(45) == "ETA 45s"
     assert fmt_eta(240) == "ETA 4m"
     assert fmt_eta(3720) == "ETA 1h02m"
-
-
-# --- DataSource ------------------------------------------------------------
-def test_datasource_pushes_to_subscribers():
-    ds = DataSource(lambda: {"assets": 42})
-    seen = []
-    ds.subscribe(seen.append)
-    ds.refresh()
-    assert seen == [{"assets": 42}] and ds.value == {"assets": 42} and ds.healthy
-
-
-def test_datasource_degrades_on_error_keeps_last_good():
-    box = {"n": 0}
-
-    def fetch():
-        box["n"] += 1
-        if box["n"] == 2:
-            raise RuntimeError("daemon down")
-        return {"n": box["n"]}
-
-    ds = DataSource(fetch)
-    ds.refresh()
-    assert ds.value == {"n": 1} and ds.healthy
-    ds.refresh()                       # raises internally
-    assert ds.value == {"n": 1}        # last good retained
-    assert not ds.healthy              # → drives `daemon ○ down`
-
-
-def test_datasource_with_fixtures():
-    ds = DataSource(fixtures.status_snapshot)
-    snap = ds.refresh()
-    assert snap["assets"] == 124803 and len(snap["roots"]) == 5

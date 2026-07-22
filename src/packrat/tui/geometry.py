@@ -113,15 +113,6 @@ class Geometry:
         """Width of a dashboard queue-preview row (inside the Queue box)."""
         return self.queue_w - 4
 
-    # Path floors (the path is a grow cell now; these are minimums kept for API).
-    @property
-    def path_w_compact(self) -> int:
-        return 20 + self.dw
-
-    @property
-    def path_w_wide(self) -> int:
-        return 20 + self.dw
-
     # --- dashboard section heights --------------------------------------
     # Top is fixed (TOP_ROWS=7). Below it the roots + queue boxes split the rest.
     # Overhead: roots box = 2 borders + 1 DOTKEY line = 3; queue box = 2 borders.

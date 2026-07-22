@@ -19,7 +19,6 @@ from packrat.jobs import JobQueue
 from packrat.jobs import scan as _scan  # noqa: F401 - registers 'scan'
 from packrat.roots import register
 from packrat.tui import render
-from packrat.tui.data import DataSource
 from packrat.tui.fixtures import REFERENCE_NOW as NOW
 from packrat.tui.framing import screen
 from packrat.tui.screens.dashboard import dashboard_body
@@ -386,12 +385,6 @@ def test_root_detail_binds(seeded):
                    detail_header_right(d), footer="Esc")
     _fixed_frame(frame)
     assert "scan" in frame                   # the scan job appears in history
-
-
-def test_datasource_over_real_query(seeded):
-    ds = DataSource(queries.status_snapshot)
-    snap = ds.refresh()
-    assert ds.healthy and snap["assets"] == 3
 
 
 def test_sort_cycle_over_real_snapshot(seeded):

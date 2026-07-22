@@ -14,9 +14,8 @@ dev box, per :mod:`packrat.paths`):
   (spike). On a NAS/SMB share there is no Recycle Bin, so this deletes
   **permanently** (§10); callers warn before confirming.
 
-:func:`read_shortcut_target` resolves a ``.lnk`` back to its target — used only by
-tests / diagnostics, not the confirm path (which keys off shortcut *presence*, §8 B
-Phase 5).
+The confirm path keys off shortcut *presence* (§8 B Phase 5), so it never needs to
+resolve a ``.lnk`` back to its target.
 """
 
 from __future__ import annotations
@@ -50,26 +49,6 @@ def create_shortcut(lnk_path: str, target_path: str) -> None:
         except Exception:  # noqa: BLE001 - working dir is cosmetic
             pass
         sl.QueryInterface(pythoncom.IID_IPersistFile).Save(lnk_path, 0)
-    finally:
-        pythoncom.CoUninitialize()
-
-
-def read_shortcut_target(lnk_path: str) -> str | None:
-    """Resolve a ``.lnk``'s target path (tests/diagnostics; not the confirm path)."""
-    import pythoncom
-    from win32com.shell import shell  # type: ignore
-
-    pythoncom.CoInitialize()
-    try:
-        sl = pythoncom.CoCreateInstance(
-            shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink
-        )
-        sl.QueryInterface(pythoncom.IID_IPersistFile).Load(lnk_path, 0)
-        path, _ = sl.GetPath(shell.SLGP_UNCPRIORITY)
-        return path or None
-    except Exception as exc:  # noqa: BLE001
-        log.debug("could not read shortcut %s: %s", lnk_path, exc)
-        return None
     finally:
         pythoncom.CoUninitialize()
 

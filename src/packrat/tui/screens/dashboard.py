@@ -14,11 +14,6 @@ from ..framing import box, hjoin
 from ..geometry import REFERENCE, Geometry
 from ..layout import fit
 
-# Reference row budgets (the mockup counts) — the live budgets come from Geometry
-# so a taller terminal shows more rows. Kept as names for the golden tests.
-QUEUE_PREVIEW_ROWS = 4
-ROOTS_PREVIEW_ROWS = 5
-
 DOTKEY = "  ◉ deduped   ◐ scanned only   ○ never"
 
 
@@ -56,7 +51,7 @@ def dashboard_body(
     # -- Roots box (full width): a fixed-height window over the root list --
     all_rows = [
         render.root_row_compact(r, selected=(focus == "roots" and i == roots_cursor),
-                               width=geo.row_w_compact, path_w=geo.path_w_compact)
+                               width=geo.row_w_compact)
         for i, r in enumerate(roots)
     ]
     fitted = fit(all_rows, roots_rows, mode="scroll", page=roots_page)

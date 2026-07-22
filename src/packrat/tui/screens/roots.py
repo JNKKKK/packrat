@@ -13,9 +13,6 @@ from ..layout import Cell, fit, row
 
 DOTKEY_WIDE = "◉ scanned + deduped   ◐ scanned only   ○ never scanned"
 
-# Reference list-row budget (the mockup count); the live budget comes from Geometry.
-LIST_ROWS = 5
-
 
 def roots_body(roots: list[dict], *, now: str, geo: Geometry = REFERENCE,
                sort_mode: int = 0, cursor: int = 0, page: int = 0) -> list[str]:

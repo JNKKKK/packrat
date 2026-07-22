@@ -1,13 +1,12 @@
-"""Unit tests for the pure navigation state machines (component-plan §Nav).
+"""Unit tests for the pure navigation state machine (component-plan §Nav).
 
-The focus→maximize table (§focus model) and the ActionSet hint/bind coupling are
-pure logic — tested here without a Textual pilot. The live end-to-end drive is in
-``test_tui_app.py``.
+The focus→maximize table (§focus model) is pure logic — tested here without a
+Textual pilot. The live end-to-end drive is in ``test_tui_app.py``.
 """
 
 from __future__ import annotations
 
-from packrat.tui.nav import Action, ActionSet, DashboardFocus
+from packrat.tui.nav import DashboardFocus
 
 
 # --- DashboardFocus: the focus→maximize table -----------------------------
@@ -62,18 +61,3 @@ def test_move_targets_focused_box_only():
 def test_unknown_key_is_noop():
     fs = DashboardFocus()
     assert fs.press("z") is None and fs.target is None
-
-
-# --- ActionSet: hint ⇄ bind coupling --------------------------------------
-def test_hint_bar_lists_labels():
-    a = ActionSet([Action("s", "[s] scan", "scan"), Action("d", "[d] dedup", "dedup")])
-    assert a.hint_bar() == "[s] scan   [d] dedup"
-
-
-def test_disabled_action_not_bound_but_shown():
-    a = ActionSet([
-        Action("s", "[s] scan", "scan"),
-        Action("u", "[u] unregister", "unregister", disabled=True),
-    ])
-    assert "[u] unregister" in a.hint_bar()          # shown (greyed by render)
-    assert [x.handler for x in a.active_bindings()] == ["scan"]   # not bound

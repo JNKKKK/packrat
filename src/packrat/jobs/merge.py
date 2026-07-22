@@ -58,8 +58,6 @@ from .scan import ScanReport, _scan_one_root, _upsert_instance, enumerate_root
 
 log = logging.getLogger("packrat.jobs.merge")
 
-_OPEN = ("planning", "copying")
-
 
 # ===========================================================================
 # job dispatch
@@ -604,7 +602,6 @@ register_job(
     JobSpec(
         type="merge",
         handler=_run_merge,
-        mutating=True,
         # Merge OWNS the dest root (§8 C Phase 0 step 2a): the dequeue gate holds a
         # fresh merge behind a pending review / another open merge. `ignore_merge_holder`
         # lets a RESUMING merge past its OWN open merge_runs row (else it would deadlock

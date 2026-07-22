@@ -27,15 +27,6 @@ from ..geometry import REFERENCE, Geometry
 from ..layout import Cell, fit, pager_line, row
 from ..tokens import CURSOR, RUNNING
 
-# Reference per-section budgets (fit the 24-row frame: 1+1 running, 1+6+1 queued,
-# 1+6+1 history, + blanks = 20 rows, ≤ the 21 content rows). Live budgets come from
-# Geometry (split the vertical surplus between Queued and History).
-QUEUED_ROWS = 6
-HISTORY_ROWS = 6
-
-SECTIONS = ("running", "queued", "history")
-
-
 def section_pages(n: int, rows: int) -> int:
     """Page count for a section of ``n`` items shown ``rows`` at a time.
 
@@ -130,15 +121,6 @@ def window(jobs, budget, page, cursor, focused, line_fn, *, empty):
     rows = [line_fn(j, CURSOR if (focused and i == cursor) else " ")
             for i, j in enumerate(jobs)]
     return fit(rows, budget, mode="scroll", page=page).rows
-
-
-def focused_header_text(focus: str) -> str:
-    """The UPPERCASED focused-section header (what colorize should accent as a line)."""
-    return {
-        "running": "[R]UNNING:",
-        "queued": "[Q]UEUED (RUNS TOP-DOWN):",
-        "history": "[H]ISTORY:",
-    }.get(focus, "")
 
 
 def running_line(job: dict, cur: str = " ", width: int = 96) -> str:

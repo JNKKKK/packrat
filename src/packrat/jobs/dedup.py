@@ -1219,7 +1219,6 @@ register_job(
     JobSpec(
         type="dedup",
         handler=_run_dedup,
-        mutating=True,
         # analyze OWNS the root (per-root exclusivity); confirm/cancel/dry-run act on
         # the already-owned pending run (or open nothing), so they acquire no root —
         # the global slot + the existing pending row already serialize them (§3).

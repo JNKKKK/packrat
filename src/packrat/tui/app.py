@@ -3,10 +3,9 @@
 Each interface is a Textual :class:`~textual.screen.Screen` holding a single
 :class:`~textual.widgets.Static` that shows the composed 100×24 frame produced by
 a **pure builder** (``screens/*.py`` + ``framing.screen``). The screens own only
-what Textual is for — key routing, focus, the screen stack, and liveness (poll +
-SSE via :class:`~packrat.tui.data.DataSource`); all geometry/text lives in the
-pure layer, so the frames stay golden-testable and §12's fixed layout is enforced
-in one place.
+what Textual is for — key routing, focus, the screen stack, and liveness (a light
+poll timer + SSE progress); all geometry/text lives in the pure layer, so the
+frames stay golden-testable and §12's fixed layout is enforced in one place.
 
 State lives on the :class:`PackratApp`: the read-model snapshots (refreshed on a
 light poll timer + on job-finished) and the daemon client. Actions map to CLI
@@ -101,7 +100,7 @@ class FrameScreen(Screen):
 
     def on_resize(self, event) -> None:
         # Responsive (Level B): the frame is laid out to the live terminal size, so
-        # re-render on every resize. `self.geo` reads the current size at build time.
+        # re-render on every resize (each frame() rebuilds Geometry via geo_for()).
         self.refresh_frame()
 
     # the Geometry the last frame() built (footer-aware); action handlers reuse it
@@ -114,15 +113,6 @@ class FrameScreen(Screen):
         w = max(REF_W, size.width) if size.width else REF_W
         h = max(REF_H, size.height) if size.height else REF_H
         return w, h
-
-    @property
-    def geo(self) -> Geometry:
-        """Layout budgets for the live terminal size (1-row footer default).
-
-        The Static fills the whole screen (packrat.tcss ``width/height: 100%``), so
-        ``self.size`` is the terminal size, clamped to the reference minimum."""
-        w, h = self._term_size()
-        return Geometry(w, h)
 
     def geo_for(self, footer: str) -> Geometry:
         """Geometry whose ``content_rows`` accounts for a (possibly wrapping) footer.

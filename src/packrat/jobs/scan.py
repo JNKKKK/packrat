@@ -938,7 +938,6 @@ register_job(
     JobSpec(
         type="scan",
         handler=_run_scan,
-        mutating=True,
         # Manual `scan <root>` owns its root → queue rejects if busy (guarantee 2).
         # `scan --all` has no root_id → owns nothing → iterates + skips busy roots.
         owned_root=lambda params: params.get("root_id"),

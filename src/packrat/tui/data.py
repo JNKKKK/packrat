@@ -1,7 +1,7 @@
 """Data & liveness — when the dict changes and who pushes it (component-plan §Data).
 
-Widgets are pure ``dict → frame``; this module is the only thing that knows the
-dict can change. Two pure, unit-testable pieces first (no Textual, no clock calls):
+Widgets are pure ``dict → frame``; this module holds the pure, unit-testable
+time/ETA helpers the app uses when rendering live data (no Textual, no clock calls):
 
 - :func:`reltime` — an ISO timestamp → the compact "2h ago" / "today 11:31" /
   "Jul 12" / "now" strings the mockups use, given an explicit ``now`` (never the
@@ -10,11 +10,6 @@ dict can change. Two pure, unit-testable pieces first (no Textual, no clock call
   TUI-side"): ``(total − done) / rate`` over a short trailing window of SSE
   progress samples, blank until enough has streamed. The daemon leaves
   ``ProgressEvent.eta_s`` unset; this fills it.
-
-Then :class:`DataSource`, the subscription seam over a ``queries``/daemon-client
-call that a screen subscribes to (refresh triggers: SSE push, job-finished
-refetch, light poll backstop). It touches the daemon **only through**
-:class:`~packrat.daemon.client.DaemonClient` — no widget calls the daemon directly.
 """
 
 from __future__ import annotations
@@ -122,48 +117,3 @@ def fmt_eta(seconds: float | None) -> str:
         return f"ETA {seconds // 60}m"
     h, m = divmod(seconds // 60, 60)
     return f"ETA {h}h{m:02d}m"
-
-
-# --- DataSource seam -------------------------------------------------------
-class DataSource:
-    """A subscription over one read-model query (component-plan §Data & liveness).
-
-    Wraps a ``queries``/daemon call; a screen ``subscribe()``s and gets pushed the
-    new value whenever :meth:`refresh` re-fetches (the caller drives *when* — on an
-    SSE ``done``/``error`` event, on the poll timer, or on demand). Keeping the
-    fetch behind this seam means widgets never call the daemon and stay pure
-    ``dict → frame``; the app wires a Textual reactive to :meth:`subscribe`.
-
-    ``fetch`` is any zero-arg callable returning the payload (e.g.
-    ``lambda: client.status()`` or, for an offline/demo mode,
-    ``fixtures.status_snapshot``). Exceptions from ``fetch`` are captured on
-    :attr:`error` (so a daemon-down degrades to a "waiting…" state, not a crash)
-    and the last good :attr:`value` is retained.
-    """
-
-    def __init__(self, fetch):
-        self._fetch = fetch
-        self.value = None
-        self.error: Exception | None = None
-        self._subs: list = []
-
-    def subscribe(self, callback) -> None:
-        """Register ``callback(value)``; called on every successful refresh."""
-        self._subs.append(callback)
-
-    def refresh(self):
-        """Re-fetch and push to subscribers. Returns the new value (or last good)."""
-        try:
-            self.value = self._fetch()
-            self.error = None
-        except Exception as exc:  # daemon down / transient — degrade, keep last good
-            self.error = exc
-            return self.value
-        for cb in self._subs:
-            cb(self.value)
-        return self.value
-
-    @property
-    def healthy(self) -> bool:
-        """False after a failed refresh — drives the ``daemon ○ down`` TitleBar state."""
-        return self.error is None

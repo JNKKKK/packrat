@@ -79,10 +79,6 @@ class DaemonClient:
     def list_jobs(self, limit: int = 20) -> list[dict]:
         return self._get(f"/jobs?limit={limit}")["jobs"]
 
-    def queued_jobs(self) -> list[dict]:
-        """The durable FIFO backlog (§3/§12), oldest-first, with blocked reasons."""
-        return self._get("/jobs/queued")["queued"]
-
     def root_jobs(self, root_id: int, limit: int = 50) -> list[dict]:
         """One root's current + historical jobs, newest-first (§12 per-root panel)."""
         return self._get(f"/roots/{root_id}/jobs?limit={limit}")["jobs"]

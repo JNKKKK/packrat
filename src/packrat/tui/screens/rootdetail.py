@@ -22,9 +22,6 @@ from ..layout import Cell, row
 from ..tokens import CURSOR, WARN
 from . import queue as q
 
-# The Jobs panel's sub-sections, mirroring the Queue interface (§4).
-JOB_SECTIONS = ("running", "queued", "history")
-
 # A 5-row packrat mascot (clutching a 📁) for the stats section's first column (§3),
 # echoing the dashboard hoard logo. Plain text (no box-drawing) so the colorizer
 # leaves it default and it never reads as a focused-panel heavy border; the 📁 is a

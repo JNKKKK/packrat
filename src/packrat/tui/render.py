@@ -160,14 +160,12 @@ def root_dot(r: dict) -> str:
     return tokens.status_dot(r["kind"], r.get("last_scan_at"), r.get("last_dedup_at"))
 
 
-def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
-                     path_w: int = 20) -> str:
+def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str:
     """A dashboard/focused-box root row (§1): ``▸ Name  path……………  ◐   count``.
 
     The path is a **grow** cell that absorbs the middle, so the dot + count are
-    pushed to the right end (most space goes to the path). ``path_w`` is kept as a
-    minimum floor; ``width`` is the full row width. Trash roots show ``(trash)`` in
-    the count column and no dot.
+    pushed to the right end (most space goes to the path). ``width`` is the full row
+    width. Trash roots show ``(trash)`` in the count column and no dot.
     """
     cur = CURSOR if selected else " "
     dot = root_dot(r)
@@ -186,14 +184,14 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62,
     ).rstrip()
 
 
-def root_row_wide(r: dict, *, now: str, selected: bool = False, path_w: int = 20,
+def root_row_wide(r: dict, *, now: str, selected: bool = False,
                   width: int = 96) -> str:
     r"""A maximized Roots-interface row (§2.1): dot, count, recency all right-aligned.
 
     ``▸ Downloads  D:\dump…………………  ◐     241  never deduped`` — the path is a
     **grow** cell absorbing the middle, so the dot / count / recency columns sit at
-    the right end. ``width`` is the full row width; ``path_w`` is unused (kept for
-    call compatibility). Trash roots show ``(trash)`` for the count and ``—`` recency.
+    the right end. ``width`` is the full row width. Trash roots show ``(trash)`` for
+    the count and ``—`` recency.
     """
     cur = CURSOR if selected else " "
     dot = root_dot(r)

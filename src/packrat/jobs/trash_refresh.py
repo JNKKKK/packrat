@@ -34,7 +34,6 @@ register_job(
     JobSpec(
         type="trash-refresh",
         handler=_run_trash_refresh,
-        mutating=True,
         owned_root=None,  # targets all trash roots; owns no library root (§3)
     )
 )

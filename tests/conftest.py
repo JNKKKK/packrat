@@ -29,7 +29,7 @@ def _run_sleeper(ctx) -> None:
 
 # Register once for the whole session (idempotent — get_job_spec guards re-import).
 if get_job_spec("sleeper") is None:
-    register_job(JobSpec(type="sleeper", handler=_run_sleeper, mutating=True, owned_root=None))
+    register_job(JobSpec(type="sleeper", handler=_run_sleeper, owned_root=None))
 
 
 @pytest.fixture()

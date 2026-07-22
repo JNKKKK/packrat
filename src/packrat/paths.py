@@ -58,11 +58,6 @@ def daemon_state_path() -> Path:
     return home_dir() / "daemon.json"
 
 
-def daemon_lock_path() -> Path:
-    """Single-instance lockfile for the race-free auto-spawn handshake (§3)."""
-    return home_dir() / "daemon.lock"
-
-
 def logs_dir() -> Path:
     """The daemon log directory (``logs/``), holding the rolling + bootstrap logs."""
     d = home_dir() / "logs"

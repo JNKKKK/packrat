@@ -2,8 +2,8 @@
 
 Each job type declares:
 - ``handler``: ``(JobContext) -> None`` — the work, run on the single worker thread.
-- ``mutating``: whether it takes the global single-worker slot (§3 guarantee 1).
-  Read-only jobs don't exist yet (status/roots are plain HTTP), so all M0 jobs mutate.
+  Every job takes the global single-worker slot (§3 guarantee 1); read-only queries
+  (status/roots) are plain HTTP, not jobs.
 - ``owned_root``: ``(params) -> root_id | None`` — the root this job *owns* for
   per-root exclusivity (§3 guarantee 2). ``None`` means it owns no root
   (e.g. ``untrash``, or ``scan --all`` which iterates roots rather than owning one).
@@ -25,7 +25,6 @@ from .context import JobContext
 class JobSpec:
     type: str
     handler: Callable[[JobContext], None]
-    mutating: bool = True
     owned_root: Callable[[dict], int | None] | None = None
     ignore_merge_holder: bool = False
 

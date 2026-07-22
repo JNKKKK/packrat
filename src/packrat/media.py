@@ -36,9 +36,6 @@ log = logging.getLogger("packrat.media")
 
 _HASH_CHUNK = 1 << 20  # 1 MiB streaming reads (§10.1 bandwidth-bound over SMB)
 
-# PDQ hashes are 256 bits → 32 bytes packed (np.packbits). Stored as a BLOB.
-PDQ_BYTES = 32
-
 
 # ---------------------------------------------------------------------------
 # media-type classification (by EXTENSION, never by decoding — §8 A2 step 7)

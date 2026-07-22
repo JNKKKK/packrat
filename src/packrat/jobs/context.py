@@ -105,9 +105,12 @@ class JobContext:
         self._set_progress(self._done, total)
         self._emit(ProgressEvent(self.job_id, "progress", total=total, done=self._done))
 
-    def progress(self, done: int | None = None, *, message: str | None = None,
-                 eta_s: float | None = None) -> None:
-        """Report progress. ``done`` defaults to incrementing by one."""
+    def progress(self, done: int | None = None, *, message: str | None = None) -> None:
+        """Report progress. ``done`` defaults to incrementing by one.
+
+        No ETA is emitted here — the daemon leaves ``ProgressEvent.eta_s`` unset and
+        the TUI derives ETA client-side from the progress stream (:class:`EtaEstimator`).
+        """
         if done is None:
             self._done += 1
         else:
@@ -118,7 +121,7 @@ class JobContext:
             ProgressEvent(
                 self.job_id, "progress",
                 total=self._total, done=self._done,
-                message=message, eta_s=eta_s,
+                message=message,
             )
         )
 

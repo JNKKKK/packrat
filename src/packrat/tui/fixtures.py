@@ -160,27 +160,6 @@ DEDUP_CLEAN = _job(
     }),
 )
 
-TRASH_REFRESH_DONE = _job(
-    id=402, type="trash-refresh", status="done", finished_at="2026-07-15T08:00:00",
-    label="trash refresh",
-    result_json=_rj({
-        "op": "trash-refresh", "roots": 1, "new_trashed": 9, "flipped": 3,
-        "already_trashed": 1, "emptied": 12, "undeletable": 0, "errors": 0,
-        "summary": "9 new trashed · 3 flipped · 1 known · 12 emptied",
-    }),
-)
-
-UNTRASH_DONE = _job(
-    id=500, type="untrash", status="done", finished_at="2026-07-15T07:00:00",
-    params_json=_rj({"path": r"R:\recovered\IMG_4471.jpg"}),
-    label="untrash IMG_4471.jpg",
-    result_json=_rj({
-        "op": "untrash", "dry_run": False, "untrashed": 1, "forgotten": 0,
-        "already_active": 0, "unknown": 0, "errors": 0,
-        "summary": "1 reactivated · 0 forgotten · 0 active · 0 unknown",
-    }),
-)
-
 # A paused `cleanup --trash-perceptual`: the analyze job COMPLETED and left a pending
 # review_run — like DEDUP_PENDING, but op='cleanup', so the card must route its
 # confirm/cancel to `cleanup … --confirm` (not dedup). Its analyze emits

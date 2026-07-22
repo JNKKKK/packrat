@@ -1,27 +1,19 @@
-"""Navigation & focus — the packrat-specific state machines (component-plan §Nav).
+"""Navigation & focus — the packrat-specific state machine (component-plan §Nav).
 
 Textual gives the primitives (``Screen``, ``push_screen``/``pop_screen``, focus);
-this module owns the two behaviors Textual can't know about, kept as **pure,
-testable** helpers so a screen just drives them:
+this module owns the one behavior Textual can't know about, kept as a **pure,
+testable** helper so a screen just drives it:
 
 - :class:`DashboardFocus` — the dashboard's focus→maximize state machine (§focus
   model): ``[r]``/``[q]`` once focuses a box (heavy frame + cursor), again
   maximizes into the full §2/§4 interface; ``Esc`` un-focuses; ``↑/↓`` move the
   cursor in place; ``←/→`` page. The two boxes are peers — focusing one unfocuses
   the other.
-- :class:`ActionSet` — a screen's footer actions as ``(key, label, handler,
-  disabled)`` declarations; the HintBar renders the labels from the *same* list so
-  the hint bar can never drift from the real bindings (§1.6: every handler maps to
-  a CLI verb; a deferred verb is ``disabled`` → shown greyed, not bound).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
-# Focus states for the dashboard boxes.
-UNFOCUSED = "unfocused"
-FOCUSED = "focused"
+from dataclasses import dataclass
 
 
 @dataclass
@@ -73,37 +65,3 @@ def _clamp(i: int, length: int) -> int:
     if length <= 0:
         return 0
     return max(0, min(i, length - 1))
-
-
-@dataclass
-class Action:
-    """One footer action: a key, its hint label, a handler name, and disabled flag.
-
-    ``handler`` names the CLI verb / screen transition it triggers (§1.6 — no
-    TUI-only action). ``disabled`` renders the hint greyed and skips the binding
-    (a deferred verb, e.g. unregister/rename — §14 #9).
-    """
-
-    key: str
-    label: str
-    handler: str
-    disabled: bool = False
-
-
-@dataclass
-class ActionSet:
-    """A screen's declared actions; the single source for both bindings and hints."""
-
-    actions: list[Action] = field(default_factory=list)
-
-    def hint_bar(self) -> str:
-        """Render the footer hint string from the actions (labels only).
-
-        A disabled action is shown but visually de-emphasized by the caller (the
-        pure string keeps the text; color/dim is applied at render, §Theming).
-        """
-        return "   ".join(a.label for a in self.actions)
-
-    def active_bindings(self) -> list[Action]:
-        """The actions that are actually bound (not deferred)."""
-        return [a for a in self.actions if not a.disabled]

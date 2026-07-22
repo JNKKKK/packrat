@@ -765,7 +765,6 @@ register_job(
     JobSpec(
         type="cleanup",
         handler=_run_cleanup,
-        mutating=True,
         # owned_root drives the DEQUEUE gate (§3): a cleanup that TOUCHES the root —
         # analyze, preview, one-shot apply, dry-run — must not run while another op
         # holds it, so it declares the root and the queue holds it in the backlog

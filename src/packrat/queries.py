@@ -569,28 +569,6 @@ def recent_jobs(limit: int = 20) -> list[dict]:
         conn.close()
 
 
-def queued_jobs() -> list[dict]:
-    """The durable backlog in dequeue order (§3/§12) — the TUI Queue panel.
-
-    Ordered ``priority DESC, enqueued_at, id`` (matching the queue's dequeue, §3), so a
-    prioritized job shows at the front. Each queued row is annotated with its display
-    ``label``; the *blocked* reason (owned root held) is computed by the daemon's live
-    queue (:meth:`JobQueue.blocked_reason`), not here, since it depends on in-memory
-    holder state.
-    """
-    conn = _ro()
-    try:
-        rows = conn.execute(
-            "SELECT j.id, j.type, j.root_id, j.status, j.enqueued_at, j.params_json, "
-            "  r.name AS root_name "
-            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
-            "WHERE j.status='queued' ORDER BY j.priority DESC, j.enqueued_at, j.id"
-        ).fetchall()
-        return [_job_dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
 def root_jobs(root_id: int, limit: int = 50) -> list[dict]:
     """One root's jobs — current (queued/running) + history, newest-first (§12).
 
