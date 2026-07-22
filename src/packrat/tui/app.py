@@ -24,7 +24,7 @@ from textual.widgets import Static
 
 from . import demo, fixtures
 from .colorize import colorize
-from .data import EtaEstimator, reltime
+from .data import EtaEstimator, reltime, result_of
 from .framing import screen
 from .geometry import REF_H, REF_W, Geometry
 from .layout import wrap_hints
@@ -1332,11 +1332,7 @@ class JobCard(FrameScreen):
         super().on_mount()
 
     def _op(self) -> str:
-        import json
-        try:
-            return json.loads(self.job.get("result_json") or "{}").get("op") or self.job["type"]
-        except (ValueError, TypeError):
-            return self.job["type"]
+        return result_of(self.job).get("op") or self.job["type"]
 
     def _load_problems(self) -> None:
         if self.job.get("status") in ("running", "error", "interrupted"):

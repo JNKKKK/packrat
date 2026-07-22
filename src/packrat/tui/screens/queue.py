@@ -22,7 +22,7 @@ sections inside a bordered box.
 from __future__ import annotations
 
 from .. import render
-from ..data import reltime
+from ..data import reltime, result_of, same_day
 from ..geometry import REFERENCE, Geometry
 from ..layout import Cell, fit, pager_line, row
 from ..tokens import CURSOR, RUNNING
@@ -146,7 +146,7 @@ def queued_line(job: dict, cur: str = " ", width: int = 96) -> str:
 
 def history_line(job: dict, now: str, cur: str = " ", width: int = 96) -> str:
     when = reltime(job.get("finished_at") or job.get("started_at"), now,
-                   clock=(job.get("finished_at") or "")[:10] == (now or "")[:10])
+                   clock=same_day(job.get("finished_at"), now))
     summ = _summary(job)
     status = job.get("status", "")
     left = f"{cur} #{job['id']} {job.get('label', job['type'])}"
@@ -159,8 +159,4 @@ def history_line(job: dict, now: str, cur: str = " ", width: int = 96) -> str:
 
 
 def _summary(job: dict) -> str:
-    import json
-    try:
-        return json.loads(job.get("result_json") or "{}").get("summary", "") or ""
-    except (ValueError, TypeError):
-        return ""
+    return result_of(job).get("summary", "") or ""

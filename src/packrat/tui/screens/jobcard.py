@@ -9,21 +9,13 @@ is NULL (error/interrupted). All pure (job dict → lines).
 
 from __future__ import annotations
 
-import json
-
 from .. import render
+from ..data import result_of as _result
 from ..geometry import REFERENCE, Geometry
 from ..layout import Cell, row
 from ..tokens import CROSS, CW, WARN
 
 RULE = "─" * (CW - 4)
-
-
-def _result(job: dict) -> dict:
-    try:
-        return json.loads(job.get("result_json") or "{}")
-    except (ValueError, TypeError):
-        return {}
 
 
 def review_ui(job: dict) -> str | None:

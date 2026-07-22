@@ -14,24 +14,9 @@ anchored to :data:`packrat.tui.fixtures.REFERENCE_NOW` for deterministic times.
 
 from __future__ import annotations
 
-import json
-
-from .fixtures import REFERENCE_NOW  # anchor demo timestamps to the same "now"
-
-
-def _rj(d: dict) -> str:
-    return json.dumps(d)
-
-
-def _job(**kw) -> dict:
-    base = {
-        "id": 0, "type": "scan", "root_id": None, "status": "done",
-        "total": None, "done": 0, "enqueued_at": None, "started_at": None,
-        "finished_at": None, "error": None, "result_json": None,
-        "params_json": "{}", "root_name": None, "label": "",
-    }
-    base.update(kw)
-    return base
+# anchor demo timestamps to the same "now"; reuse the fixture job/result builders.
+from .data import result_of
+from .fixtures import REFERENCE_NOW, _job, _rj
 
 
 # --- roots: ~33 → the Roots list (§2.1) spans several pages on any terminal ----
@@ -334,7 +319,7 @@ def job_problem_files(job_id: int) -> list[dict]:
     job = next((j for j in RECENT if j["id"] == job_id), None)
     if job is None:
         return []
-    r = json.loads(job.get("result_json") or "{}")
+    r = result_of(job)
     if r.get("op") != "scan":
         return []
     root = job.get("root_name") or "root"

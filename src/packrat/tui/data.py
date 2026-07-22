@@ -14,11 +14,34 @@ time/ETA helpers the app uses when rendering live data (no Textual, no clock cal
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from .tokens import ETA_WINDOW_S
+
+
+def same_day(ts: str | None, now: str | None) -> bool:
+    """True if two ISO timestamps fall on the same calendar day (``YYYY-MM-DD``).
+
+    Drives the ``reltime(..., clock=)`` "today HH:MM" affordance. A missing/empty
+    ``ts`` is never "today" (its blank prefix can't match a real ``now``).
+    """
+    return bool(ts) and (ts or "")[:10] == (now or "")[:10]
+
+
+def result_of(job: dict) -> dict:
+    """Parse a job row's ``result_json`` to a dict (``{}`` if absent/malformed).
+
+    The one place the TUI decodes the daemon's compact outcome summary (§4/§12) —
+    job cards, the queue history line, and the offline demo all read it through here
+    instead of re-writing the ``json.loads(... or "{}")`` guard.
+    """
+    try:
+        return json.loads(job.get("result_json") or "{}")
+    except (ValueError, TypeError):
+        return {}
 
 
 # --- relative time ---------------------------------------------------------

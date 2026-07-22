@@ -24,11 +24,15 @@ import logging
 import os
 
 from . import fsutil, paths
+from .ignore import REVIEW_DIR  # the single source; scan's ignore set owns it
 
 log = logging.getLogger("packrat.review")
 
-#: The packrat-owned review area under each root (matches ignore.REVIEW_DIR).
-REVIEW_DIR = "_packrat_review"
+__all__ = [
+    "REVIEW_DIR", "EXACT_DUP", "SUSPECT_RECOMPRESSION", "WITH_MINOR_EDITS",
+    "DEDUP_STAGE_FOLDERS", "PERCEPTUAL_TRASH", "staging_parent", "staging_folder",
+    "ensure_dir", "remove_tree", "path_exists", "audit_run_dir", "write_audit",
+]
 
 #: dedup per-stage staging subfolders (§8 B). Stage 1 is default-DELETE (named
 #: `…_to_delete`); stages 2 & 3 are default-KEEP (content-named).

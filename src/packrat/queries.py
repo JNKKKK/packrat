@@ -8,8 +8,6 @@ but the shapes match §11 so later milestones fill them in without changing the 
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from . import db as _db
 
 

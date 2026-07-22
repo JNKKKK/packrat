@@ -14,7 +14,7 @@ trailing columns (dot/count/status) stay right-aligned as the frame widens.
 from __future__ import annotations
 
 from . import tokens
-from .data import fmt_eta, reltime
+from .data import fmt_eta, reltime, same_day
 from .layout import Cell, middle_elide, row
 from .tokens import BAR_EMPTY, BAR_FILL, CURSOR, RUNNING
 
@@ -205,7 +205,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
         dd = r.get("last_dedup_at")
         if not dd:
             recency = "never deduped"
-        elif _is_today(dd, now):
+        elif same_day(dd, now):
             recency = "deduped today"
         else:
             recency = f"deduped {reltime(dd, now)}"
@@ -223,10 +223,6 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
             Cell(recency, width=15, align="right", style="dim"),
         ],
     ).rstrip()
-
-
-def _is_today(ts: str, now: str) -> bool:
-    return (ts or "")[:10] == (now or "")[:10]
 
 
 def _dot_style(dot: str) -> str | None:

@@ -15,7 +15,7 @@ panel, ``[r]``/``[q]``/``[h]`` pick the sub-section (Queued/History paginate). P
 from __future__ import annotations
 
 from .. import render
-from ..data import reltime
+from ..data import reltime, same_day
 from ..framing import box
 from ..geometry import REFERENCE, Geometry
 from ..layout import Cell, row
@@ -200,10 +200,6 @@ def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, 
     return box(title, body, width, heavy=focused)
 
 
-def _is_today(ts, now) -> bool:
-    return bool(ts) and (ts or "")[:10] == (now or "")[:10]
-
-
 def _stats_columns(d: dict, now: str, width: int) -> list[str]:
     """The 3-column stats header (§3): mascot | counts | scan/dedup dates.
 
@@ -224,7 +220,7 @@ def _stats_columns(d: dict, now: str, width: int) -> list[str]:
     dates = [
         f"last scan   {reltime(d.get('last_scan_at'), now)}",
         f"full scan   {reltime(d.get('last_full_scan_at'), now)}",
-        f"last dedup  {reltime(dd, now, clock=_is_today(dd, now))}",
+        f"last dedup  {reltime(dd, now, clock=same_day(dd, now))}",
         "",
     ]
     # Pad counts/dates to the mascot's height so every row has all three cells.
