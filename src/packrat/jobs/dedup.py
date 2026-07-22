@@ -39,7 +39,7 @@ from ..util import now_iso
 from . import _guards
 from ._dbops import delete_instance as _delete_instance
 from ._dbops import forget_if_orphaned as _forget_if_orphaned
-from .context import CancelledError, JobContext
+from .context import JobContext
 from .registry import JobSpec, register_job
 
 log = logging.getLogger("packrat.jobs.dedup")

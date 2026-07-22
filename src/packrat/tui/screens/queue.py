@@ -24,7 +24,7 @@ from __future__ import annotations
 from .. import render
 from ..data import reltime, result_of, same_day
 from ..geometry import REFERENCE, Geometry
-from ..layout import Cell, fit, pager_line, row
+from ..layout import Cell, fit, row
 from ..tokens import CURSOR, RUNNING
 
 def section_pages(n: int, rows: int) -> int:
