@@ -77,13 +77,29 @@ class Modal(ModalScreen):
     message = ""
     footer = "Esc close"
 
+    def _render_masked(self, lines: list[str]):
+        """Compose modal ``lines`` → colorized Rich ``Text``, NSFW-masked when ``--nsfw``.
+
+        Modals name the root (``clean up <root>``, ``Delete … in <root>?``), so the
+        redaction must reach them too — the app's ``(value, masked)`` pairs are applied
+        (:func:`packrat.tui.nsfw.redact`) on the joined string just before colorize
+        (cell-width-preserving, so the colorizer's offsets hold). A no-op when ``--nsfw``
+        is off. (Named ``_render_masked``, not ``_render`` — the latter is a Textual
+        ``Widget`` internal.)"""
+        frame = "\n".join(lines)
+        reds = getattr(self.app, "redactions", lambda: [])()
+        if reds:
+            from .nsfw import redact
+            frame = redact(frame, reds)
+        return colorize(frame)
+
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
             # markup=False — pre-composed plain text; brackets are literal (see
             # FrameScreen.compose for why markup parsing corrupts the frame).
             # colorize applies theme role colors post-layout (§Theming).
-            yield Static(colorize("\n".join(modal_lines(
-                self.title, self.message, self.footer, extra=self.extra_lines()))),
+            yield Static(self._render_masked(modal_lines(
+                self.title, self.message, self.footer, extra=self.extra_lines())),
                 id="modal-frame", markup=False)
 
     def extra_lines(self) -> list[str]:
@@ -204,7 +220,7 @@ class TrashRefreshModal(Modal):
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
             yield Static(
-                colorize("\n".join(trash_refresh_modal_lines(self.root_name, self.footer))),
+                self._render_masked(trash_refresh_modal_lines(self.root_name, self.footer)),
                 id="modal-frame", markup=False)
 
     def action_yes(self) -> None:
@@ -245,7 +261,7 @@ class ChoiceModal(Modal):
     def action_move(self, delta: int) -> None:
         self.cursor = max(0, min(self.cursor + delta, len(self.options) - 1))
         self.query_one("#modal-frame", Static).update(
-            colorize("\n".join(modal_lines(self.title, self.message, self.footer))))
+            self._render_masked(modal_lines(self.title, self.message, self.footer)))
 
     def action_choose(self) -> None:
         self.dismiss(self.cursor)

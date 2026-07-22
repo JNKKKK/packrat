@@ -11,7 +11,8 @@ Current surface (M1–M5):
   ``jobs cancel`` with no id cancels the running job.
 - ``packrat daemon start|stop|restart|status`` — lifecycle/troubleshooting (§11).
 - ``packrat smoke-test`` — the §9.1 decode smoke test.
-- ``packrat`` (no args) — the TUI placeholder (full TUI is M6, §12).
+- ``packrat`` (no args) — the TUI placeholder (full TUI is M6, §12); ``--nsfw`` masks
+  adult-content keywords (EN/CN) in on-screen root names/paths (display-only privacy).
 
 Every job-submitting command auto-spawns the daemon on first use (§3), submits,
 and streams; Ctrl-C detaches the view without stopping the job.
@@ -841,6 +842,10 @@ def _root(
     offline: bool = typer.Option(
         False, "--offline",
         help="Run the TUI on sample data (no daemon) — a demo/preview mode."),
+    nsfw: bool = typer.Option(
+        False, "--nsfw",
+        help="Mask adult-content keywords (EN/CN) in root names/paths on screen — "
+             "a display-only privacy redaction for screen-sharing."),
 ):
     if version:
         typer.echo(f"packrat {__version__}")
@@ -852,7 +857,7 @@ def _root(
     # can't reach one; `--offline` renders bundled sample data with no daemon.
     from ..tui.app import run as run_tui
 
-    run_tui(offline=offline)
+    run_tui(offline=offline, nsfw=nsfw)
 
 
 # ---------------------------------------------------------------------------

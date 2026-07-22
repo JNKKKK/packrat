@@ -138,7 +138,24 @@ class FrameScreen(Screen):
         self.current_frame = self.frame()      # PLAIN string (tests / snapshotting)
         # Colorize post-layout (§Theming): the plain frame stays the source of
         # truth; only the live widget gets theme role colors applied by pattern.
-        self.query_one("#frame", Static).update(self._colorize(self.current_frame))
+        # NSFW masking (--nsfw) runs BEFORE colorize on the same string, so the
+        # colorizer's offset math sees the already-redacted (cell-width-preserving)
+        # frame; the plain current_frame keeps the true text.
+        self.query_one("#frame", Static).update(self._colorize(self._mask(self.current_frame)))
+
+    def _mask(self, frame: str) -> str:
+        """Apply the display-only NSFW redaction when ``--nsfw`` is on.
+
+        Replaces the live roots' keyword-bearing name/path values (and path components)
+        by their masked form wherever they appear (:func:`packrat.tui.nsfw.redact`), so
+        only real root-derived text is touched — never app chrome. Identity otherwise.
+        Cell-width-preserving, so the colorizer that consumes the result keeps its
+        offsets; ``current_frame`` (the golden-test source of truth) is never touched."""
+        reds = getattr(self.app, "redactions", lambda: [])()
+        if reds:
+            from .nsfw import redact
+            return redact(frame, reds)
+        return frame
 
     #: Whether this screen's ``▸`` marks a selectable LIST ROW (→ bold + brighter-white
     #: emphasis). True for every list screen; a screen whose ``▸`` is a *form field*
@@ -1460,7 +1477,8 @@ class PackratApp(App):
     # `escape` bindings); Ctrl-Q is the anywhere-quit.
     BINDINGS = [Binding("ctrl+q", "quit", "quit", show=False, priority=True)]
 
-    def __init__(self, *, client=None, offline: bool = False, now: str | None = None):
+    def __init__(self, *, client=None, offline: bool = False, now: str | None = None,
+                 nsfw: bool = False):
         # ansi_color=True disables Textual's ANSIToTruecolor filter, which would
         # otherwise rewrite our `background: ansi_default` (the ansi=-1 sentinel)
         # into a concrete opaque RGB fill. With the filter off, the transparent
@@ -1469,6 +1487,14 @@ class PackratApp(App):
         super().__init__(ansi_color=True)
         self.client = client
         self.offline = offline or client is None
+        # Display-only NSFW keyword redaction (--nsfw): masks adult keywords found in
+        # the live roots' name/path, wherever those literal values appear in the
+        # composed frame (just before colorize), never in the real names/paths the
+        # daemon acts on. See packrat.tui.nsfw. `_redactions` is rebuilt only when the
+        # roots change (keyed by their name/path signature) — not per keypress/anim tick.
+        self.nsfw = nsfw
+        self._redaction_sig: tuple | None = None
+        self._redaction_cache: list[tuple[str, str]] = []
         # `now` drives every relative time (reltime): last-scan, job ages, card headers.
         # ONLINE it must track the wall clock (`_now=None` → the property returns live
         # now_iso()); a FIXED value is used only when explicitly pinned (tests) or in the
@@ -1507,6 +1533,37 @@ class PackratApp(App):
             return self._now
         from ..util import now_iso
         return now_iso()
+
+    def redactions(self) -> list[tuple[str, str]]:
+        """The current ``(value, masked)`` redaction pairs, or ``[]`` when ``--nsfw`` is
+        off / nothing is sensitive.
+
+        Sourced from the live roots' name/path (:func:`packrat.tui.nsfw.build_redactions`)
+        and **memoized** against a signature of those name/path values, so we rebuild the
+        keyword scan only when the roots actually change — not on every keypress, poll,
+        or logo-animation tick (which re-render the frame)."""
+        if not self.nsfw:
+            return []
+        roots = self.snapshot.get("roots", [])
+        sig = tuple((r.get("name"), r.get("path")) for r in roots)
+        if sig != self._redaction_sig:
+            from .nsfw import build_redactions
+            self._redaction_cache = build_redactions(roots)
+            self._redaction_sig = sig
+        return self._redaction_cache
+
+    def notify(self, message: str, *, title: str = "", **kw) -> None:
+        """App toast — NSFW-masked (title + body) when ``--nsfw`` is on.
+
+        Action toasts echo the CLI verb they ran (``packrat scan <root>`` etc.), so
+        they'd otherwise leak a root name/path the frame masks. Masking here keeps the
+        redaction consistent across the whole UI; a no-op when ``--nsfw`` is off (the
+        common case, incl. every test)."""
+        reds = self.redactions()
+        if reds:
+            from .nsfw import redact
+            message, title = redact(message, reds), redact(title, reds)
+        super().notify(message, title=title, **kw)
 
     def on_mount(self) -> None:
         self.refresh_data()
@@ -1836,8 +1893,12 @@ class PackratApp(App):
         self.push_screen(ConfirmModal(question, count=count, network=network), after)
 
 
-def run(*, offline: bool = False) -> None:
-    """Launch the TUI (the ``packrat`` no-args entrypoint, §12)."""
+def run(*, offline: bool = False, nsfw: bool = False) -> None:
+    """Launch the TUI (the ``packrat`` no-args entrypoint, §12).
+
+    ``nsfw`` enables the display-only adult-keyword redaction (``--nsfw``) — root
+    names/paths are masked on screen only (:mod:`packrat.tui.nsfw`), never in the
+    real state the daemon acts on."""
     client = None
     if not offline:
         from ..daemon.client import DaemonClient
@@ -1846,4 +1907,4 @@ def run(*, offline: bool = False) -> None:
             client = ensure_daemon()
         except Exception:
             client = DaemonClient()  # render daemon-down state rather than crash
-    PackratApp(client=client, offline=offline).run()
+    PackratApp(client=client, offline=offline, nsfw=nsfw).run()

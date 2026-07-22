@@ -2504,6 +2504,8 @@ Exit code is non-zero if any format fails, so it doubles as a CI/setup gate. (Se
 ### `packrat` (no arguments) — the TUI
 Opens the Textual TUI — the default face of the tool (§12). Every action it offers is also one of
 the CLI commands above (design tenet §1.6); the TUI is a live window onto the same daemon jobs.
+`--offline` runs it on a bundled sample dataset (no daemon) for demoing; `--nsfw` masks adult-content
+root names/paths on screen (display-only privacy redaction, §12.3).
 
 ### Dev-only commands
 A `packrat dev …` group (currently `dev clear-db`, which empties the catalog) is registered **only in
@@ -2592,6 +2594,38 @@ screens each display one pre-composed frame and own only key routing / focus / l
 
 M6 depends on two M0-runtime pieces (§3/§4): the durable FIFO **queue** and per-job
 **`root_id`/`result_json`** columns — so the TUI is a pure presentation layer on top of the runtime.
+
+### 12.3 NSFW masking (`packrat --nsfw`)
+
+`packrat --nsfw` opens the TUI with adult-content root names/paths **redacted on screen** — a privacy
+affordance for screen-sharing or screenshotting a media collection. Matched characters are replaced
+with `░` (the `BAR_EMPTY` glyph, so the redacted run reads as a `dim` grey block); everything about it
+is scoped to be safe and unsurprising:
+
+- **Display-only.** The masking runs **post-layout**, exactly like the `colorize` pass (§12.2) — on the
+  composed frame string just before it reaches the widget, on toast text (`notify`), and on modal insets.
+  The plain frame and the read-model snapshot keep the **true** values, so every action still routes on
+  the real name (`open_root` / `submit_scan` / `root_path` → Explorer): `--nsfw` never changes what the
+  daemon does, only what's drawn. It is **not** an API/daemon concern — the daemon is shared and
+  client-agnostic (one per machine, §3), and the TUI needs the real name to act; masking is a per-view
+  presentation toggle.
+- **Value-based, not frame-scanning.** Keywords are matched **only** against the live roots' `name` and
+  `path` (the two columns the sensitive text originates from, §8 A1) — plus each individual path
+  *component*, so a keyword folder is still redacted when a long path middle-elides. Those literal
+  values are then replaced by their masked form **wherever they appear** in the window: a root row, a
+  job label (`scan <root>`), a review path, a toast, a modal. Because only real root-derived strings are
+  ever rewritten, **app chrome can never be corrupted** (a keyword that happens to be a substring of
+  "assets"/"analyze" can't touch them — they aren't root values); the worst a mis-chosen keyword can do
+  is over-mask a genuine root, a cosmetic effect, never a leak.
+- **Width-preserving.** Each masked character emits `░` repeated to its display width (a CJK char → two
+  `░`), so a redacted 100×24 frame stays byte-aligned (the same `cell_width` invariant §12.2 relies on).
+- **Cheap.** The `(value, masked)` redaction pairs are derived from the roots once and **memoized**
+  against a signature of their name/path values, so the keyword scan re-runs only when the roots change —
+  not on every keypress, poll, or logo-animation tick.
+
+Keyword list (English + Chinese) and the pure `mask_text`/`sensitive_tokens`/`build_redactions`/`redact`
+helpers live in `src/packrat/tui/nsfw.py`. Known limit: a keyword split across an ellipsis by path
+elision isn't caught — it fails toward *showing* text, never toward corrupting chrome.
 
 ---
 
