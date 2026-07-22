@@ -15,7 +15,7 @@ from ..screens.rootdetail import detail_body
 from ..screens.rootdetail import detail_header_right
 
 from .base import FrameScreen, _open_in_explorer, _review_verb
-from .jobcard_screen import JobCard
+from .jobcard import JobCard
 from .mergepicker import MergePickerScreen
 
 

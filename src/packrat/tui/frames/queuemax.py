@@ -11,7 +11,7 @@ from ..screens.queue import section_jobs as q_section_jobs
 from ..screens.queue import section_pages as q_section_pages
 
 from .base import FrameScreen
-from .jobcard_screen import JobCard
+from .jobcard import JobCard
 
 
 # ---------------------------------------------------------------------------

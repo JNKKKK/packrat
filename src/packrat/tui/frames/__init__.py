@@ -15,7 +15,7 @@ from __future__ import annotations
 from .base import FrameScreen, _empty_snapshot, _open_in_explorer, _review_verb
 from .addroot import AddRootScreen
 from .dashboard import Dashboard
-from .jobcard_screen import JobCard
+from .jobcard import JobCard
 from .mergepicker import MergePickerScreen
 from .queuemax import QueueMax
 from .rootdetail import RootDetailScreen

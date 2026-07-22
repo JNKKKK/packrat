@@ -13,7 +13,7 @@ from ..screens.dashboard import queue_preview_pages
 from .base import FrameScreen
 from .rootsmax import RootsMax
 from .queuemax import QueueMax
-from .jobcard_screen import JobCard
+from .jobcard import JobCard
 
 
 # ---------------------------------------------------------------------------
