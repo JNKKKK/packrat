@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -223,18 +224,33 @@ def test_reconcile_carves_out_queued_destructive_apply(database):
 
 
 def test_config_error_closes_subscribers(packrat_home):
-    """A job that dies on config load must close SSE subscribers (no stream hang)."""
+    """A job that dies on config load must close SSE subscribers (no stream hang).
+
+    The config loader BLOCKS until the test has subscribed, so the subscriber
+    provably exists before the worker fails — otherwise this races: ``submit`` pumps
+    the worker immediately, and a config-error that closed subscribers before the
+    (post-submit) ``subscribe`` call would leave the late subscriber's queue empty.
+    (Production doesn't hit that race — the SSE route re-checks the durable
+    ``jobs.status`` after subscribing and returns on a terminal job, server.py — so
+    this gate keeps the *unit* test deterministic without weakening its intent.)
+    """
     db.init_db().close()
     conn = db.connect(check_same_thread=False)
     d = db.Database(conn)
 
+    subscribed = threading.Event()
+
     def _bad_config():
+        # Wait until the test has attached its subscriber, then fail — so the
+        # close-subscribers path provably has a subscriber to close.
+        subscribed.wait(timeout=5)
         raise RuntimeError("boom")
 
     q = JobQueue(d, config_loader=_bad_config)
     try:
         jid = q.submit("sleeper", {"steps": 1})
         sub = q.subscribe(jid)
+        subscribed.set()
         # The sentinel (None) must arrive — else a streaming client blocks forever.
         seen_sentinel = False
         for _ in range(200):
