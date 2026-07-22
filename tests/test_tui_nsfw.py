@@ -2,11 +2,12 @@
 
 Value-based: keywords are matched ONLY against the live roots' name/path (the source of
 truth, §8 A1); those literal values (and path components) are then redacted wherever they
-appear in the rendered window. So app chrome ("assets", "analyze") can never be corrupted
-— only real root-derived text is touched. Two levels: pure unit tests on
-:mod:`packrat.tui.nsfw`, then live-app tests that the flag redacts the frame / toasts /
-modals while leaving the plain ``current_frame`` and the real names the daemon acts on
-untouched.
+appear. So app chrome ("assets", "analyze") can never be corrupted — only real root-derived
+text is touched. Masking is applied **pre-layout** (screens feed the read model through
+``app.view``), so a keyword is redacted before ``middle_elide`` can split it across a ``…``
+(the reported leak). Two levels: pure unit tests on :mod:`packrat.tui.nsfw`, then live-app
+tests that the flag redacts the frame / toasts / modals while the real names the daemon acts
+on (the ``snapshot``/detail dicts) stay untouched.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import asyncio
 from packrat.tui import demo, tokens
 from packrat.tui.app import PackratApp
 from packrat.tui.layout import cell_width
-from packrat.tui.nsfw import (MASK_CHAR, KEYWORDS, build_redactions, mask_text, redact,
-                              sensitive_tokens)
+from packrat.tui.nsfw import (MASK_CHAR, KEYWORDS, build_redactions, mask_obj, mask_text,
+                              redact, sensitive_tokens)
 
 
 # --- pure masker -----------------------------------------------------------
@@ -111,6 +112,29 @@ def test_redact_is_identity_when_no_redactions():
     assert redact("scan PornStash", []) == "scan PornStash"
 
 
+def test_mask_obj_redacts_string_leaves_deeply():
+    roots = _roots(("PornStash", r"D:\media\色情片\2024"))
+    reds = build_redactions(roots)
+    obj = {
+        "name": "PornStash", "path": r"D:\media\色情片\2024", "kind": "library",
+        "status": "done", "count": 42,
+        "jobs": [{"label": "scan PornStash", "root_name": "PornStash"}],
+    }
+    out = mask_obj(obj, reds)
+    assert "Porn" not in out["name"] and MASK_CHAR in out["name"]
+    assert "色情" not in out["path"]
+    assert out["kind"] == "library" and out["status"] == "done" and out["count"] == 42
+    assert "Porn" not in out["jobs"][0]["label"]      # nested list/dict masked
+    assert "Porn" not in out["jobs"][0]["root_name"]
+    # original object is not mutated (deep copy)
+    assert obj["name"] == "PornStash"
+
+
+def test_mask_obj_is_identity_when_no_redactions():
+    obj = {"name": "PornStash", "n": [1, 2]}
+    assert mask_obj(obj, []) is obj                    # same object, no copy
+
+
 def test_redact_masks_component_inside_elided_path():
     # When a long path is middle-elided to a fragment, the surviving keyword COMPONENT
     # is still redacted (components are their own tokens).
@@ -148,20 +172,50 @@ def test_redactions_empty_when_flag_off():
     assert app.redactions() == []
 
 
-def test_dashboard_frame_masks_root_but_plain_frame_keeps_truth():
+def test_dashboard_frame_masks_root_but_snapshot_keeps_truth():
     app = PackratApp(offline=True, nsfw=True)
 
     async def scenario(app, pilot):
         _install_nsfw_root(app)
-        plain = app.screen.current_frame
-        # The PLAIN frame (golden-test / snapshot source of truth) keeps the real name.
-        assert "PornStash" in plain and "色情" in plain
-        # The LIVE widget text (post-mask, post-colorize) is redacted.
-        rendered = app.screen._colorize(app.screen._mask(plain)).plain
-        assert "Porn" not in rendered and "色情" not in rendered
-        assert MASK_CHAR in rendered
-        # And the mask keeps every line exactly 100 cells (frame invariant).
-        assert all(cell_width(r) == 100 for r in rendered.split("\n"))
+        # Masking is now PRE-layout (via app.view), so the composed frame itself is
+        # redacted — the true name never enters the rendered string.
+        frame = app.screen.current_frame
+        assert "Porn" not in frame and "色情" not in frame
+        assert MASK_CHAR in frame
+        assert all(cell_width(r) == 100 for r in frame.split("\n"))
+        # The SNAPSHOT (what actions route on) keeps the real name/path.
+        top = max(app.snapshot["roots"], key=lambda r: r["id"])
+        assert top["name"] == "PornStash" and "色情" in top["path"]
+
+    async def runner():
+        async with app.run_test(size=(100, 24)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+
+
+def test_narrow_terminal_middle_elided_path_does_not_leak():
+    # The reported bug: a long keyword path middle-elides, splitting the keyword across
+    # the `…` so a post-layout scan couldn't match it. Pre-layout masking fixes it — no
+    # keyword fragment survives even when the path is elided to fit a compact row.
+    app = PackratApp(offline=True, nsfw=True)
+
+    async def scenario(app, pilot):
+        snap = demo.status_snapshot(running=True)
+        top = max(snap["roots"], key=lambda r: r["id"])
+        top["name"] = "Stash"
+        # A long path whose keyword component sits in the middle (the elision zone).
+        top["path"] = r"D:\media\family\archive\PornCollection\deep\folder\tree\2024"
+        app.snapshot = snap
+        app._redaction_sig = None
+        # Open the maximized Roots list (root_row_wide middle-elides the path).
+        await pilot.press("r"); await pilot.press("r")
+        assert type(app.screen).__name__ == "RootsMax"
+        frame = app.screen.current_frame
+        assert "…" in frame                     # the path really did elide somewhere
+        # No fragment of the keyword leaks — not even the head an elision would keep.
+        for frag in ("Porn", "PornC", "ornColl", "Collection"):
+            assert frag not in frame, frag
+        assert all(cell_width(r) == 100 for r in frame.split("\n"))
 
     async def runner():
         async with app.run_test(size=(100, 24)) as pilot:
@@ -176,9 +230,9 @@ def test_chrome_word_survives_when_a_root_is_masked():
 
     async def scenario(app, pilot):
         _install_nsfw_root(app)
-        rendered = app.screen._colorize(app.screen._mask(app.screen.current_frame)).plain
-        assert "Assets" in rendered            # chrome intact
-        assert "PornStash" not in rendered     # root redacted
+        frame = app.screen.current_frame       # already masked pre-layout
+        assert "Assets" in frame               # chrome intact
+        assert "PornStash" not in frame        # root redacted
 
     async def runner():
         async with app.run_test(size=(100, 24)) as pilot:

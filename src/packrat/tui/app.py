@@ -144,13 +144,15 @@ class FrameScreen(Screen):
         self.query_one("#frame", Static).update(self._colorize(self._mask(self.current_frame)))
 
     def _mask(self, frame: str) -> str:
-        """Apply the display-only NSFW redaction when ``--nsfw`` is on.
+        """Post-layout NSFW redaction **backstop** (runs before colorize when ``--nsfw``).
 
-        Replaces the live roots' keyword-bearing name/path values (and path components)
-        by their masked form wherever they appear (:func:`packrat.tui.nsfw.redact`), so
-        only real root-derived text is touched — never app chrome. Identity otherwise.
-        Cell-width-preserving, so the colorizer that consumes the result keeps its
-        offsets; ``current_frame`` (the golden-test source of truth) is never touched."""
+        The primary masking is *pre-layout* — screens feed the read model through
+        ``app.view()`` so a keyword is redacted before :func:`middle_elide` can split it
+        across a ``…`` (the elision leak). This pass then re-runs :func:`redact` on the
+        composed frame to catch any value that reached the frame WITHOUT going through a
+        builder (an inline title, a future call site). On a fully pre-masked frame it
+        finds nothing to change. Cell-width-preserving, so the colorizer keeps its
+        offsets; identity when ``--nsfw`` is off."""
         reds = getattr(self.app, "redactions", lambda: [])()
         if reds:
             from .nsfw import redact
@@ -299,8 +301,11 @@ class Dashboard(FrameScreen):
             else "[r] focus Roots   [q] focus Queue (again = maximize)   Esc / Ctrl-Q quit"
         )
         geo = self._geo = self.geo_for(footer)
+        # view(): NSFW-masked copy for DISPLAY (masks name/path before layout, so
+        # elision can't split a keyword across a `…` — the leak fix). Raw snapshot is
+        # still used for navigation/counts (_sync_lens above, _queue_jobs below).
         body = dashboard_body(
-            self.app.snapshot, now=self.now, geo=geo, focus=fs.target,
+            self.app.view(self.app.snapshot), now=self.now, geo=geo, focus=fs.target,
             roots_cursor=fs.roots_cursor, roots_page=self.roots_page,
             queue_cursor=fs.queue_cursor, queue_page=self.queue_page,
             gem=self._gem,
@@ -445,8 +450,8 @@ class RootsMax(FrameScreen):
 
     def frame(self) -> str:
         geo = self._geo = self.geo_for(self.FOOTER)
-        body = roots_body(self.app.snapshot.get("roots", []), now=self.now, geo=geo,
-                          sort_mode=self.sort_mode, cursor=self.cursor, page=self.page)
+        body = roots_body(self.app.view(self.app.snapshot.get("roots", [])), now=self.now,
+                          geo=geo, sort_mode=self.sort_mode, cursor=self.cursor, page=self.page)
         return screen("packrat · Roots", body, self.app.header_right,
                       footer=self.FOOTER, width=geo.w, height=geo.h)
 
@@ -664,11 +669,15 @@ class MergePickerScreen(FrameScreen):
     def frame(self) -> str:
         footer = self.FOOTER_ROOT if self.source_mode == "root" else self.FOOTER_EXT
         geo = self._geo = self.geo_for(footer)
-        body = merge_body(self.dest, self._sources(), geo=geo,
+        # DISPLAY masking (dest + source roots) before layout; self.dest stays raw for
+        # the merge submit (action_merge). ext_path is the user's own live input — left
+        # verbatim so they can see what they're typing.
+        dest = self.app.view(self.dest)
+        body = merge_body(dest, self.app.view(self._sources()), geo=geo,
                           source_mode=self.source_mode, cursor=self.cursor,
                           page=self.page, ext_path=self.ext_path, dry_run=self.dry_run)
-        right = f"{self.dest['path']} · {self.dest['kind']}"
-        return screen(f"packrat · {self.dest['name']} · merge from", body, right,
+        right = f"{dest['path']} · {dest['kind']}"
+        return screen(f"packrat · {dest['name']} · merge from", body, right,
                       footer=footer, width=geo.w, height=geo.h)
 
     # -- navigation --------------------------------------------------------
@@ -872,10 +881,13 @@ class RootDetailScreen(FrameScreen):
         if d is None:
             return screen("packrat · ?", ["root not found."], self.app.header_right,
                           footer="Esc back", width=geo.w, height=geo.h)
-        body = detail_body(d, now=self.now, geo=geo, jobs=jobs,
+        # DISPLAY masking before layout (detail + jobs); the raw self._detail/_jobs
+        # stay the source for actions (scan/dedup/merge/review, root_name lookups).
+        vd, vjobs = self.app.view(d), self.app.view(jobs)
+        body = detail_body(vd, now=self.now, geo=geo, jobs=vjobs,
                           focus=self.focus, job_focus=self.job_focus,
                           cursors=self.cursors, pages=self.pages)
-        return screen(f"packrat · {d['name']}", body, detail_header_right(d),
+        return screen(f"packrat · {vd['name']}", body, detail_header_right(vd),
                       footer=footer, width=geo.w, height=geo.h)
 
     def _colorize(self, frame: str):
@@ -1232,8 +1244,11 @@ class QueueMax(FrameScreen):
     def frame(self) -> str:
         geo = self._geo = self.geo_for(self.FOOTER)
         snap = self.app.snapshot
+        # DISPLAY masking before layout (job labels embed the root name); raw snapshot/
+        # recent are still used for selection + actions (_section_jobs, cancel/prioritize).
         body = queue_body(
-            snap.get("running"), snap.get("queued", []), self.app.recent, now=self.now,
+            self.app.view(snap.get("running")), self.app.view(snap.get("queued", [])),
+            self.app.view(self.app.recent), now=self.now,
             geo=geo, focus=self.focus,
             queued_cursor=self.cursors["queued"], queued_page=self.pages["queued"],
             history_cursor=self.cursors["history"], history_page=self.pages["history"],
@@ -1381,9 +1396,13 @@ class JobCard(FrameScreen):
         else:
             footer = "Esc back"
         geo = self._geo = self.geo_for(footer)
-        body = jobcard.card_body(j, now=self.now, problem_files=self._problems,
+        # DISPLAY masking before layout: the card label + result summary embed the root
+        # name, and a scan card's problem-file PATHS are the worst elision case. Raw
+        # self.job stays the source for actions (cancel/review, root_name lookups).
+        vj, vproblems = self.app.view(j), self.app.view(self._problems)
+        body = jobcard.card_body(vj, now=self.now, problem_files=vproblems,
                                  problems_scroll=self.problems_scroll, geo=geo)
-        return screen(jobcard.card_title(j), body, right,
+        return screen(jobcard.card_title(vj), body, right,
                       footer=footer, width=geo.w, height=geo.h)
 
     def action_scroll(self, delta: int) -> None:
@@ -1551,6 +1570,20 @@ class PackratApp(App):
             self._redaction_cache = build_redactions(roots)
             self._redaction_sig = sig
         return self._redaction_cache
+
+    def view(self, obj):
+        """A **render-only** masked copy of read-model ``obj`` (dict/list/scalar).
+
+        Deep-copies ``obj`` with the sensitive root name/path values redacted on every
+        string leaf (:func:`packrat.tui.nsfw.mask_obj`) — fed to the pure builders so a
+        keyword is masked **before** layout, closing the middle/end-elision leak (a path
+        cut by ``…`` after masking splits ``░``, not the keyword; post-layout redaction
+        couldn't match the broken value). The screens pass ``view(...)`` to their builders
+        for DISPLAY but keep the raw ``snapshot``/detail/job dicts for ACTIONS, so
+        navigation and submits still route on the true name. Identity (same object, no
+        copy) when ``--nsfw`` is off — the builders see the unmodified read model."""
+        from .nsfw import mask_obj
+        return mask_obj(obj, self.redactions())
 
     def notify(self, message: str, *, title: str = "", **kw) -> None:
         """App toast — NSFW-masked (title + body) when ``--nsfw`` is on.

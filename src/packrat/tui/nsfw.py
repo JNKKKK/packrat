@@ -149,3 +149,25 @@ def redact(text: str, redactions: list[tuple[str, str]]) -> str:
         if token in text:
             text = text.replace(token, masked)
     return text
+
+
+def mask_obj(obj, redactions: list[tuple[str, str]]):
+    """Deep-copy ``obj`` (a read-model dict / list / scalar) with :func:`redact` applied
+    to every string leaf — the **pre-layout** masker fed to the pure builders.
+
+    Masking the DATA before layout is what closes the elision leak: a keyword-bearing
+    path/name is redacted *before* :func:`~packrat.tui.layout.middle_elide` can split the
+    keyword across a ``…`` (post-layout redaction can't match the broken value). Because
+    ``redact`` only rewrites literal root name/path values, applying it to every string is
+    safe — status/type/timestamp fields (``"done"``, ``"library"``, ISO dates) contain no
+    root value, so they pass through untouched and the builders' branch logic is unaffected.
+    Returns ``obj`` unchanged when ``redactions`` is empty (``--nsfw`` off)."""
+    if not redactions:
+        return obj
+    if isinstance(obj, str):
+        return redact(obj, redactions)
+    if isinstance(obj, dict):
+        return {k: mask_obj(v, redactions) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(mask_obj(v, redactions) for v in obj)
+    return obj

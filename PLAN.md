@@ -2602,30 +2602,34 @@ affordance for screen-sharing or screenshotting a media collection. Matched char
 with `░` (the `BAR_EMPTY` glyph, so the redacted run reads as a `dim` grey block); everything about it
 is scoped to be safe and unsurprising:
 
-- **Display-only.** The masking runs **post-layout**, exactly like the `colorize` pass (§12.2) — on the
-  composed frame string just before it reaches the widget, on toast text (`notify`), and on modal insets.
-  The plain frame and the read-model snapshot keep the **true** values, so every action still routes on
-  the real name (`open_root` / `submit_scan` / `root_path` → Explorer): `--nsfw` never changes what the
-  daemon does, only what's drawn. It is **not** an API/daemon concern — the daemon is shared and
-  client-agnostic (one per machine, §3), and the TUI needs the real name to act; masking is a per-view
-  presentation toggle.
+- **Display-only.** Actions never change: the read-model `snapshot`/detail/job dicts keep the **true**
+  values, so navigation and submits still route on the real name (`open_root` / `submit_scan` /
+  `root_path` → Explorer); only what's *drawn* is redacted. It is **not** an API/daemon concern — the
+  daemon is shared and client-agnostic (one per machine, §3), and the TUI needs the real name to act, so
+  masking is a per-view presentation toggle applied on the way to the screen.
 - **Value-based, not frame-scanning.** Keywords are matched **only** against the live roots' `name` and
   `path` (the two columns the sensitive text originates from, §8 A1) — plus each individual path
-  *component*, so a keyword folder is still redacted when a long path middle-elides. Those literal
-  values are then replaced by their masked form **wherever they appear** in the window: a root row, a
-  job label (`scan <root>`), a review path, a toast, a modal. Because only real root-derived strings are
-  ever rewritten, **app chrome can never be corrupted** (a keyword that happens to be a substring of
-  "assets"/"analyze" can't touch them — they aren't root values); the worst a mis-chosen keyword can do
-  is over-mask a genuine root, a cosmetic effect, never a leak.
+  *component* (so an elided path's surviving segment is still caught). Those literal values are then
+  replaced by their masked form **wherever they appear**: a root row, a job label (`scan <root>`), a
+  review path, a toast, a modal. Because only real root-derived strings are ever rewritten, **app chrome
+  can never be corrupted** (a keyword that happens to be a substring of "assets"/"analyze" can't touch
+  them — they aren't root values); the worst a mis-chosen keyword can do is over-mask a genuine root, a
+  cosmetic effect, never a leak.
+- **Masked pre-layout (elision-safe).** The screens render through `app.view(...)`, a masked deep-copy of
+  the read model, so a keyword is redacted **before** `middle_elide` can split it across a `…`. This is
+  what closes the elision leak a post-layout scan can't (once `PornCollection` is elided to `Porn…tion`,
+  the literal value no longer matches). A post-layout pass on the composed frame remains as a backstop
+  for any inline text that bypasses a builder; on a fully pre-masked frame it changes nothing. Toasts
+  (`notify`) and modal insets are masked the same value-based way.
 - **Width-preserving.** Each masked character emits `░` repeated to its display width (a CJK char → two
-  `░`), so a redacted 100×24 frame stays byte-aligned (the same `cell_width` invariant §12.2 relies on).
+  `░`), so a redacted 100×24 frame stays byte-aligned (the same `cell_width` invariant §12.2 relies on) —
+  and pre-layout masking is width-neutral, so elision cuts a `░`-run identically to the real text.
 - **Cheap.** The `(value, masked)` redaction pairs are derived from the roots once and **memoized**
   against a signature of their name/path values, so the keyword scan re-runs only when the roots change —
   not on every keypress, poll, or logo-animation tick.
 
-Keyword list (English + Chinese) and the pure `mask_text`/`sensitive_tokens`/`build_redactions`/`redact`
-helpers live in `src/packrat/tui/nsfw.py`. Known limit: a keyword split across an ellipsis by path
-elision isn't caught — it fails toward *showing* text, never toward corrupting chrome.
+Keyword list (English + Chinese) and the pure helpers (`mask_text` / `sensitive_tokens` /
+`build_redactions` / `redact` / `mask_obj`) live in `src/packrat/tui/nsfw.py`.
 
 ---
 
