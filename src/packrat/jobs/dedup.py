@@ -32,10 +32,13 @@ import csv
 import logging
 import os
 
-from .. import fsutil, matcher, paths, review, shortcuts
+from .. import fsutil, matcher, review, shortcuts
 from ..config import RAW_EXTS
 from ..ignore import ext_of
 from ..util import now_iso
+from . import _guards
+from ._dbops import delete_instance as _delete_instance
+from ._dbops import forget_if_orphaned as _forget_if_orphaned
 from .context import CancelledError, JobContext
 from .registry import JobSpec, register_job
 
@@ -88,24 +91,7 @@ _SUGGESTED_MARK = "_suggested"
 
 
 # ---------------------------------------------------------------------------
-# lazy DB cleanup (a plain delete is not trash, §4/§6)
-# ---------------------------------------------------------------------------
-def _delete_instance(conn, instance_id: int) -> None:
-    conn.execute("DELETE FROM file_instances WHERE id=?", (instance_id,))
-
-
-def _forget_if_orphaned(conn, asset_id: int) -> None:
-    """Forget an ``active`` asset with zero instances (cascades fingerprints, §4)."""
-    n = conn.execute(
-        "SELECT COUNT(*) c FROM file_instances WHERE asset_id=?", (asset_id,)
-    ).fetchone()["c"]
-    if n:
-        return
-    st = conn.execute("SELECT status FROM assets WHERE id=?", (asset_id,)).fetchone()
-    if st is not None and st["status"] == "active":
-        conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
-
-
+# lazy DB cleanup (a plain delete is not trash, §4/§6) — see jobs._dbops.
 # ---------------------------------------------------------------------------
 # job dispatch
 # ---------------------------------------------------------------------------
@@ -201,12 +187,7 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
 
 
 def _resolve_library_root(ctx: JobContext) -> dict:
-    row = ctx.db.query_one("SELECT * FROM roots WHERE id=?", (ctx.params.get("root_id"),))
-    if row is None:
-        raise ValueError(f"no such root id: {ctx.params.get('root_id')}")
-    if row["kind"] != "library":
-        raise ValueError(f"{row['name']!r} is a {row['kind']} root; dedup targets a library root")
-    return dict(row)
+    return _guards.resolve_library_root(ctx, "dedup")
 
 
 # ===========================================================================
@@ -296,7 +277,7 @@ def _confirm(ctx: JobContext) -> None:
             intended = _keep_suggested_intended(ctx, actions)
         else:
             intended = [a for a in actions if _intends_delete(a, stage, stage_dir)]
-        _backup_db(db, run_id, stage)
+        db.backup_labeled(f"prededup-run{run_id}-stage{stage}")
         outcomes = _apply_stage(ctx, stage, intended)
         review.write_audit(
             audit_dir, f"applied_stage{stage}.json",
@@ -1149,13 +1130,6 @@ def _report_stage_confirm(ctx, stage, out) -> None:
 # ---------------------------------------------------------------------------
 # backup + audit JSON (§8.1, §10)
 # ---------------------------------------------------------------------------
-def _backup_db(db, run_id: int, stage: int) -> str:
-    ts = now_iso().replace(":", "").replace("-", "")
-    dest = paths.backups_dir() / f"prededup-run{run_id}-stage{stage}-{ts}.db"
-    db.backup_to(dest)
-    return str(dest)
-
-
 def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
     cfg = ctx.config
     stage = plan["stage"]

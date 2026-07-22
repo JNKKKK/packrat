@@ -49,9 +49,10 @@ import logging
 import os
 import shutil
 
-from .. import fsutil, media, paths, roots, trash
+from .. import fsutil, media, roots, trash
 from ..ignore import IgnoreSet
 from ..util import now_iso
+from . import _guards
 from .context import JobContext
 from .registry import JobSpec, register_job
 from .scan import ScanReport, _scan_one_root, _upsert_instance, enumerate_root
@@ -112,11 +113,7 @@ def _reject_if_held(ctx: JobContext, root: dict) -> None:
     *own* open ``merge_runs`` row via ``ignore_merge_holder``, so only a pending review
     trips this).
     """
-    holder = roots.root_holder(ctx.db, int(root["id"]), ignore_merge=True)
-    if holder is not None:
-        raise ValueError(
-            f"dest root {root['name']!r} busy: {holder['what']} — confirm/cancel it before merging"
-        )
+    _guards.reject_if_held(ctx, root, ignore_merge=True)
 
 
 # ===========================================================================
@@ -167,7 +164,7 @@ def _merge(ctx: JobContext) -> None:
 
     # Phase 3 — copy the `new` reps + register (DB backup first, §8 C / §10). Copy to the
     # run's FROZEN dest_path (authoritative on resume — the plan owns source+dest).
-    _backup_db(db, f"premerge-{root_id}")
+    db.backup_labeled(f"premerge-{root_id}")
     out = _copy_and_register(ctx, run, root, run["dest_path"])
 
     # Finalize (§8 C Safety & resume) — retained as queryable merge history (§14 #5).
@@ -589,13 +586,6 @@ def _report(ctx: JobContext, root: dict, source: str, out: dict, *, dry_run: boo
                    f"{out['trashed']} trashed · {out['dup_in_source']} dup-in-source"
                    + (f" · {out['unindexed']} uncatalogued (ignored dest)" if out["unindexed"] else ""),
     })
-
-
-def _backup_db(db, label: str) -> str:
-    ts = now_iso().replace(":", "").replace("-", "")
-    dest = paths.backups_dir() / f"{label}-{ts}.db"
-    db.backup_to(dest)
-    return str(dest)
 
 
 register_job(

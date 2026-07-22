@@ -43,34 +43,17 @@ import csv
 import logging
 import os
 
-from .. import fsutil, matcher, paths, review, shortcuts, trash
-from ..roots import root_holder
+from .. import fsutil, matcher, review, shortcuts, trash
 from ..util import now_iso
+from . import _guards
+from ._dbops import delete_instance as _delete_instance
+from ._dbops import forget_if_orphaned as _forget_if_orphaned
 from .context import JobContext
 from .registry import JobSpec, register_job
 
 log = logging.getLogger("packrat.jobs.cleanup")
 
 RUN_TYPE = "cleanup-perceptual"
-
-
-# ---------------------------------------------------------------------------
-# lazy DB cleanup (mirrors dedup; a plain delete is not trash, §4/§6)
-# ---------------------------------------------------------------------------
-def _delete_instance(conn, instance_id: int) -> None:
-    conn.execute("DELETE FROM file_instances WHERE id=?", (instance_id,))
-
-
-def _forget_if_orphaned(conn, asset_id: int) -> None:
-    """Forget an ``active`` asset with zero instances (cascades fingerprints, §4)."""
-    n = conn.execute(
-        "SELECT COUNT(*) c FROM file_instances WHERE asset_id=?", (asset_id,)
-    ).fetchone()["c"]
-    if n:
-        return
-    st = conn.execute("SELECT status FROM assets WHERE id=?", (asset_id,)).fetchone()
-    if st is not None and st["status"] == "active":
-        conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
 
 
 # ---------------------------------------------------------------------------
@@ -134,15 +117,7 @@ def _run_cleanup(ctx: JobContext) -> None:
 
 
 def _resolve_library_root(ctx: JobContext) -> dict:
-    row = ctx.db.query_one("SELECT * FROM roots WHERE id=?", (ctx.params.get("root_id"),))
-    if row is None:
-        raise ValueError(f"no such root id: {ctx.params.get('root_id')}")
-    if row["kind"] != "library":
-        raise ValueError(
-            f"{row['name']!r} is a {row['kind']} root; cleanup targets a library root "
-            "(a trash root's files are consumed by `trash refresh`, not cleaned)"
-        )
-    return dict(row)
+    return _guards.resolve_library_root(ctx, "cleanup")
 
 
 def _reject_if_held(ctx, root: dict) -> None:
@@ -153,12 +128,7 @@ def _reject_if_held(ctx, root: dict) -> None:
     those plans reference. The queue enforces this for the analyze that *owns* the
     root; preview/apply own nothing, so they re-check here.
     """
-    holder = root_holder(ctx.db, int(root["id"]))
-    if holder is not None:
-        raise ValueError(
-            f"root {root['name']!r} busy: {holder['what']} — confirm/cancel it "
-            "(or let the merge finish) before cleaning this folder"
-        )
+    _guards.reject_if_held(ctx, root)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +307,7 @@ def _apply_default_exact(ctx: JobContext) -> None:
     if not exact:
         ctx.log(f"cleanup {root['name']}: no exact trash matches to delete.")
         return
-    _backup_db(ctx.db, f"precleanup-{root_id}")
+    ctx.db.backup_labeled(f"precleanup-{root_id}")
     out = _new_out()
     ctx.set_total(len(exact))
     done = 0
@@ -365,7 +335,7 @@ def _apply_undecodable(ctx: JobContext) -> None:
     if not undec:
         ctx.log(f"cleanup {root['name']}: no undecodable files to delete.")
         return
-    _backup_db(ctx.db, f"precleanup-undec-{root_id}")
+    ctx.db.backup_labeled(f"precleanup-undec-{root_id}")
     out = _new_out()
     ctx.set_total(len(undec))
     done = 0
@@ -476,7 +446,7 @@ def _confirm(ctx: JobContext) -> None:
                       if review.path_exists(os.path.join(stage_dir, a["shortcut_name"]))]
     intended = exact + perceptual_del
 
-    _backup_db(db, f"precleanup-run{run_id}")
+    db.backup_labeled(f"precleanup-run{run_id}")
     out = _new_out()
     ctx.set_total(len(intended))
     done = 0
@@ -690,14 +660,8 @@ def _delete_one(db, action: dict, out: dict, *, trash_reason: str | None) -> Non
 
 
 # ---------------------------------------------------------------------------
-# backup + audit JSON + reporting (§8.1, §10)
+# audit JSON + reporting (§8.1, §10)
 # ---------------------------------------------------------------------------
-def _backup_db(db, label: str) -> str:
-    ts = now_iso().replace(":", "").replace("-", "")
-    dest = paths.backups_dir() / f"{label}-{ts}.db"
-    db.backup_to(dest)
-    return str(dest)
-
 
 def _proposed_json(ctx, root, run_id, exact_actions, staged, skipped) -> dict:
     cfg = ctx.config

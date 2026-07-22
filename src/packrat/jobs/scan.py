@@ -55,6 +55,8 @@ from .. import fsutil, media, roots
 from ..ignore import IgnoreSet, is_junk_dirent
 from ..profiling import NULL_PROFILER, ScanProfiler
 from ..util import now_iso
+from ._dbops import delete_instance as _delete_instance
+from ._dbops import forget_if_orphaned as _forget_if_orphaned
 from .context import CancelledError, JobContext
 from .registry import JobSpec, register_job
 
@@ -266,19 +268,6 @@ def _upsert_instance(conn, asset_id: int, root_id: int, cand: Candidate, seen_at
     )
     if prev is not None and prev["asset_id"] != asset_id:
         _forget_if_orphaned(conn, int(prev["asset_id"]))
-
-
-def _forget_if_orphaned(conn, asset_id: int) -> None:
-    """Delete an ``active`` asset that now has zero file instances (§4 forget rule).
-
-    A ``trashed`` asset is kept at zero instances (its fingerprint is trash memory).
-    """
-    n = conn.execute("SELECT COUNT(*) c FROM file_instances WHERE asset_id=?", (asset_id,)).fetchone()["c"]
-    if n:
-        return
-    st = conn.execute("SELECT status FROM assets WHERE id=?", (asset_id,)).fetchone()
-    if st is not None and st["status"] == "active":
-        conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))  # cascade fingerprints
 
 
 def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_at: str) -> bool:
@@ -716,7 +705,7 @@ def _detect_deletions(ctx, root_id, existing, seen_fids, en: "Enumeration", repo
     affected_assets = {rec["asset_id"] for rec in gone}
     with db.transaction() as conn:
         for rec in gone:
-            conn.execute("DELETE FROM file_instances WHERE id=?", (rec["fid"],))
+            _delete_instance(conn, rec["fid"])
         report["deleted_instances"] += len(gone)
         before = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE status='active'"

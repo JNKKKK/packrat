@@ -187,6 +187,20 @@ class Database:
             finally:
                 target.close()
 
+    def backup_labeled(self, label: str) -> str:
+        """Back the DB up to ``backups/<label>-<timestamp>.db`` (§10). Returns the path.
+
+        The one place the pre-destructive-apply backup filename is built, so dedup /
+        cleanup / merge don't each re-derive the timestamp-suffixing.
+        """
+        from .. import paths
+        from ..util import now_iso
+
+        ts = now_iso().replace(":", "").replace("-", "")
+        dest = paths.backups_dir() / f"{label}-{ts}.db"
+        self.backup_to(dest)
+        return str(dest)
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
