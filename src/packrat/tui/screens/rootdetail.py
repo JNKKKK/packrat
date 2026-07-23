@@ -48,6 +48,11 @@ def detail_header_right(d: dict) -> str:
 #: stats + 1 spacer + Review box borders (2) + Jobs box borders (2). The Review and Jobs
 #: INTERIORS share whatever is left (``content_rows − _DETAIL_OVERHEAD``).
 _DETAIL_OVERHEAD = 1 + ICON_H + 1 + 2 + 2   # ref: 11
+#: Rows the Jobs panel must keep no matter how tall the Review box wants to be — its 3
+#: section headers (Running/Queued/History) + the running line. The Review cap yields to
+#: this so Jobs never collapses below a usable height (unreachable given the ≥24-row
+#: terminal invariant + the 1:1 cap, but a defensive floor the old code had as `max(4,…)`).
+_JOBS_MIN_ROWS = 4
 
 
 def _review_text_w(geo: Geometry) -> int:
@@ -65,24 +70,31 @@ def review_content_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool = 
     return _review_lines(d, geo, focused=focused)
 
 
-def _detail_split(d: dict, geo: Geometry) -> tuple[int, int]:
-    """Split the shared interior into ``(review_interior, jobs_interior)`` (§3).
+def _split_rows(content_len: int, geo: Geometry) -> tuple[int, int]:
+    """Split the shared interior into ``(review_interior, jobs_interior)`` from a review
+    content LINE COUNT (§3) — pure arithmetic, no dict, so callers compute the content
+    once and reuse it (the render path threads the same list into the box).
 
-    Responsive, mirroring the dashboard's Roots/Queue idea but content-driven: the Review
-    box is capped at review:jobs ≤ 1:1 (``S // 2``, odd row → Jobs so History keeps
-    priority) and SHRINKS to its content when shorter; Jobs backfills the freed rows.
-    Computed in ONE place so the box render, the scroll budget, and the Jobs panel height
-    stay in lockstep."""
+    Review is capped at review:jobs ≤ 1:1 (``S // 2``, odd row → Jobs so History keeps
+    priority) and SHRINKS to its content when shorter; Jobs backfills the freed rows but
+    never drops below :data:`_JOBS_MIN_ROWS` (the cap yields to that floor)."""
     s = max(2, geo.content_rows - _DETAIL_OVERHEAD)     # ref: 21 − 11 = 10
     cap = max(1, s // 2)                                 # 1:1 max; ref 5
-    content = len(review_content_lines(d, geo))
-    review = min(content, cap)
+    review = min(content_len, cap, max(0, s - _JOBS_MIN_ROWS))
     return review, s - review
 
 
-def _review_rows(d: dict, geo: Geometry = REFERENCE) -> int:
+def _detail_split(d: dict, geo: Geometry, *, focused: bool = False) -> tuple[int, int]:
+    """``(review_interior, jobs_interior)`` for root ``d`` — see :func:`_split_rows`.
+
+    ``focused`` must match how the box is rendered so the cap and the rendered content
+    are derived from the SAME line list (no desync)."""
+    return _split_rows(len(review_content_lines(d, geo, focused=focused)), geo)
+
+
+def _review_rows(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> int:
     """The Review box's interior height this frame (the responsive cap, §3)."""
-    return _detail_split(d, geo)[0]
+    return _detail_split(d, geo, focused=focused)[0]
 
 
 def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
@@ -100,12 +112,18 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
     ▸ cursor + paginator page. The Jobs panel fills the remaining vertical space."""
     jobs = jobs or []
     row_w = geo.content_w
+    # Compute the Review content ONCE (with the real focused flag) and derive both box
+    # heights from its length — so the cap, the scroll window, and the Jobs height are all
+    # in lockstep off a single build (no recompute, no focused-flag desync).
+    review_focused = focus == "review"
+    content = review_content_lines(d, geo, focused=review_focused)
+    review_h, jobs_h = _split_rows(len(content), geo)
     lines = [""]                           # breathing room above the stats/info section
     lines += _stats_columns(d, now, row_w)
     lines.append("")                       # breathing room between stats and Review
-    lines += _review_box(d, geo.roots_w, focused=(focus == "review"), geo=geo,
+    lines += _review_box(content, review_h, geo.roots_w, focused=review_focused,
                          scroll=review_scroll)
-    lines += _jobs_panel(d, jobs, now, geo.roots_w, _panel_interior(d, geo),
+    lines += _jobs_panel(d, jobs, now, geo.roots_w, jobs_h,
                          focused=(focus == "jobs"), job_focus=job_focus,
                          cursors=cursors or {}, pages=pages or {})
     return lines
@@ -265,22 +283,23 @@ def _stats_columns(d: dict, now: str, width: int) -> list[str]:
 
 
 def review_scroll_max(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> int:
-    """Max ↑/↓ scroll offset for the Review box this frame (0 when it all fits)."""
+    """Max ↑/↓ scroll offset for the Review box this frame (0 when it all fits).
+
+    Derives BOTH the content length and the cap from the same focused build (via
+    :func:`_detail_split`), so the scroll bound matches the rendered window exactly."""
     content = review_content_lines(d, geo, focused=focused)
-    cap = _review_rows(d, geo)
-    return max(0, len(content) - cap)
+    review_h, _ = _split_rows(len(content), geo)
+    return max(0, len(content) - review_h)
 
 
-def _review_box(d: dict, width: int, *, focused: bool, geo: Geometry = REFERENCE,
+def _review_box(content: list[str], cap: int, width: int, *, focused: bool,
                 scroll: int = 0) -> list[str]:
     """The bordered, focus-able Review section (§3.1/§3.2).
 
-    Heavy accent border while ``focused``. Height is the responsive cap
-    (:func:`_review_rows`, review:jobs ≤ 1:1); when the content exceeds it, ↑/↓ scroll a
-    window and the title carries a right-aligned ``↑/↓ start–end of n`` indicator (the
-    scan-card idiom). With no pending review it is a single calm line."""
-    cap = _review_rows(d, geo)
-    content = review_content_lines(d, geo, focused=focused)
+    ``content`` is the full (unclamped) review lines and ``cap`` its interior height (both
+    from :func:`detail_body`'s single build, review:jobs ≤ 1:1). When content exceeds the
+    cap, ↑/↓ scroll a window and the title carries a right-aligned ``↑/↓ start–end of n``
+    indicator (the scan-card idiom). Heavy accent border while ``focused``."""
     n = len(content)
     start = max(0, min(scroll, max(0, n - cap)))
     window = content[start:start + cap]

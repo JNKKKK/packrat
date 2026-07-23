@@ -75,6 +75,11 @@ _STAGE_LABEL = {
 #: staging code and `--keep-suggested` confirm key off this, so keep them in sync.
 _SUGGESTED_MARK = "_suggested"
 
+#: Text width the stage-2 stats block is laid out to in the CLI staging log. The daemon
+#: streams logs to whatever client is attached (no known terminal size), so it uses the
+#: TUI reference frame's text width rather than reflowing to a live terminal.
+_CLI_STATS_WIDTH = 92
+
 
 # ---------------------------------------------------------------------------
 # lazy DB cleanup (a plain delete is not trash, §4/§6) — see jobs._dbops.
@@ -1022,7 +1027,11 @@ def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
             ctx.log(ln)
     elif stage == STAGE_RECOMPRESS:
         bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path)
-        for ln in review_stats.stage2_lines(bundle, 92):
+        # keep_suggested=False: the CLI prints its OWN `--confirm --keep-suggested` tip
+        # (below, in _report_staged), so suppress the box's `[b]` tip here — `[b]` is a
+        # TUI-only key and would duplicate the CLI tip. Width = the reference frame's text
+        # width; the daemon has no client terminal size, so the log isn't reflowed to it.
+        for ln in review_stats.stage2_lines(bundle, _CLI_STATS_WIDTH, keep_suggested=False):
             ctx.log(f"  {ln}")
 
 

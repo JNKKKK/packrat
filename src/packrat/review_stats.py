@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from .jobs.dedup_rank import _PHOTO_LEAD_LEVELS, _VIDEO_LEAD_LEVELS, ordered_lead_levels
+from .jobs.dedup_rank import ordered_lead_levels
 
 #: PDQ-distance histogram bins (§8 B): (label, lo, hi) inclusive; last bin is open-ended.
 _PDQ_BINS: tuple[tuple[str, int, int], ...] = (
@@ -97,14 +97,22 @@ def stage2_stats(rows: Iterable[dict], *,
         has_int = any(not _truthy(m.get("is_external")) for m in members)
         if has_ext and has_int:
             mixed += 1
+            # Every stage-2 group has ≥1 internal member (its cluster is built from edges
+            # with a target-root endpoint), so a mixed group always has a suggested lead
+            # and these two counts sum to `mixed` — for fresh data. A leadless mixed group
+            # (only from stale rows predating is_lead) is dropped from the split, so it can
+            # legitimately under-sum then; the group make-up count above still includes it.
             lead = next((m for m in members if _truthy(m.get("is_lead"))), None)
             if lead is not None:
                 if _truthy(lead.get("is_external")):
                     suggest_ext += 1
                 else:
                     suggest_int += 1
-        else:
+        elif has_int:
             all_internal += 1
+        # else: all-external — unreachable in stage 2 (every cluster has a target-root
+        # member → an internal copy), so NOT lumped into all_internal. Left uncounted
+        # rather than mislabeled if that invariant ever changes.
         # --keep-suggested deletes every non-lead member (deterministic from is_lead).
         for m in members:
             if not _truthy(m.get("is_lead")):
@@ -152,14 +160,16 @@ def _two_column(left: list[str], right: list[str], width: int) -> list[str]:
     return out
 
 
-def _lead_column(title: str, tally: dict[str, int], levels, short: dict[str, str]) -> list[str]:
-    """One medium's keep-lead column: a ``title (N)`` header + a ``count · label`` per level."""
-    total = sum(tally.values())
-    lines = [f"{title} ({total})"]
-    # ordered_lead_levels() drives the row order for BOTH media (shared source of truth);
-    # we only emit the levels that belong to this medium AND have a count.
+def _lead_column(title: str, tally: dict[str, int], short: dict[str, str]) -> list[str]:
+    """One medium's keep-lead column: a ``title (N)`` header + a ``count · label`` per level.
+
+    ``tally`` is per-medium (only its own medium's groups feed it), so ``label in tally``
+    already restricts to this medium's levels + the shared tiebreaks — no extra filter
+    needed. ``ordered_lead_levels()`` gives the canonical best-first row order shared with
+    the CLI log, so the two can't drift."""
+    lines = [f"{title} ({sum(tally.values())})"]
     for label in ordered_lead_levels():
-        if label in tally and (label in levels or label not in (*_PHOTO_LEAD_LEVELS, *_VIDEO_LEAD_LEVELS)):
+        if label in tally:
             lines.append(f"  {tally[label]:>3} · {short.get(label, label)}")
     return lines
 
@@ -190,9 +200,9 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
     lead = bundle["lead_by_medium"]
     cols: list[list[str]] = []
     if sum(lead["photo"].values()):
-        cols.append(_lead_column("photos", lead["photo"], _PHOTO_LEAD_LEVELS, _PHOTO_SHORT))
+        cols.append(_lead_column("photos", lead["photo"], _PHOTO_SHORT))
     if sum(lead["video"].values()):
-        cols.append(_lead_column("videos", lead["video"], _VIDEO_LEAD_LEVELS, _VIDEO_SHORT))
+        cols.append(_lead_column("videos", lead["video"], _VIDEO_SHORT))
 
     lead_block = ["keep-lead decided by:"]
     if len(cols) == 2:

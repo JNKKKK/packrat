@@ -74,6 +74,18 @@ def test_stage2_group_makeup_and_suggestion_split():
     assert b["mixed_suggest_internal"] == 1
 
 
+def test_stage2_all_external_group_not_counted_as_all_internal():
+    """A group with ONLY external members (unreachable in real stage-2 clusters, but
+    guarded) must NOT be lumped into groups_all_internal — it is left uncounted, not
+    mislabeled. Regression: the else-branch counted all-external as all-internal."""
+    rows = [_perc(1, is_external=1, is_lead=1, lead_reason="resolution"),
+            _perc(1, is_external=1)]
+    b = rs.stage2_stats(rows)
+    assert b["groups"] == 1
+    assert b["groups_all_internal"] == 0     # NOT 1 — no internal member
+    assert b["groups_mixed"] == 0            # has_int is False → not mixed either
+
+
 def test_stage2_keep_suggested_delete_and_network():
     rows = [
         _perc(1, is_lead=1, path="C:/keep.jpg"),
@@ -102,6 +114,15 @@ def test_stage2_lines_keep_suggested_tip_network_note():
     b = rs.stage2_stats(rows, is_network=lambda p: p.startswith("Z:"))
     text = "\n".join(rs.stage2_lines(b, 90))
     assert "keep-suggested" in text and "1 non-leads" in text and "on network" in text
+
+
+def test_stage2_lines_keep_suggested_false_suppresses_tip():
+    """The CLI passes keep_suggested=False (it prints its own tip); the box's TUI-only
+    `[b]` tip must then be absent. Regression: the CLI log emitted a duplicate `[b]` tip."""
+    rows = [_perc(1, is_lead=1, path="C:/k.jpg"), _perc(1, path="C:/d.jpg")]
+    b = rs.stage2_stats(rows)
+    assert not any("[b]" in ln for ln in rs.stage2_lines(b, 90, keep_suggested=False))
+    assert any("[b]" in ln for ln in rs.stage2_lines(b, 90))   # default still shows it
 
 
 def test_stage2_stats_ignores_exact_rows():
