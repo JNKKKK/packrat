@@ -62,8 +62,10 @@ def test_dashboard_running_structural():
     assert "▶ scan iPhone" in built and "ETA" in built
     assert "█" in built and "░" in built          # the visual progress bar (§6)
     assert "67%" in built and "8,912/13,204" in built
-    assert "blocked: Photos pending dedup" in built
-    assert "queued · waiting for worker" in built
+    # The dashboard queue box is now ~1/4 of the split (Roots:Queue 3:1) → 2 rows at the
+    # reference size, so the running bar + a "… N more" truncation marker show; the full
+    # backlog (blocked reasons, waiting rows) lives in the maximized §4 Queue view.
+    assert "more" in built                         # the truncated-preview marker
 
 
 def test_roots_max_structural():

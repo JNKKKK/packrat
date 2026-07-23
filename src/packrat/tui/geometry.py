@@ -114,20 +114,22 @@ class Geometry:
         return self.queue_w - 4
 
     # --- dashboard section heights --------------------------------------
-    # Top is fixed (TOP_ROWS=7). Below it the roots + queue boxes split the rest.
+    # Top is fixed (TOP_ROWS=8). Below it the roots + queue boxes split the rest.
     # Overhead: roots box = 2 borders + 1 DOTKEY line = 3; queue box = 2 borders.
     # So the two list interiors sum to content_rows − TOP_ROWS − 5.
     @property
     def _dash_split(self) -> int:
-        return max(2, self.content_rows - self.TOP_ROWS - 5)   # interiors combined; ref 9
-
-    @property
-    def dash_roots_rows(self) -> int:
-        return (self._dash_split + 1) // 2       # ref 5 (gets the odd row)
+        return max(3, self.content_rows - self.TOP_ROWS - 5)   # interiors combined; ref 8
 
     @property
     def dash_queue_rows(self) -> int:
-        return self._dash_split - self.dash_roots_rows   # ref 4
+        # Roots:Queue ≈ 3:1 — Queue gets ~a quarter, floored at 2 so the running bar +
+        # one queued row always show. ref: 8//4 == 2.
+        return max(2, self._dash_split // 4)
+
+    @property
+    def dash_roots_rows(self) -> int:
+        return self._dash_split - self.dash_queue_rows   # Roots gets the 3/4 remainder; ref 6
 
     # --- maximized-list row budgets ------------------------------------
     @property

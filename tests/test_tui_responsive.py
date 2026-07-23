@@ -83,7 +83,7 @@ def test_taller_terminal_shows_more_dashboard_root_rows():
             holder["n"] = _visible_root_rows(app)   # dashboard (default screen)
         _drive(size, scenario)
         return holder["n"]
-    n_small = run((100, 24))            # dash_roots_rows == 4 → ≤4 rows
+    n_small = run((100, 24))            # dash_roots_rows == 6 → ≤6 rows
     n_big = run((100, 44))              # taller → more rows shown
     assert n_big > n_small, (n_small, n_big)
 
@@ -186,9 +186,10 @@ def test_reference_geometry_matches_fixed_constants():
     # roots/queue boxes are full content width now; collection is fixed, logo fills the rest
     assert g.roots_w == 96 and g.collection_w == 29 and g.queue_w == 96
     assert g.logo_w == 66 and g.row_w_compact == 92
-    # TOP_ROWS=8 now (Collection box gained the "Size" line), so the dashboard
-    # interiors split content_rows−8−5 == 8 → 4 roots + 4 queue.
-    assert g.dash_roots_rows == 4 and g.dash_queue_rows == 4
+    # TOP_ROWS=8 (Collection box gained the "Size" line), so the dashboard interiors
+    # split content_rows−8−5 == 8, apportioned Roots:Queue ≈ 3:1 → 6 roots + 2 queue
+    # (Queue floored at 2; Roots gets the remainder).
+    assert g.dash_roots_rows == 6 and g.dash_queue_rows == 2
     assert g.roots_list_rows == 18 and g.jobs_rows == 4
     assert g.queued_rows == 8 and g.recent_rows == 7   # pagers moved to headers
 
