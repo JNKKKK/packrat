@@ -364,6 +364,11 @@ review_runs(   -- one stateful review lifecycle (dedup OR perceptual-cleanup) pe
   stage /* dedup: 1=exact, 2=recompression, 3=minor-edit; the cursor within the run. cleanup: 1 */,
   stage_phase /* staged (shortcuts written, awaiting user) | applied (this stage's deletions done,
                  next stage not yet staged) — the apply-then-advance crash marker (§8 B Phase 7) */,
+  prefer_internal /* dedup --prefer-internal: keep the INTERNAL copy on exact-match survivor +
+                      keep-lead ties (default 0 = external is master). LOCKED at analyze; read from
+                      this row by every --confirm (a bare confirm stages stage 2 and must apply the
+                      same policy stage 1 used) — NOT re-passed per command like --keep-suggested.
+                      A conflicting flag on a later --confirm is rejected (§8 B). */,
   created_at, confirmed_at )
   -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder.
   --   ONE row spans dedup's whole 3-stage sequence; `stage`/`stage_phase` track progress within it,
@@ -377,11 +382,15 @@ review_actions(   -- the persisted, crash-safe plan for a review_run
   stage /* dedup 1|2|3 — which stage this action belongs to (--confirm applies WHERE stage=cursor);
             NULL for cleanup, which is single-stage */,
   folder /* exact_dup_to_delete|suspect_recompression|with_minor_edits|perceptually_identified_trash */,
-  kind /* exact|perceptual */, reason /* exact-internal|exact-external|perceptual|cleanup-perceptual */,
+  kind /* exact|perceptual */,
+  reason /* exact-internal|exact-external|exact-internal-preferred|perceptual|cleanup-perceptual */,
   default_action /* delete|keep */,
   asset_id, instance_id, path,           -- the file this action targets
   survivor_instance_id,                  -- the copy being kept (stage-1 exact); NULL otherwise
   group_no, member_no, is_external,      -- perceptual grouping only (stages 2/3, cleanup)
+  is_lead, lead_reason,                  -- stage-2 keep-lead: 1 on the suggested lead + why it won
+                                         --   (ranking-key decision level); persisted so the read-only
+                                         --   TUI poll needn't re-rank (lazy-liveness). NULL elsewhere.
   matched_trashed_asset_id, distance,    -- cleanup-perceptual only (which trashed asset, PDQ dist)
   shortcut_name )
   -- `path` is the AUTHORITATIVE target: --confirm re-stats it (§8 B Phase 6) and never trusts the
@@ -1360,6 +1369,10 @@ For each **active** asset with ≥1 live instance **in the target folder**:
 3. **Exact dup with an external folder** → the external copy is byte-identical, so **all** of the
    target folder's instances are redundant. Plan every target-folder instance for deletion
    (`kind='exact'`, `reason='exact-external'`, survivor = the external instance). Keep nothing locally.
+   **With `--prefer-internal` (§8 B keep-preference)** the roles flip: keep an **internal** copy
+   (oldest `mtime`, tiebreak path) and plan *every other* copy for deletion — including the external
+   ones (`reason='exact-internal-preferred'`; the external deletes carry `is_external=1` so the
+   network-permanent-delete warning still fires, §10 / [[review-network-count]]).
 4. **Else, exact dups within the target folder** (≥2 live instances, all in this root) → keep the
    **oldest `mtime`** (tiebreak: stable by path), plan the rest for deletion (`kind='exact'`,
    `reason='exact-internal'`, survivor = the kept instance).
@@ -1439,18 +1452,31 @@ blowup.
        **across codecs** (HEVC is ~2× H.264-efficient), which the weight *reduces* but doesn't cure —
        surfaced in the manifest (codec + bitrate shown) for hand-override, not solved. No
        `duration_s`/`codec` → falls back to raw size / weight 1.0.
+     - **Full-key tie → internal/external keep-preference (both media).** When the whole ranking
+       key ties and the group is **mixed** (an internal copy and an external copy tied on
+       everything), the keep-lead goes to the **external** copy by default, or the **internal** copy
+       under **`--prefer-internal`** (§8 B keep-preference; the run's stored `prefer_internal`). A
+       coin-flip on the smallest normcase path decides only among copies on the *same* side. This
+       tiebreak sits **below** the whole ranking key, so it never overrides a real quality signal —
+       it only replaces the arbitrary path pick when quality is genuinely equal. (`--prefer-internal`
+       is a run-wide policy fixed at analyze; it also flips the **stage-1** exact survivor, Phase 2.)
      **This is a hint by default:** the stage stays default-**KEEP** (you still delete a member by
      removing its shortcut); the marker itself never deletes anything and never changes a default.
      **Stage 3 (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want
      to keep. → `is_lead` + `lead_reason` (the decision level, below) recorded in the plan; surfaced in
      `manifest.csv` (`suggested_lead`, `suggested_reason`, `media_type`, `width`, `height`, `size`,
      `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
-     - **Keep-lead pick stats (reported at staging).** When stage 2 is staged, the report logs *how*
-       each group's lead was decided — a tally over the ranking key's decision levels
-       (photo: `resolution` / `resolution + format` / `resolution + format + size`; video: the
-       bitrate/codec analogues; `path tiebreak` when every key component tied). This exposes how much
-       of the collection the lead rests on resolution alone vs. the finer format/size calls, so the
-       suggestion's confidence is visible before you act on it.
+     - **Keep-lead pick stats (reported at staging AND in the TUI Review box).** When stage 2 is
+       staged, the report logs *how* each group's lead was decided — a tally over the ranking key's
+       decision levels, **split into side-by-side photo and video columns** (photo: `resolution` /
+       `+ format` / `+ format + size`; video: `+ bitrate` / `+ bitrate + codec` / `+ fine bitrate`;
+       plus `internal/external preference` and `path tiebreak` when the whole key tied). This exposes
+       how much of the collection the lead rests on resolution alone vs. the finer calls, so the
+       suggestion's confidence is visible before you act on it. The CLI staging log and the TUI
+       Review box render this from **one shared builder** (`packrat/review_stats.py`) over the same
+       persisted `review_actions` rows, so they can't drift — the box also adds a PDQ-distance
+       histogram, the internal/external group make-up, and the mixed-group suggestion split
+       (all-internal vs. mixed → suggest-external vs. suggest-internal).
      - **`--confirm --keep-suggested` (stage 2 only): act on the suggestion in bulk.** Instead of
        reviewing shortcut-by-shortcut, this **keeps only each group's `_suggested` lead and deletes
        every other member, ignoring your shortcut edits for the stage**. It is the "I trust packrat's
@@ -2211,6 +2237,7 @@ roots; trashed excluded). At most one `pending` run per folder (one run spans al
 
 ```
 packrat dedup <folder>              # analyze → stage 1 → pending (stage 1)
+packrat dedup <folder> --prefer-internal  # analyze, but keep THIS root's copy over an external dup
 packrat dedup <folder> --confirm    # apply current stage, auto-advance to next; last stage → completed
 packrat dedup <folder> --confirm --keep-suggested  # stage 2: keep only each group's suggested lead
 packrat dedup <folder> --cancel     # discard the whole run's staging, delete nothing → cancelled
@@ -2228,6 +2255,12 @@ Options
                          and delete every other member, IGNORING your shortcut edits for the stage
                          ("trust packrat's pick"). A group with no suggested lead is fully spared;
                          rejected on stage 1 / stage 3 (no leads there).
+  --prefer-internal      Keep THIS root's copy over a byte-identical/near-dup copy in another root:
+                         stage 1 deletes the external copy (not the internal one), and stage-2
+                         keep-lead ties go to the internal copy. A RUN-WIDE policy — set at analyze,
+                         stored on the run, carried across every --confirm; passing it on a later
+                         --confirm that conflicts with the run's stored value is rejected. (Default:
+                         the external copy is the master.)
   --cancel               Discard the run's staging folders (any stage); delete nothing.
   --dry-run              Compute all 3 stages and print the plan (per-stage counts, would-stage
                          list) without creating staging folders or shortcuts.
@@ -2235,11 +2268,13 @@ Options
 
 Conventions differ by stage: `_exact_dup_to_delete\` is default-DELETE (remove a shortcut to SPARE);
 `_suspect_recompression\` and `_with_minor_edits\` are default-KEEP (remove a shortcut to DELETE).
-Stage 1 keeps oldest-mtime internally / drops all when an external copy exists; stages 2–3 stage
-near-dup members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2,
-packrat marks the least-compressed photo member `_suggested` (resolution → format rank → file size)
-as a keep-hint — advisory by default (override with `--confirm --keep-suggested`), and the staging
-report tallies how each group's lead was decided (by resolution / +format / +size).
+Stage 1 keeps oldest-mtime internally / drops all when an external copy exists (or, under
+`--prefer-internal`, keeps an internal copy and drops the external one); stages 2–3 stage near-dup
+members (distinct assets) for manual review, split by PDQ distance band (§5.3). In stage 2, packrat
+marks the least-compressed photo member `_suggested` (resolution → format rank → file size) as a
+keep-hint — advisory by default (override with `--confirm --keep-suggested`), and the staging report
+tallies how each group's lead was decided (photo/video columns; by resolution / +format / +size /
+bitrate / codec), the same breakdown the TUI Review box shows.
 ```
 
 ### `packrat merge`
@@ -2548,17 +2583,24 @@ sample dataset (no daemon) for demoing/development.
   a browsable library root (§1.6: the modal action is exactly the CLI verb, nothing TUI-only).
 - **Root detail** (§3): a **3-column stats header** (a folder ASCII icon · assets/photos/videos +
   total size on disk · last-scan / full-scan / last-dedup recency), then **two focus-able bordered boxes** —
-  a **Review box** (`[v]`; ⚠ awaiting review, or a calm "No pending review") and a **Jobs panel**
+  a **Review box** (`[e]`; ⚠ awaiting review, or a calm "No pending review") and a **Jobs panel**
   (`[J]`) laid out like the Queue interface: three independent **Running / Queued / History** sections,
-  each with its own paginator (Queued is kept short; History gets the bulk). A focused box gets the
+  each with its own paginator (Queued is kept short; History gets the bulk). The two boxes split the
+  space below the header by a **responsive ratio (review:jobs ≤ 1:1)**: the Review box shrinks to its
+  content (a calm root → 1 row) and Jobs backfills the slack; when a rich review overflows the cap,
+  `↑/↓` **scroll** it (title shows a `↑/↓ start–end of n` indicator, the scan-card idiom). A **stage-2
+  dedup** review renders the keep-lead pick breakdown in **side-by-side photo/video columns** + a PDQ
+  histogram + the internal/external group make-up — the same `review_stats` block the CLI staging log
+  prints. A focused box gets the
   heavy accent-colored border and its inside key hints read normal; the unfocused box **dims** its
   hints (the Jobs sub-headers grey; the Review box's `[o]`/`[g]`/`[k]` grey). Within the focused Jobs
   panel `[r]`/`[q]`/`[h]` pick the sub-section (Queued/History paginate with `←/→`, `↑/↓` selects),
   `[Enter]` opens the selected job's result card; the **Running** row shows the live `███░░░` progress
-  bar. `Esc` un-focuses (a second `Esc` backs out). Actions map to CLI verbs: `[s]` scan, `[d]` dedup,
-  `[m]` **merge-from picker** (§3.3 — radio between a paginated registered-root list and a typed
-  external-folder path, `Ctrl+D` dry-run toggle), `[c]` cleanup (choice modal: exact / perceptual /
-  undecodable), and `[o]`/`[g]`/`[k]` on a pending review (open Explorer / `--confirm` / `--cancel`).
+  bar. `Esc` un-focuses (a second `Esc` backs out). Actions map to CLI verbs: `[s]` scan, `[d]` dedup
+  (a **choice modal** first picks the keep-preference — prefer external [default] vs. internal, i.e.
+  `--prefer-internal`), `[m]` **merge-from picker** (§3.3 — radio between a paginated registered-root
+  list and a typed external-folder path, `Ctrl+D` dry-run toggle), `[c]` cleanup (choice modal: exact /
+  perceptual / undecodable), and `[o]`/`[g]`/`[k]` on a pending review (open Explorer / `--confirm` / `--cancel`).
   Actions that need **no confirmation** report via a non-blocking **toast** (a red error toast if the
   submit itself fails), never a modal popup; only confirm-gated deletes still open a modal.
 - **Queue interface** (§4): three independently-paged sections — **Running**, **Queued** (with blocked
@@ -2581,7 +2623,10 @@ screen over a shared `frames.base`, each paired with its `screens/*` builder of 
 `app` (the `PackratApp` + entrypoint). The pure layers import **without** Textual and are tested as
 plain strings; the Textual screens each display one pre-composed frame and own only key routing / focus
 / liveness (a light poll timer + the running job's SSE stream — the app drives fetch/subscribe directly,
-no separate subscription object).
+no separate subscription object). One pure builder lives **outside** `tui/`: `packrat/review_stats.py`
+(dedup stage-1/2 review stats — compute + line-builders) is shared by the TUI Review box AND the CLI
+`dedup` staging log, so it sits at the top level where both the jobs layer and the TUI can import it
+without either depending on the other ([[review-stats-shared-renderer]]).
 
 **Key invariants:**
 - **Full-terminal responsive layout.** The frame fills the whole terminal and reflows via a **surplus
