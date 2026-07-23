@@ -202,6 +202,22 @@ def test_root_detail_stage2_rich_review_renders_and_scrolls():
     assert "of " in built and "↑/↓" in built
 
 
+def test_root_detail_stage3_review_omits_exact_count():
+    """Stage 3 (minor edits) has no exact deletions, so the box must NOT show a
+    misleading '0 to delete (exact)' — just the near-dup group/member count."""
+    d = fixtures.root_detail_pending()
+    d["pending_review"] = {"id": 78, "run_type": "dedup", "stage": 3,
+                           "created_at": "2026-07-15T11:31:00",
+                           "counts": {"to_delete_exact": 0, "groups": 8, "members": 16,
+                                      "network": 0}}
+    built = screen(f"packrat · {d['name']}", detail_body(d, now=NOW, jobs=[]),
+                   detail_header_right(d), footer="Esc")
+    _fixed(built)
+    assert "⚠ dedup — awaiting review (stage 3 of 3)" in built
+    assert "8 near-dup groups / 16 members (default-keep)" in built
+    assert "to delete (exact)" not in built     # the misleading exact facet is gone
+
+
 def test_root_detail_review_height_is_ratio_capped():
     """The Review box never exceeds half the shared interior (review:jobs ≤ 1:1), and a
     calm root collapses the box to a single row — the responsive-height contract (§3)."""
