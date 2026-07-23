@@ -357,13 +357,12 @@ def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[
         from ...review_stats import stage1_lines
         header = f"{WARN} {run} — awaiting review (stage 1 of 3)"
         detail = stage1_lines(c["stage1"])
-    elif stage == 3:
-        # Stage 3 (minor edits): near-dup groups only — no exact deletions (a stage-1
-        # concept, so `to_delete_exact` is always 0 here) and deliberately no keep-lead
-        # (the edited copy may be the keeper, §8 B). Just the group/member count.
+    elif stage == 3 and c.get("stage3"):
+        # Stage 3 (minor edits): near-dup groups only — no exact deletions and (unranked)
+        # no keep-lead, but a PDQ histogram + group make-up like stage 2 (§8 B).
+        from ...review_stats import stage3_lines
         header = f"{WARN} {run} — awaiting review (stage 3 of 3)"
-        detail = [(f"  {c.get('groups', 0)} near-dup groups / "
-                   f"{c.get('members', 0)} members (default-keep)")]
+        detail = [f"  {ln}" for ln in stage3_lines(c["stage3"], _review_text_w(geo) - 2)]
     else:
         header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
         detail = [(f"  {c.get('to_delete_exact', 0)} to delete (exact) · "

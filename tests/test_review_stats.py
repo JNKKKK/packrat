@@ -18,16 +18,25 @@ def _perc(group_no, *, is_external=0, is_lead=0, lead_reason=None, distance=0,
 
 
 def test_stage1_split_counts_internal_and_external():
+    # asset 1: two internal copies deleted (internal-only group); asset 2: an external
+    # survivor kept (mixed); asset 3: --prefer-internal deletes the external copy (mixed).
     rows = [
-        {"kind": "exact", "is_external": 0}, {"kind": "exact", "is_external": 0},
-        {"kind": "exact", "is_external": 1},
+        {"kind": "exact", "asset_id": 1, "is_external": 0, "reason": "exact-internal"},
+        {"kind": "exact", "asset_id": 1, "is_external": 0, "reason": "exact-internal"},
+        {"kind": "exact", "asset_id": 2, "is_external": 0, "reason": "exact-external"},
+        {"kind": "exact", "asset_id": 3, "is_external": 1, "reason": "exact-internal-preferred"},
     ]
-    assert rs.stage1_split(rows) == {"to_delete": 3, "internal": 2, "external": 1}
+    assert rs.stage1_split(rows) == {
+        "to_delete": 4, "internal": 3, "external": 1,
+        "groups_internal_only": 1, "groups_mixed": 2,
+    }
 
 
-def test_stage1_lines_renders_split():
-    lines = rs.stage1_lines({"to_delete": 3, "internal": 2, "external": 1})
-    assert lines == ["  to delete (exact): 3 file(s)  ·  2 internal, 1 external"]
+def test_stage1_lines_renders_split_and_makeup():
+    lines = rs.stage1_lines({"to_delete": 3, "internal": 2, "external": 1,
+                             "groups_internal_only": 4, "groups_mixed": 1})
+    assert lines[0] == "  to delete (exact): 3 file(s)  ·  2 internal, 1 external"
+    assert lines[1] == "  group make-up:  4 internal-only · 1 mixed (internal+external)"
 
 
 def test_stage2_groups_and_members():
@@ -49,12 +58,24 @@ def test_stage2_lead_tally_split_by_medium():
     assert b["lead_by_medium"]["video"] == {"resolution": 1}
 
 
-def test_stage2_pdq_histogram_bins():
-    dists = [0, 1, 2, 3, 5, 6, 10, 11, 50, 90]
+def test_stage2_pdq_histogram_bins_threshold_derived():
+    # Stage 2 bins (t_rec=10, t_video=90): photo thirds 0–2/3–6/7–10, then video 11–50 /
+    # 51–90 / 91+ (mean-Hamming can exceed t_match_video, so the top bin is open).
+    dists = [0, 2, 5, 8, 10, 40, 90, 120]
     rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
-    b = rs.stage2_stats(rows)
-    assert b["pdq"] == {"0–2": 3, "3–5": 2, "6–10": 2, "11+": 3}
-    # the bar total equals the member count (every member with a distance is binned)
+    b = rs.stage2_stats(rows, stage=2, t_rec=10, t_edit=32, t_video=90)
+    # 0,2 → 0–2 ; 5 → 3–6 ; 8,10 → 7–10 ; 40 → 11–50 ; 90 → 51–90 ; 120 → 91+
+    assert b["pdq"] == {"0–2": 2, "3–6": 1, "7–10": 2, "11–50": 1, "51–90": 1, "91+": 1}
+    assert sum(b["pdq"].values()) == len(rows)
+
+
+def test_stage3_pdq_histogram_bins_threshold_derived():
+    # Stage 3 bins split the recompress+1 .. t_edit band (11..32) into even thirds; every
+    # stage-3 photo lands in a real bar (regression: all fell in a single "11+" bucket).
+    dists = [11, 15, 18, 24, 25, 32]
+    rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
+    b = rs.stage2_stats(rows, stage=3, t_rec=10, t_edit=32)
+    assert b["pdq"] == {"11–17": 2, "18–24": 2, "25–32": 2}
     assert sum(b["pdq"].values()) == len(rows)
 
 

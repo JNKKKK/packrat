@@ -1016,25 +1016,33 @@ def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing
 
 
 def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
-    """Log the stage-1 / stage-2 review breakdown — the SAME text the TUI Review box shows.
+    """Log the per-stage review breakdown — the SAME text the TUI Review box shows.
 
     Both faces render :mod:`packrat.review_stats` line-builders over the same
-    ``review_actions`` shape, so the CLI staging log and the box can't drift (§8 B).
-    Silent on stage 3 (unranked minor edits) and on empty stages.
+    ``review_actions`` shape, so the CLI staging log and the box can't drift (§8 B). Silent
+    on empty stages. Unlike the read-only TUI poll, the CLI runs inside the job, so it
+    passes the run's LIVE PDQ thresholds (``ctx.config.match``) for the histogram bins.
     """
     from .. import review_stats
     if not actions:
         return
+    m = ctx.config.match
+    thresholds = dict(t_rec=m.t_photo_recompress, t_edit=m.t_photo_edit, t_video=m.t_match_video)
     if stage == STAGE_EXACT:
         for ln in review_stats.stage1_lines(review_stats.stage1_split(actions)):
             ctx.log(ln)
     elif stage == STAGE_RECOMPRESS:
-        bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path)
+        bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path, **thresholds)
         # keep_suggested=False: the CLI prints its OWN `--confirm --keep-suggested` tip
         # (below, in _report_staged), so suppress the box's `[b]` tip here — `[b]` is a
         # TUI-only key and would duplicate the CLI tip. Width = the reference frame's text
         # width; the daemon has no client terminal size, so the log isn't reflowed to it.
         for ln in review_stats.stage2_lines(bundle, _CLI_STATS_WIDTH, keep_suggested=False):
+            ctx.log(f"  {ln}")
+    elif stage == STAGE_EDIT:
+        bundle = review_stats.stage2_stats(actions, stage=3, is_network=fsutil.is_network_path,
+                                           **thresholds)
+        for ln in review_stats.stage3_lines(bundle, _CLI_STATS_WIDTH):
             ctx.log(f"  {ln}")
 
 

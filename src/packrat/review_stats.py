@@ -20,10 +20,41 @@ from collections.abc import Callable, Iterable
 
 from .jobs.dedup_rank import ordered_lead_levels
 
-#: PDQ-distance histogram bins (§8 B): (label, lo, hi) inclusive; last bin is open-ended.
-_PDQ_BINS: tuple[tuple[str, int, int], ...] = (
-    ("0–2", 0, 2), ("3–5", 3, 5), ("6–10", 6, 10), ("11+", 11, 10 ** 9),
-)
+#: PDQ threshold defaults (mirror config.MatchConfig; §5.3) — used for the histogram bin
+#: boundaries when a caller doesn't pass live thresholds (the read-only TUI poll doesn't
+#: re-read config; the CLI job path passes ctx.config's values).
+_T_RECOMPRESS, _T_EDIT, _T_MATCH_VIDEO = 10, 32, 90
+_OPEN = 10 ** 9   # open-ended top-bin upper bound
+
+
+def _thirds(lo: int, hi: int) -> list[tuple[str, int, int]]:
+    """Split the inclusive range [lo, hi] into 3 near-even bins → (label, lo, hi) each."""
+    span = hi - lo + 1
+    a = lo + span // 3 - 1                       # end of bin 1
+    b = lo + (2 * span) // 3 - 1                 # end of bin 2
+    cuts = [(lo, a), (a + 1, b), (b + 1, hi)]
+    return [(f"{x}–{y}" if x != y else f"{x}", x, y) for x, y in cuts]
+
+
+def _pdq_bins(stage: int, t_rec: int, t_edit: int, t_video: int) -> list[tuple[str, int, int]]:
+    """Histogram bins for a stage, derived from the PDQ thresholds (§5.3, §8 B).
+
+    - **Stage 2** (recompression): photos band at ``0..t_rec`` → even thirds; video
+      near-dups run on their own frame-vote scale (mean Hamming, can exceed ``t_match``),
+      so they get coarse bins ``t_rec+1..t_video`` + an open overflow. Photo and video
+      bins share one axis but their labels keep them legible.
+    - **Stage 3** (minor edits): photos only, band ``t_rec+1..t_edit`` → even thirds.
+    """
+    if stage == 3:
+        return _thirds(t_rec + 1, t_edit)
+    # stage 2: photo thirds of the recompress band, then video bins beyond it.
+    lo_v = t_rec + 1
+    mid_v = lo_v + (t_video - lo_v) // 2
+    return _thirds(0, t_rec) + [
+        (f"{lo_v}–{mid_v}", lo_v, mid_v),
+        (f"{mid_v + 1}–{t_video}", mid_v + 1, t_video),
+        (f"{t_video + 1}+", t_video + 1, _OPEN),
+    ]
 
 #: Short video-level labels for the narrow TUI column (the shared ``resolution`` prefix
 #: is implied). Keyed by the full label so the ordering helper stays the source of truth.
@@ -44,24 +75,64 @@ def _truthy(v) -> bool:
     return bool(v)
 
 
+def _group_makeup(grouped: Iterable[list[dict]]) -> tuple[int, int]:
+    """Count ``(internal_only, mixed)`` over groups of ``review_actions`` (§8 B).
+
+    A group is *mixed* if it spans both an internal and an external member, else
+    *internal-only*. (An all-external group is unreachable — every group has a target-root
+    member — so it's folded into neither; see :func:`stage2_stats`.)"""
+    internal_only = mixed = 0
+    for members in grouped:
+        has_ext = any(_truthy(m.get("is_external")) for m in members)
+        has_int = any(not _truthy(m.get("is_external")) for m in members)
+        if has_ext and has_int:
+            mixed += 1
+        elif has_int:
+            internal_only += 1
+    return internal_only, mixed
+
+
 def stage1_split(rows: Iterable[dict]) -> dict:
-    """Stage-1 exact-delete breakdown: total files to delete, split internal/external.
+    """Stage-1 exact-delete breakdown: files to delete (internal/external) + group make-up.
 
     ``rows`` are the stage-1 ``review_actions`` (all default-DELETE). ``is_external`` marks
-    a file *outside* the target root — nonzero only under ``--prefer-internal`` (§8 B).
+    a file *outside* the target root — nonzero only under ``--prefer-internal`` (§8 B). A
+    stage-1 "group" is one asset (its redundant copies): exact dups carry no ``group_no``,
+    so group by ``asset_id``. A group is internal-only when the copies being deleted are
+    all internal (``exact-internal``), mixed when the delete set reaches an external copy
+    (``exact-external`` keeps an external survivor; ``exact-internal-preferred`` deletes an
+    external copy) — i.e. the same has-internal/has-external test as stages 2/3, applied to
+    the asset's copies (deleted + the recorded survivor).
     """
     rows = [r for r in rows if r.get("kind") == "exact"]
     external = sum(1 for r in rows if _truthy(r.get("is_external")))
-    return {"to_delete": len(rows), "internal": len(rows) - external, "external": external}
+    # Group make-up: a stage-1 group spans roots iff its asset's copies aren't all internal.
+    # `exact-internal` = internal-only; any other reason means an external copy is involved
+    # (survivor external, or an external delete under --prefer-internal) → mixed.
+    by_asset: dict = {}
+    for r in rows:
+        by_asset.setdefault(r.get("asset_id"), []).append(r)
+    internal_only = mixed = 0
+    for members in by_asset.values():
+        if all(m.get("reason") == "exact-internal" for m in members):
+            internal_only += 1
+        else:
+            mixed += 1
+    return {"to_delete": len(rows), "internal": len(rows) - external, "external": external,
+            "groups_internal_only": internal_only, "groups_mixed": mixed}
 
 
-def stage2_stats(rows: Iterable[dict], *,
+def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
+                 t_rec: int = _T_RECOMPRESS, t_edit: int = _T_EDIT,
+                 t_video: int = _T_MATCH_VIDEO,
                  is_network: Callable[[str], bool] = lambda _p: False) -> dict:
-    """Compute the stage-2 review bundle from perceptual ``review_actions`` rows (§8 B).
+    """Compute the perceptual (stage-2 or stage-3) review bundle from ``review_actions`` (§8 B).
 
-    Returns groups/members, the keep-lead pick tally split by medium, a PDQ-distance
-    histogram, the internal/external group make-up + suggestion split, and the
-    ``--keep-suggested`` delete set size (non-lead members) with its network exposure.
+    Returns groups/members, a PDQ-distance histogram (bins derived from the thresholds for
+    ``stage``), the internal/external group make-up, and — for stage 2 only — the keep-lead
+    pick tally by medium, the mixed-group suggestion split, and the ``--keep-suggested``
+    delete set size (non-lead members) with its network exposure. Stage 3 is unranked
+    (no keep-lead), so those keep-lead/suggestion fields come back empty/zero.
     ``is_network`` classifies a path as a non-recyclable share (injected; no I/O here).
     """
     rows = [r for r in rows if r.get("kind") == "perceptual"]
@@ -79,40 +150,34 @@ def stage2_stats(rows: Iterable[dict], *,
         lead_by_medium[medium][label] = lead_by_medium[medium].get(label, 0) + 1
 
     # (b) PDQ-distance histogram over every member with a known distance.
-    pdq = {label: 0 for label, _, _ in _PDQ_BINS}
+    bins = _pdq_bins(stage, t_rec, t_edit, t_video)
+    pdq = {label: 0 for label, _, _ in bins}
     for r in rows:
         d = r.get("distance")
         if d is None:
             continue
-        for label, lo, hi in _PDQ_BINS:
+        for label, lo, hi in bins:
             if lo <= d <= hi:
                 pdq[label] += 1
                 break
 
-    # (c) group make-up + suggestion split, and the keep-suggested delete set.
-    all_internal = mixed = suggest_ext = suggest_int = 0
-    ks_delete = ks_network = 0
+    # (c) group make-up + (stage 2) suggestion split + the keep-suggested delete set.
+    all_internal, mixed = _group_makeup(groups.values())
+    suggest_ext = suggest_int = ks_delete = ks_network = 0
     for members in groups.values():
         has_ext = any(_truthy(m.get("is_external")) for m in members)
         has_int = any(not _truthy(m.get("is_external")) for m in members)
         if has_ext and has_int:
-            mixed += 1
-            # Every stage-2 group has ≥1 internal member (its cluster is built from edges
-            # with a target-root endpoint), so a mixed group always has a suggested lead
-            # and these two counts sum to `mixed` — for fresh data. A leadless mixed group
-            # (only from stale rows predating is_lead) is dropped from the split, so it can
-            # legitimately under-sum then; the group make-up count above still includes it.
+            # Every stage-2 group has ≥1 internal member (cluster built from edges with a
+            # target-root endpoint), so a mixed group always has a suggested lead and these
+            # two counts sum to `mixed` — for fresh data. A leadless mixed group (only stale
+            # rows predating is_lead) is dropped from the split; make-up above still has it.
             lead = next((m for m in members if _truthy(m.get("is_lead"))), None)
             if lead is not None:
                 if _truthy(lead.get("is_external")):
                     suggest_ext += 1
                 else:
                     suggest_int += 1
-        elif has_int:
-            all_internal += 1
-        # else: all-external — unreachable in stage 2 (every cluster has a target-root
-        # member → an internal copy), so NOT lumped into all_internal. Left uncounted
-        # rather than mislabeled if that invariant ever changes.
         # --keep-suggested deletes every non-lead member (deterministic from is_lead).
         for m in members:
             if not _truthy(m.get("is_lead")):
@@ -138,9 +203,35 @@ def stage2_stats(rows: Iterable[dict], *,
 # line-builders (bundle → list[str]); pure text, width-parameterized
 # ---------------------------------------------------------------------------
 def stage1_lines(split: dict) -> list[str]:
-    """The stage-1 count line(s): total to delete + internal/external split (§8 B)."""
-    return [f"  to delete (exact): {split['to_delete']} file(s)  ·  "
-            f"{split['internal']} internal, {split['external']} external"]
+    """The stage-1 lines: delete count (internal/external) + group make-up (§8 B)."""
+    lines = [f"  to delete (exact): {split['to_delete']} file(s)  ·  "
+             f"{split['internal']} internal, {split['external']} external"]
+    lines.append(
+        f"  group make-up:  {split.get('groups_internal_only', 0)} internal-only · "
+        f"{split.get('groups_mixed', 0)} mixed (internal+external)"
+    )
+    return lines
+
+
+def _makeup_line(bundle: dict) -> str:
+    """The shared internal/mixed group make-up line for stages 2/3 (§8 B)."""
+    return (f"group make-up:  {bundle['groups_all_internal']} all-internal · "
+            f"{bundle['groups_mixed']} mixed (internal+external)")
+
+
+def stage3_lines(bundle: dict, width: int) -> list[str]:
+    """The stage-3 (minor edits) Review body: group/member count + PDQ histogram + make-up.
+
+    Stage 3 is deliberately UNRANKED (the edited copy may be the keeper, §8 B), so there is
+    no keep-lead column and no keep-suggested action — just the near-dup shape."""
+    body = [f"{bundle['groups']} near-dup groups / {bundle['members']} members (default-keep)"]
+    body += _histogram_lines(bundle["pdq"], width)
+    body.append(_makeup_line(bundle))
+    if bundle["groups_mixed"]:
+        body.append(
+            f"  of the {bundle['groups_mixed']} mixed groups, an external copy is present"
+        )
+    return body
 
 
 def _two_column(left: list[str], right: list[str], width: int) -> list[str]:
@@ -223,10 +314,7 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
     else:
         body = lead_block + _histogram_lines(bundle["pdq"], width)
 
-    body.append(
-        f"group make-up:  {bundle['groups_all_internal']} all-internal · "
-        f"{bundle['groups_mixed']} mixed (internal+external)"
-    )
+    body.append(_makeup_line(bundle))
     if bundle["groups_mixed"]:
         body.append(
             f"  of the {bundle['groups_mixed']} mixed groups →  "

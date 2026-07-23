@@ -282,8 +282,10 @@ def test_review_counts_reports_network_delete_set(seeded):
         counts = d["pending_review"]["counts"]
         assert counts["to_delete_exact"] == 2
         assert counts["network"] == 1              # only the \\nas UNC path counts
-        # Stage-1 internal/external delete split (§8 B item-3 metric).
-        assert counts["stage1"] == {"to_delete": 2, "internal": 1, "external": 1}
+        # Stage-1 delete split + group make-up (§8 B item-3 metrics). Both rows are the
+        # same asset with an external survivor (exact-external) → one mixed group.
+        assert counts["stage1"] == {"to_delete": 2, "internal": 1, "external": 1,
+                                    "groups_internal_only": 0, "groups_mixed": 1}
     finally:
         database.close()
 

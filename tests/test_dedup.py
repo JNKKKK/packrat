@@ -416,6 +416,22 @@ def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     assert "PDQ distance" in blob            # the histogram is part of the shared block
 
 
+def test_dedup_stage1_log_shows_group_makeup(queue_and_db, tmp_path):
+    """The stage-1 (analyze) staging log carries the internal/mixed group make-up line."""
+    import shutil
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 1)
+    shutil.copy(lib / "a.png", lib / "a_copy.png")           # exact dup → stage 1
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    blob = "\n".join(_run_capture(q, database, "dedup", root_id=root["id"]))
+    assert "to delete (exact):" in blob
+    assert "group make-up:" in blob and "internal-only" in blob
+
+
 def test_dedup_result_summary_omits_exact_when_not_stage1(queue_and_db, tmp_path):
     """A run opened at stage 2 (no stage-1 exact dups) must NOT report '0 exact' in its
     result summary — the exact count is stage-1-only, so stages 2/3 show grp/mbr instead."""

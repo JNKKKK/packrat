@@ -360,11 +360,14 @@ collapses to 1 row (`review_content_lines == 1`, well under the cap).
     a single full-width line **below** the keep-lead section instead. NOTE: the terminal is
     guaranteed ≥100 wide (geometry.py), so the box interior is always ≥92 — side-by-side is
     effectively always used; the below-fallback is defensive (future narrow/split render).
-  - **Bins = `0–2 · 3–5 · 6–10 · 11+`** (DECIDED). Photos band at `d ≤ t_photo_recompress`
-    (default 10) so they land in the first three bins; the `11+` bin catches the looser
-    video frame-vote matches (`near_d` up to `t_match_video`, 90). Bar total must equal
-    `members`. If the thresholds are re-tuned later, revisit whether the `6–10`/`11+`
-    boundary should track `t_photo_recompress` rather than being literal.
+  - **Bins are THRESHOLD-DERIVED per stage (SHIPPED, supersedes the fixed scheme below).**
+    `review_stats._pdq_bins(stage, t_rec, t_edit, t_video)`: stage-2 photos = even thirds
+    of `0..t_rec` (→ `0–2 · 3–6 · 7–10`) + video on its own scale `t_rec+1..t_video` + an
+    open overflow (`11–50 · 51–90 · 91+`, since the video mean-Hamming can exceed
+    `t_match_video`); stage-3 photos = even thirds of `t_rec+1..t_edit` (→ `11–17 · 18–24 ·
+    25–32`). Also added: stage-1 + stage-3 group make-up, stage-3 histogram. CLI passes
+    live `ctx.config.match` thresholds; the read-only TUI poll uses the config defaults.
+    (The older fixed `0–2 · 3–5 · 6–10 · 11+` scheme in the mocks below is historical.)
 
   **(c) Internal/external suggestion breakdown** — the user's requested framing:
   - how many groups are **all-internal** (every member in the target root);

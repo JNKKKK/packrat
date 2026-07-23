@@ -422,8 +422,8 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     # media_type comes from the asset (review_actions has none); a pending stage-2 review
     # hasn't deleted its members, so the JOIN resolves. LEFT JOIN keeps a row even if the
     # asset was forgotten mid-flight (media_type → NULL, treated as photo downstream).
-    cols = ("ra.kind, ra.group_no, ra.path, ra.default_action, ra.is_external, "
-            "ra.is_lead, ra.lead_reason, ra.distance, a.media_type")
+    cols = ("ra.kind, ra.reason, ra.asset_id, ra.group_no, ra.path, ra.default_action, "
+            "ra.is_external, ra.is_lead, ra.lead_reason, ra.distance, a.media_type")
     if stage is None:
         rows = conn.execute(
             f"SELECT {cols} FROM review_actions ra LEFT JOIN assets a ON a.id=ra.asset_id "
@@ -447,13 +447,19 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
         out = {"to_delete_exact": exact, "groups": len(groups), "members": members,
                "network": network}
         # Rich per-stage breakdowns for the Review box + CLI log (§8 B, review_stats):
-        # stage 1 = internal/external delete split; stage 2 = keep-lead / PDQ / make-up.
+        # stage 1 = delete split + group make-up; stage 2 = keep-lead / PDQ / make-up;
+        # stage 3 = group make-up + PDQ histogram (unranked, so no keep-lead). The poll is
+        # read-only and must not re-read config, so the histogram bins use the default PDQ
+        # thresholds (bin boundaries are cosmetic; the CLI job path passes live thresholds).
         from . import review_stats
         row_dicts = [dict(r) for r in rows]
         if stage == 1:
             out["stage1"] = review_stats.stage1_split(row_dicts)
         elif stage == 2:
             out["stage2"] = review_stats.stage2_stats(row_dicts, is_network=fsutil.is_network_path)
+        elif stage == 3:
+            out["stage3"] = review_stats.stage2_stats(row_dicts, stage=3,
+                                                       is_network=fsutil.is_network_path)
         return out
     exact = sum(1 for r in rows if r["kind"] == "exact")
     perceptual = sum(1 for r in rows if r["kind"] == "perceptual")
