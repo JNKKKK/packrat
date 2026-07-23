@@ -56,6 +56,7 @@ class RootDetailScreen(FrameScreen):
         self.job_focus = "running"       # default Jobs sub-section (§3, matches Queue)
         self.cursors = {"running": 0, "queued": 0, "history": 0}
         self.pages = {"running": 0, "queued": 0, "history": 0}
+        self.review_scroll = 0           # ↑/↓ offset when the Review box overflows its cap
         self._jobs: list[dict] = []      # last-fetched jobs (refreshed on mount + poll)
         self._detail: dict | None = None
         self._loaded = False             # False until the first reload() populates data
@@ -144,7 +145,8 @@ class RootDetailScreen(FrameScreen):
         vd, vjobs = self.app.view(d), self.app.view(jobs)
         body = detail_body(vd, now=self.now, geo=geo, jobs=vjobs,
                           focus=self.focus, job_focus=self.job_focus,
-                          cursors=self.cursors, pages=self.pages)
+                          cursors=self.cursors, pages=self.pages,
+                          review_scroll=self.review_scroll)
         return screen(f"packrat · {vd['name']}", body, detail_header_right(vd),
                       footer=footer, width=geo.w, height=geo.h)
 
@@ -178,6 +180,7 @@ class RootDetailScreen(FrameScreen):
         # [e] focuses the R[e]view box (always focus-able, even with no pending review —
         # the box is a permanent section, like Jobs).
         self.focus = "review"
+        self.review_scroll = 0          # start at the top each time it gains focus
         self.refresh_frame()
 
     def action_focus_jobs(self) -> None:
@@ -198,6 +201,13 @@ class RootDetailScreen(FrameScreen):
             self.app.pop_screen()
 
     def action_move(self, delta: int) -> None:
+        if self.focus == "review":
+            # ↑/↓ scroll the Review box when its content exceeds the responsive cap.
+            from ..screens.rootdetail import review_scroll_max
+            hi = review_scroll_max(self._detail or {}, self._geo, focused=True)
+            self.review_scroll = max(0, min(self.review_scroll + delta, hi))
+            self.refresh_frame()
+            return
         if self.focus != "jobs":
             return
         sec = self.job_focus
@@ -247,10 +257,31 @@ class RootDetailScreen(FrameScreen):
         self.app.run_verb(f"packrat scan {root}",
                           submit=lambda: self.app.client.submit_scan(root))
 
+    #: [d] dedup master-preference prompt (§8 B --prefer-internal). Cursor 0 = default
+    #: (external is the master), so a plain [Enter] keeps today's behavior.
+    DEDUP_PREFER_OPTIONS = [
+        "Prefer external (keep the other root's copy)",
+        "Prefer internal (keep this root's copy)",
+    ]
+
     def action_dedup(self) -> None:
+        if not self.is_active:
+            return
         root = self.root_name
-        self.app.run_verb(f"packrat dedup {root}",
-                          submit=lambda: self.app.client.submit_dedup(root))
+
+        def after(idx):
+            if idx is None:                      # Esc → don't submit anything
+                return
+            prefer_internal = idx == 1
+            cmd = f"packrat dedup {root}" + (" --prefer-internal" if prefer_internal else "")
+            self.app.run_verb(
+                cmd, title="dedup",
+                submit=lambda: self.app.client.submit_dedup(root, prefer_internal=prefer_internal))
+
+        self.app.push_screen(
+            ChoiceModal(self.DEDUP_PREFER_OPTIONS, title="dedup — which copy is the master?",
+                        prompt="On exact dups + tie-break suggestions across roots:"),
+            after)
 
     def action_merge(self) -> None:
         # [m] → the §3.3 merge-from picker (this root is the destination).

@@ -231,7 +231,12 @@ class TrashRefreshModal(Modal):
 
 
 class ChoiceModal(Modal):
-    """A small pick-list for a quick choice (a lightweight MergePicker sibling)."""
+    """A small pick-list for a quick choice (a lightweight MergePicker sibling).
+
+    ``prompt`` (optional) is a question line rendered above the options (wrapped to the
+    inset), so the box can pose "which…?" rather than relying on the short title alone.
+    The cursor starts on option 0, so a plain [Enter] takes the first (default) choice.
+    """
 
     BINDINGS = [
         Binding("escape", "cancel", show=False),
@@ -240,28 +245,38 @@ class ChoiceModal(Modal):
         Binding("enter", "choose", show=False),
     ]
 
-    def __init__(self, options: list[str], *, title: str = "choose"):
+    def __init__(self, options: list[str], *, title: str = "choose", prompt: str = ""):
         super().__init__()
         self.options = options
         self.title = title
+        self.prompt = prompt
         self.cursor = 0
         self.footer = "↑/↓ select   [Enter] choose   Esc cancel"
 
+    def _option_lines(self) -> list[str]:
+        from .tokens import CURSOR
+        return [f"{CURSOR if i == self.cursor else ' '} {opt}"
+                for i, opt in enumerate(self.options)]
+
     @property
     def message(self) -> str:
-        from .tokens import CURSOR
-        return "\n".join(
-            f"{CURSOR if i == self.cursor else ' '} {opt}" for i, opt in enumerate(self.options)
-        )
+        # With a prompt, the message IS the prompt (wrapped by modal_lines) and the
+        # options render as extra_lines below it; without one, the options are the message
+        # (the original lightweight-picker behavior).
+        return self.prompt if self.prompt else "\n".join(self._option_lines())
 
     @message.setter
     def message(self, _value):  # base __init__ sets message="" — ignore, we compute it
         pass
 
+    def extra_lines(self) -> list[str]:
+        return self._option_lines() if self.prompt else []
+
     def action_move(self, delta: int) -> None:
         self.cursor = max(0, min(self.cursor + delta, len(self.options) - 1))
         self.query_one("#modal-frame", Static).update(
-            self._render_masked(modal_lines(self.title, self.message, self.footer)))
+            self._render_masked(modal_lines(self.title, self.message, self.footer,
+                                            extra=self.extra_lines())))
 
     def action_choose(self) -> None:
         self.dismiss(self.cursor)

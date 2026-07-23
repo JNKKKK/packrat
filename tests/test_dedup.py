@@ -399,7 +399,8 @@ def test_dedup_keep_suggested_rejected_on_non_stage2(queue_and_db, tmp_path):
 
 
 def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
-    """Analyze logs the keep-lead pick breakdown (decided by resolution/format/size)."""
+    """Analyze logs the keep-lead breakdown (the shared review_stats block: photo column
+    + format decision) — the same text the TUI Review box renders (§8 B)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -409,8 +410,10 @@ def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     _scan_root(q, database, root["id"])
     logs = _run_capture(q, database, "dedup", root_id=root["id"])
     blob = "\n".join(logs)
-    assert "keep-lead picks" in blob
-    assert "resolution + format" in blob  # PNG vs JPEG at equal resolution → format decides
+    assert "keep-lead decided by:" in blob
+    assert "photos (" in blob                # per-medium column header
+    assert "+ format" in blob                # PNG vs JPEG at equal resolution → format decides
+    assert "PDQ distance" in blob            # the histogram is part of the shared block
 
 
 @win_only
@@ -862,3 +865,77 @@ def test_reconcile_keeps_applied_phase_run_pending(queue_and_db, tmp_path):
     summary = reconcile_on_startup(database)
     assert not summary["rolled_back_runs"]
     assert _run_row(database, root["id"]) is not None
+
+
+# ---------------------------------------------------------------------------
+# --prefer-internal (§8 B): stage-1 survivor flip + run-scoped persistence
+# ---------------------------------------------------------------------------
+def _cross_root_dup(tmp_path, database, q):
+    """Register an internal + external root sharing one byte-identical photo; scan both.
+
+    Returns ``(internal_root, external_root)``. The shared asset therefore has a copy in
+    each root — the exact-dup-across-roots case stage 1 resolves.
+    """
+    import shutil
+
+    internal = tmp_path / "internal"; internal.mkdir()
+    external = tmp_path / "external"; external.mkdir()
+    _photo(internal / "shared.png", 7)
+    shutil.copy(internal / "shared.png", external / "shared.png")   # byte-identical → exact dup
+    ri = register(database, str(internal))
+    re = register(database, str(external))
+    _scan_root(q, database, ri["id"])
+    _scan_root(q, database, re["id"])
+    return ri, re
+
+
+def test_dedup_stage1_default_deletes_internal(queue_and_db, tmp_path):
+    """Default (no flag): the EXTERNAL copy survives, the internal copy is staged for
+    deletion (reason exact-external, not is_external)."""
+    q, database = queue_and_db
+    ri, _re = _cross_root_dup(tmp_path, database, q)
+    _run(q, database, "dedup", root_id=ri["id"])
+    run = _run_row(database, ri["id"])
+    assert run is not None and run["prefer_internal"] == 0
+    acts = [dict(a) for a in _stage_actions(database, run["id"], 1)]
+    assert acts, "expected a stage-1 exact action"
+    assert all(a["reason"] == "exact-external" for a in acts)
+    assert all(not a["is_external"] for a in acts)           # deletes the INTERNAL copy
+    assert all(a["path"].endswith("internal\\shared.png") for a in acts)
+
+
+def test_dedup_stage1_prefer_internal_deletes_external(queue_and_db, tmp_path):
+    """--prefer-internal: the INTERNAL copy survives, the external copy is staged for
+    deletion (reason exact-internal-preferred, is_external=1 for the network warning)."""
+    q, database = queue_and_db
+    ri, _re = _cross_root_dup(tmp_path, database, q)
+    _run(q, database, "dedup", root_id=ri["id"], prefer_internal=True)
+    run = _run_row(database, ri["id"])
+    assert run is not None and run["prefer_internal"] == 1
+    acts = [dict(a) for a in _stage_actions(database, run["id"], 1)]
+    assert acts, "expected a stage-1 exact action"
+    assert all(a["reason"] == "exact-internal-preferred" for a in acts)
+    assert all(a["is_external"] for a in acts)               # deletes the EXTERNAL copy
+    assert all(a["path"].endswith("external\\shared.png") for a in acts)
+
+
+def test_dedup_prefer_internal_persists_across_confirm(queue_and_db, tmp_path):
+    """The flag is stored on the run at analyze and read from the row, NOT re-passed on
+    confirm — a bare --confirm keeps applying the run's policy (§8 B run-scoped)."""
+    q, database = queue_and_db
+    ri, _re = _cross_root_dup(tmp_path, database, q)
+    _run(q, database, "dedup", root_id=ri["id"], prefer_internal=True)
+    run = _run_row(database, ri["id"])
+    assert run["prefer_internal"] == 1     # persisted, available to every later confirm
+
+
+def test_dedup_confirm_conflicting_prefer_internal_errors(queue_and_db, tmp_path):
+    """A --prefer-internal on --confirm that conflicts with the run's stored value is
+    rejected — the preference is fixed when the run opens."""
+    q, database = queue_and_db
+    ri, _re = _cross_root_dup(tmp_path, database, q)
+    _run(q, database, "dedup", root_id=ri["id"])            # opened WITHOUT the flag
+    assert _run_row(database, ri["id"])["prefer_internal"] == 0
+    # Now confirm WITH the flag → conflict → the job errors (doesn't silently flip).
+    _run(q, database, "dedup", root_id=ri["id"], confirm=True, prefer_internal=True,
+         expect="error")

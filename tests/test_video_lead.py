@@ -112,6 +112,71 @@ def test_video_lead_same_codec_raw_bitrate_breaks_band_tie():
     assert level == "resolution + bitrate + codec + fine bitrate"
 
 
+# ---------------------------------------------------------------------------
+# internal/external keep-preference tiebreak (§8 B --prefer-internal)
+# ---------------------------------------------------------------------------
+def _mixed_members(*specs):
+    """specs: (asset_id, root_id) — build members spanning internal (root 1) + external."""
+    return [(i, {"fid": i, "root_id": rid, "path": f"C:\\lib\\{i}.mp4"}) for i, rid in specs]
+
+
+def _tied_rank(*ids):
+    """Identical rank for every id (a full-key tie) so only the tiebreak decides."""
+    return _rank(**{str(i): {"width": 1920, "height": 1080, "size": 10_000_000,
+                             "duration_s": 10.0, "codec": "h264"} for i in ids})
+
+
+def test_video_lead_mixed_tie_defaults_to_external():
+    """Full-key tie in a MIXED group → the external copy is the keep-lead by default."""
+    cfg = Config()
+    m = _mixed_members((1, 1), (2, 2))          # asset 1 internal, asset 2 external
+    lead, level = dedup._group_lead_and_level(m, _tied_rank(1, 2), cfg, root_id=1)
+    assert lead == 2                             # external wins
+    assert level == "internal/external preference"
+
+
+def test_video_lead_mixed_tie_prefer_internal():
+    """--prefer-internal flips a mixed-group tie to the internal copy."""
+    cfg = Config()
+    m = _mixed_members((1, 1), (2, 2))
+    lead, level = dedup._group_lead_and_level(m, _tied_rank(1, 2), cfg,
+                                              root_id=1, prefer_internal=True)
+    assert lead == 1                             # internal wins
+    assert level == "internal/external preference"
+
+
+def test_video_lead_all_internal_tie_uses_path():
+    """An all-internal tie is unaffected by the preference → stable path tiebreak."""
+    cfg = Config()
+    m = _mixed_members((1, 1), (2, 1))           # both internal
+    lead, level = dedup._group_lead_and_level(m, _tied_rank(1, 2), cfg, root_id=1)
+    assert lead == 1 and level == "path tiebreak (identical rank)"   # 1.mp4 < 2.mp4
+
+
+def test_video_lead_preference_never_overrides_quality():
+    """The preference sits BELOW the ranking key: a higher-resolution internal copy still
+    beats an external one even without --prefer-internal (quality wins, not location)."""
+    cfg = Config()
+    m = _mixed_members((1, 1), (2, 2))
+    rank = _rank(
+        **{"1": {"width": 3840, "height": 2160, "size": 10_000_000, "duration_s": 10, "codec": "h264"},
+           "2": {"width": 1920, "height": 1080, "size": 10_000_000, "duration_s": 10, "codec": "h264"}},
+    )
+    lead, level = dedup._group_lead_and_level(m, rank, cfg, root_id=1)   # default (external-pref)
+    assert lead == 1 and level == "resolution"   # the 4K internal copy wins on resolution
+
+
+def test_photo_lead_mixed_tie_prefers_external_then_internal():
+    """The internal/external tiebreak applies to photos too (same code path)."""
+    cfg = Config()
+    m = [(1, {"fid": 1, "root_id": 1, "path": "C:\\lib\\a.jpg"}),
+         (2, {"fid": 2, "root_id": 2, "path": "C:\\lib\\b.jpg"})]
+    rank = _photo_rank(**{"1": {"width": 4000, "height": 3000, "size": 500_000},
+                          "2": {"width": 4000, "height": 3000, "size": 500_000}})
+    assert dedup._pick_lead(m, rank, cfg, root_id=1) == 2                       # external default
+    assert dedup._pick_lead(m, rank, cfg, root_id=1, prefer_internal=True) == 1  # internal flip
+
+
 def test_video_lead_config_weights_override():
     # If the user flips the weights (say they distrust the HEVC-is-better heuristic),
     # the lead follows config — no hardcoded codec preference.

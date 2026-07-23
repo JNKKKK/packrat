@@ -164,12 +164,13 @@ class DaemonClient:
         cancel: bool = False,
         dry_run: bool = False,
         keep_suggested: bool = False,
+        prefer_internal: bool = False,
     ) -> int:
         """Submit a dedup job (§8 B); returns the job id (always enqueued, §3)."""
         return int(self._post(
             "/dedup",
             {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run,
-             "keep_suggested": keep_suggested},
+             "keep_suggested": keep_suggested, "prefer_internal": prefer_internal},
         )["job_id"])
 
     def submit_cleanup(

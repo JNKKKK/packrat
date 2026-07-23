@@ -555,13 +555,21 @@ def test_root_detail_scan_dedup_merge_verbs():
         await pilot.press("r")
         await pilot.press("r")
         await pilot.press("enter")
-        # [s]/[d] are no-confirm actions → their verb surfaces as a TOAST (offline),
-        # NOT a modal popup; the screen stays on the detail. [m] opens the picker.
-        for key, want in (("s", "packrat scan"), ("d", "packrat dedup")):
-            await pilot.press(key)
-            await pilot.pause()
-            assert _scr(app) == "RootDetailScreen", (key, _scr(app))
-            assert want in _toast_text(app), (key, _toast_text(app))
+        # [s] is a no-confirm action → its verb surfaces as a TOAST (offline), NOT a modal;
+        # the screen stays on the detail.
+        await pilot.press("s")
+        await pilot.pause()
+        assert _scr(app) == "RootDetailScreen", _scr(app)
+        assert "packrat scan" in _toast_text(app), _toast_text(app)
+        # [d] opens the master-preference picker (§8 B --prefer-internal); [Enter] takes
+        # the default (prefer external) and surfaces the dedup verb toast.
+        await pilot.press("d")
+        await pilot.pause()
+        assert _scr(app) == "ChoiceModal", _scr(app)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _scr(app) == "RootDetailScreen", _scr(app)
+        assert "packrat dedup" in _toast_text(app), _toast_text(app)
         await pilot.press("m")
         await pilot.pause()
         assert _scr(app) == "MergePickerScreen"        # [m] → §3.3 picker, not a notice

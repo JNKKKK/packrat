@@ -441,8 +441,19 @@ def test_root_detail_scan_submits_online():
 
 
 def test_root_detail_dedup_submits_online():
-    fc = _drive_online(_press_seq(["r", "r", "enter", "d"]))
-    assert any(c[0] == "dedup" for c in fc.calls), fc.calls
+    # [d] opens the master-preference prompt; [Enter] picks the default (prefer external).
+    fc = _drive_online(_press_seq(["r", "r", "enter", "d", "enter"]))
+    dedups = [c for c in fc.calls if c[0] == "dedup"]
+    assert dedups, fc.calls
+    assert dedups[-1][2].get("prefer_internal") is False
+
+
+def test_root_detail_dedup_prefer_internal_online():
+    # [d] then ↓ + [Enter] selects "prefer internal" → the flag reaches submit_dedup.
+    fc = _drive_online(_press_seq(["r", "r", "enter", "d", "down", "enter"]))
+    dedups = [c for c in fc.calls if c[0] == "dedup"]
+    assert dedups, fc.calls
+    assert dedups[-1][2].get("prefer_internal") is True
 
 
 def test_merge_picker_submits_online():

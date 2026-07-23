@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS review_runs (
     status        TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
     stage         INTEGER NOT NULL DEFAULT 1,  -- dedup stage cursor 1..3 (cleanup: 1)
     stage_phase   TEXT,                        -- staged | applied (§8 B Phase 7)
+    prefer_internal INTEGER NOT NULL DEFAULT 0, -- dedup --prefer-internal: keep the INTERNAL
+                                               -- copy on exact-match survivor + keep-lead ties
+                                               -- (default 0 = external is master). Locked at
+                                               -- analyze; carries across every --confirm (§8 B).
     deleted_count INTEGER NOT NULL DEFAULT 0,  -- files recycled but NOT YET reported into
                                                -- result_json.deleted: bumped at each stage's
                                                -- apply, drained (→0) when a confirm job records
@@ -181,6 +185,8 @@ CREATE TABLE IF NOT EXISTS review_actions (
     group_no                 INTEGER,
     member_no                INTEGER,
     is_external              INTEGER,
+    is_lead                  INTEGER,          -- stage-2 keep-lead: 1 on the suggested lead
+    lead_reason              TEXT,             -- why the lead won (ranking-key decision level, §8 B)
     matched_trashed_asset_id INTEGER,         -- cleanup-perceptual only
     distance                 INTEGER,
     shortcut_name            TEXT

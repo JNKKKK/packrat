@@ -42,12 +42,14 @@ from ._dbops import forget_if_orphaned as _forget_if_orphaned
 from .dedup_rank import (  # noqa: F401
     _PATH_TIEBREAK,
     _PHOTO_LEAD_LEVELS,
+    _PREFERENCE_TIEBREAK,
     _VIDEO_LEAD_LEVELS,
     _effective_bitrate,
     _group_lead_and_level,
     _log_band,
     _photo_format_rank,
     _pick_lead,
+    ordered_lead_levels,
 )
 from .context import JobContext
 from .registry import JobSpec, register_job
@@ -181,14 +183,17 @@ def _analyze(ctx: JobContext) -> None:
     db = ctx.db
     root = _resolve_library_root(ctx)
     root_id, root_path = int(root["id"]), root["path"]
-    ctx.log(f"dedup analyze: {root['name']} ({root_path})")
+    prefer_internal = bool(ctx.params.get("prefer_internal"))
+    ctx.log(f"dedup analyze: {root['name']} ({root_path})"
+            + ("  [--prefer-internal]" if prefer_internal else ""))
     if root["last_full_scan_at"] is None:
         ctx.log("note: this root has never had a `scan --full`; run `scan` first for current liveness.")
 
     # Compute stage 1 up front; if the ENTIRE run would be empty (no stage has any
     # candidate) auto-complete without leaving a dangling pending run (§8 B Phase 0).
-    stage1 = _plan_stage(ctx, root_id, root_path, STAGE_EXACT)
-    probe = _first_nonempty_stage(ctx, root_id, root_path, start=STAGE_EXACT, precomputed={STAGE_EXACT: stage1})
+    stage1 = _plan_stage(ctx, root_id, root_path, STAGE_EXACT, prefer_internal=prefer_internal)
+    probe = _first_nonempty_stage(ctx, root_id, root_path, start=STAGE_EXACT,
+                                  precomputed={STAGE_EXACT: stage1}, prefer_internal=prefer_internal)
     if probe is None:
         # "Already clean" — nothing to review, so the folder IS deduped as of now.
         # Record a completed dedup run (no pending row, no staging, no review_actions)
@@ -204,17 +209,20 @@ def _analyze(ctx: JobContext) -> None:
         ctx.log("already clean: no exact duplicates or near-dup groups to review.")
         return
 
-    # Open the run (owns the root until confirmed/cancelled).
+    # Open the run (owns the root until confirmed/cancelled). prefer_internal is stored
+    # here ONCE and read from the run row by every later --confirm — the policy is locked
+    # for the whole 3-stage sequence, since a bare confirm stages stage 2 and must apply
+    # the same preference stage 1 used (§8 B; see the run-scoped design note).
     with db.transaction() as conn:
         cur = conn.execute(
-            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
-            "VALUES (?, 'dedup', 'pending', ?, 'staged', ?)",
-            (root_id, probe["stage"], now_iso()),
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, "
+            "prefer_internal, created_at) VALUES (?, 'dedup', 'pending', ?, 'staged', ?, ?)",
+            (root_id, probe["stage"], 1 if prefer_internal else 0, now_iso()),
         )
         run_id = int(cur.lastrowid)
     audit_dir = review.audit_run_dir("dedup", root["name"], run_id)
 
-    _stage_and_pause(ctx, root, run_id, audit_dir, probe)
+    _stage_and_pause(ctx, root, run_id, audit_dir, probe, prefer_internal=prefer_internal)
 
 
 # ===========================================================================
@@ -232,6 +240,18 @@ def _confirm(ctx: JobContext) -> None:
         raise ValueError(f"nothing to confirm for {root['name']!r}; run `dedup <folder>` first.")
     run_id = int(run["id"])
     stage = int(run["stage"])
+    # prefer_internal is a RUN-WIDE policy fixed at analyze — read it from the run row,
+    # NOT this confirm's params (a bare --confirm stages stage 2 and must apply the same
+    # preference stage 1 used). A --prefer-internal on the confirm command that CONFLICTS
+    # with the run's stored value is rejected: the run is already partly applied under one
+    # policy, so it can't flip mid-sequence (§8 B run-scoped design).
+    prefer_internal = bool(run["prefer_internal"])
+    if ctx.params.get("prefer_internal") and not prefer_internal:
+        raise ValueError(
+            f"this run opened WITHOUT --prefer-internal; the preference is fixed when the "
+            f"run opens and cannot change mid-sequence. `packrat dedup {root['name']} "
+            f"--cancel` and re-run with --prefer-internal to change it."
+        )
     # The stage this confirm APPLIES — stash it for the result summary, since a
     # successful confirm auto-advances the run cursor to the NEXT non-empty stage
     # (below), so run["stage"] read afterward is no longer the stage we acted on.
@@ -285,12 +305,15 @@ def _confirm(ctx: JobContext) -> None:
             ctx.log("  (--keep-suggested: kept each group's suggested lead, ignored shortcut edits.)")
         _report_stage_confirm(ctx, stage, outcomes)
 
-    # Advance to the next non-empty stage, or finalize after the last.
-    nxt = _first_nonempty_stage(ctx, root_id, root_path, start=stage + 1)
+    # Advance to the next non-empty stage, or finalize after the last. The run's stored
+    # prefer_internal carries into staging the next stage (e.g. stage 1 → stage 2's leads).
+    nxt = _first_nonempty_stage(ctx, root_id, root_path, start=stage + 1,
+                                prefer_internal=prefer_internal)
     if nxt is None:
         _finalize_completed(ctx, root, run_id)
         return
-    _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True)
+    _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True,
+                     prefer_internal=prefer_internal)
 
 
 # ===========================================================================
@@ -326,9 +349,11 @@ def _cancel(ctx: JobContext) -> None:
 def _dry_run(ctx: JobContext) -> None:
     root = _resolve_library_root(ctx)
     root_id, root_path = int(root["id"]), root["path"]
-    ctx.log(f"dedup dry-run: {root['name']} ({root_path})")
+    prefer_internal = bool(ctx.params.get("prefer_internal"))
+    ctx.log(f"dedup dry-run: {root['name']} ({root_path})"
+            + ("  [--prefer-internal]" if prefer_internal else ""))
     for stage in (STAGE_EXACT, STAGE_RECOMPRESS, STAGE_EDIT):
-        plan = _plan_stage(ctx, root_id, root_path, stage)
+        plan = _plan_stage(ctx, root_id, root_path, stage, prefer_internal=prefer_internal)
         n_members = len(plan["actions"])
         if stage == STAGE_EXACT:
             ctx.log(f"  stage 1 ({_STAGE_LABEL[stage]}): {n_members} file(s) would be staged for deletion.")
@@ -341,16 +366,24 @@ def _dry_run(ctx: JobContext) -> None:
 # ---------------------------------------------------------------------------
 # stage planning (pure DB + fingerprint math; no stat, no writes)
 # ---------------------------------------------------------------------------
-def _plan_stage(ctx: JobContext, root_id: int, root_path: str, stage: int) -> dict:
+def _plan_stage(ctx: JobContext, root_id: int, root_path: str, stage: int,
+                *, prefer_internal: bool = False) -> dict:
     """Return ``{stage, actions, n_groups, lead_levels, edges}`` for one stage (no I/O)."""
     if stage == STAGE_EXACT:
-        actions = _plan_exact(ctx, root_id)
+        actions = _plan_exact(ctx, root_id, prefer_internal=prefer_internal)
         return {"stage": stage, "actions": actions, "n_groups": 0, "lead_levels": {}, "edges": []}
-    return _plan_perceptual(ctx, root_id, stage)
+    return _plan_perceptual(ctx, root_id, stage, prefer_internal=prefer_internal)
 
 
-def _plan_exact(ctx: JobContext, root_id: int) -> list[dict]:
-    """Stage 1: exact-duplicate resolution among the target root's active assets (§8 B Phase 2)."""
+def _plan_exact(ctx: JobContext, root_id: int, *, prefer_internal: bool = False) -> list[dict]:
+    """Stage 1: exact-duplicate resolution among the target root's active assets (§8 B Phase 2).
+
+    When an asset has copies both inside the target root and in another root, the
+    default keeps the EXTERNAL copy and deletes the internal ones (``exact-external``).
+    Under ``prefer_internal`` the roles flip: an internal copy survives and the external
+    copies are deleted (``exact-internal-preferred``, marked ``is_external`` so the
+    network-permanent-delete warning still fires, §10 / [[review-network-count]]).
+    """
     db = ctx.db
     rows = db.query(
         "SELECT fi.id fid, fi.asset_id, fi.root_id, fi.path, fi.mtime "
@@ -365,19 +398,31 @@ def _plan_exact(ctx: JobContext, root_id: int) -> list[dict]:
             {"fid": int(r["fid"]), "root_id": int(r["root_id"]), "path": r["path"], "mtime": r["mtime"]}
         )
 
+    def _mtime_path_key(i):
+        return (i["mtime"] if i["mtime"] is not None else 0.0, os.path.normcase(i["path"]))
+
     actions: list[dict] = []
     seq = 0
     for asset_id, insts in by_asset.items():
         internal = [i for i in insts if i["root_id"] == root_id]
         external = [i for i in insts if i["root_id"] != root_id]
-        if external:
+        if external and prefer_internal:
+            # --prefer-internal: keep an internal copy (oldest, then path), delete every
+            # other copy — the external ones AND any surplus internal duplicates.
+            survivor = sorted(internal, key=_mtime_path_key)[0]
+            for inst in insts:
+                if inst["fid"] == survivor["fid"]:
+                    continue
+                seq += 1
+                actions.append(_exact_action(asset_id, inst, survivor, "exact-internal-preferred",
+                                             seq, is_external=inst["root_id"] != root_id))
+        elif external:
             survivor = sorted(external, key=lambda i: os.path.normcase(i["path"]))[0]
             for inst in internal:
                 seq += 1
                 actions.append(_exact_action(asset_id, inst, survivor, "exact-external", seq))
         elif len(internal) >= 2:
-            kept = sorted(internal, key=lambda i: (i["mtime"] if i["mtime"] is not None else 0.0,
-                                                   os.path.normcase(i["path"])))[0]
+            kept = sorted(internal, key=_mtime_path_key)[0]
             for inst in internal:
                 if inst["fid"] == kept["fid"]:
                     continue
@@ -387,18 +432,24 @@ def _plan_exact(ctx: JobContext, root_id: int) -> list[dict]:
     return actions
 
 
-def _exact_action(asset_id: int, inst: dict, survivor: dict, reason: str, seq: int) -> dict:
+def _exact_action(asset_id: int, inst: dict, survivor: dict, reason: str, seq: int,
+                  *, is_external: bool = False) -> dict:
     return {
         "stage": STAGE_EXACT, "folder": review.EXACT_DUP, "kind": "exact", "reason": reason,
         "default_action": "delete", "asset_id": asset_id, "instance_id": inst["fid"],
         "path": inst["path"], "survivor_instance_id": survivor["fid"],
         "survivor_path": survivor["path"], "group_no": None, "member_no": None,
-        "is_external": False, "distance": None, "quality": None, "low_confidence": False,
+        # is_external marks that the file being DELETED lives outside the target root —
+        # true only under --prefer-internal (default stage 1 always deletes internal
+        # copies). Drives the network-permanent-delete warning (§10).
+        "is_external": is_external, "is_lead": False, "lead_reason": None,
+        "distance": None, "quality": None, "low_confidence": False,
         "shortcut_name": f"{seq:03d}.lnk",
     }
 
 
-def _plan_perceptual(ctx: JobContext, root_id: int, stage: int) -> dict:
+def _plan_perceptual(ctx: JobContext, root_id: int, stage: int,
+                     *, prefer_internal: bool = False) -> dict:
     """Stage 2/3: perceptual grouping, banded by PDQ distance (§8 B Phase 3).
 
     Runs the §5 matcher (target-root active assets vs. all active assets), then keeps
@@ -431,17 +482,20 @@ def _plan_perceptual(ctx: JobContext, root_id: int, stage: int) -> dict:
             if e.distance > recompress:
                 banded.append(e)
 
-    actions, n_groups, lead_levels = _group_actions(ctx, db, root_id, stage, banded)
+    actions, n_groups, lead_levels = _group_actions(ctx, db, root_id, stage, banded,
+                                                     prefer_internal=prefer_internal)
     return {"stage": stage, "actions": actions, "n_groups": n_groups,
             "lead_levels": lead_levels, "edges": edges}
 
 
-def _group_actions(ctx, db, root_id, stage, banded_edges):
+def _group_actions(ctx, db, root_id, stage, banded_edges, *, prefer_internal=False):
     """Build clusters from this stage's banded edges.
 
     Returns ``(actions, n_groups, lead_levels)`` where ``lead_levels`` is a
     ``{level_label: count}`` tally of *why* each group's keep-lead won (§8 B stage-2
     lead-pick stats), empty unless this stage suggests leads (stage 2 only).
+    ``prefer_internal`` reaches the keep-lead so a full-key tie in a mixed group favors
+    the internal copy (§8 B).
     """
     if not banded_edges:
         return [], 0, {}
@@ -491,7 +545,8 @@ def _group_actions(ctx, db, root_id, stage, banded_edges):
         members = [(aid, insts[aid]) for aid in comp if insts.get(aid) is not None]
         lead_level = None
         if suggest_lead:
-            lead_id, lead_level = _group_lead_and_level(members, rank, ctx.config)
+            lead_id, lead_level = _group_lead_and_level(
+                members, rank, ctx.config, root_id=root_id, prefer_internal=prefer_internal)
             if lead_level is not None:
                 lead_levels[lead_level] = lead_levels.get(lead_level, 0) + 1
         else:
@@ -571,7 +626,8 @@ def _surviving_instances(db, asset_ids, root_id):
     return chosen
 
 
-def _first_nonempty_stage(ctx, root_id, root_path, *, start, precomputed=None):
+def _first_nonempty_stage(ctx, root_id, root_path, *, start, precomputed=None,
+                          prefer_internal=False):
     """Return the first stage ≥ ``start`` whose plan has actions, or ``None``.
 
     ``precomputed`` lets analyze reuse stage 1's already-built plan. Returned dict is
@@ -579,7 +635,8 @@ def _first_nonempty_stage(ctx, root_id, root_path, *, start, precomputed=None):
     """
     precomputed = precomputed or {}
     for stage in range(max(start, STAGE_EXACT), STAGE_EDIT + 1):
-        plan = precomputed.get(stage) or _plan_stage(ctx, root_id, root_path, stage)
+        plan = precomputed.get(stage) or _plan_stage(
+            ctx, root_id, root_path, stage, prefer_internal=prefer_internal)
         if plan["actions"]:
             return plan
     return None
@@ -588,7 +645,8 @@ def _first_nonempty_stage(ctx, root_id, root_path, *, start, precomputed=None):
 # ---------------------------------------------------------------------------
 # staging (materialize one stage's folder + review_actions + manifest + audit)
 # ---------------------------------------------------------------------------
-def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False):
+def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False,
+                     prefer_internal=False):
     """Materialize ``plan``'s stage, persist edges + rows, pause. Auto-advance if empty."""
     db = ctx.db
     root_id, root_path = int(root["id"]), root["path"]
@@ -610,11 +668,13 @@ def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False):
         # Every target vanished since scan → nothing to review here; try the next stage.
         review.remove_tree(review.staging_folder(root_path, _STAGE_FOLDER[stage]))
         ctx.log(f"stage {stage} ({_STAGE_LABEL[stage]}): all {skipped} candidate(s) already gone; skipping.")
-        nxt = _first_nonempty_stage(ctx, root_id, root_path, start=stage + 1)
+        nxt = _first_nonempty_stage(ctx, root_id, root_path, start=stage + 1,
+                                    prefer_internal=prefer_internal)
         if nxt is None:
             _finalize_completed(ctx, root, run_id)
             return
-        _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True)
+        _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True,
+                         prefer_internal=prefer_internal)
         return
 
     _report_staged(ctx, root, run_id, stage, staged, skipped, plan, advancing=advancing)
@@ -692,11 +752,12 @@ def _materialize(ctx, root_path, run_id, stage, actions):
             conn.execute(
                 "INSERT INTO review_actions(run_id, stage, folder, kind, reason, default_action, "
                 "asset_id, instance_id, path, survivor_instance_id, group_no, member_no, "
-                "is_external, matched_trashed_asset_id, distance, shortcut_name) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "is_external, is_lead, lead_reason, matched_trashed_asset_id, distance, shortcut_name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, stage, act["folder"], act["kind"], act["reason"], act["default_action"],
                  act["asset_id"], act["instance_id"], act["path"], act["survivor_instance_id"],
                  act["group_no"], act["member_no"], 1 if act["is_external"] else 0,
+                 1 if act.get("is_lead") else 0, act.get("lead_reason"),
                  None, act["distance"], act["shortcut_name"]),
             )
     _write_manifest(stage, stage_dir, staged)
@@ -939,29 +1000,30 @@ def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing
         ctx.log("  default KEEP — remove a shortcut to DELETE that file.")
     if skipped:
         ctx.log(f"  {skipped} candidate(s) skipped at staging (already gone / promoted).")
-    _report_lead_stats(ctx, stage, plan.get("lead_levels") or {})
+    _report_review_stats(ctx, stage, plan.get("actions") or [])
     if stage == STAGE_RECOMPRESS:
         ctx.log(f"  tip: `packrat dedup {root['name']} --confirm --keep-suggested` keeps only the "
                 f"suggested lead per group (ignores your shortcut edits this stage).")
     ctx.log(f"review in Explorer, then: `packrat dedup {root['name']} --confirm` (or --cancel).")
 
 
-def _report_lead_stats(ctx, stage, lead_levels: dict) -> None:
-    """Log the stage-2 keep-lead pick breakdown — how each group's lead was decided (§8 B).
+def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
+    """Log the stage-1 / stage-2 review breakdown — the SAME text the TUI Review box shows.
 
-    Ordered best-decision-first (resolution, then +format, then +size, then the
-    path tiebreak). Only stage 2 suggests leads, so this is silent elsewhere.
+    Both faces render :mod:`packrat.review_stats` line-builders over the same
+    ``review_actions`` shape, so the CLI staging log and the box can't drift (§8 B).
+    Silent on stage 3 (unranked minor edits) and on empty stages.
     """
-    if stage != STAGE_RECOMPRESS or not lead_levels:
+    from .. import review_stats
+    if not actions:
         return
-    total = sum(lead_levels.values())
-    ctx.log(f"  keep-lead picks ({total} group(s)) — decided by:")
-    ordered = list(_PHOTO_LEAD_LEVELS) + list(_VIDEO_LEAD_LEVELS) + [_PATH_TIEBREAK]
-    seen = set()
-    for level in ordered:
-        if level in lead_levels and level not in seen:
-            seen.add(level)
-            ctx.log(f"    {lead_levels[level]:>4} · {level}")
+    if stage == STAGE_EXACT:
+        for ln in review_stats.stage1_lines(review_stats.stage1_split(actions)):
+            ctx.log(ln)
+    elif stage == STAGE_RECOMPRESS:
+        bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path)
+        for ln in review_stats.stage2_lines(bundle, 92):
+            ctx.log(f"  {ln}")
 
 
 def _report_stage_confirm(ctx, stage, out) -> None:

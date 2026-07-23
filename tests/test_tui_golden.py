@@ -114,11 +114,15 @@ def test_add_root_form_full_checked():
 # hand-authored illustrative detail in the mockups, so we assert the fixed-frame
 # invariant + key content rather than byte-equality (same policy as §1.2).
 def _fixed(frame: str) -> list[str]:
+    return _fixed_at(frame, 100, 24)
+
+
+def _fixed_at(frame: str, w: int, h: int) -> list[str]:
     rows = frame.split("\n")
-    assert len(rows) == 24, f"{len(rows)} rows"
+    assert len(rows) == h, f"{len(rows)} rows != {h}"
     # DISPLAY width (root detail's 📁 mascot glyph is 2 cells but 1 char, so len()
     # under-measures — measure by terminal cells).
-    assert all(cell_width(r) == 100 for r in rows), "a row is not 100 cells"
+    assert all(cell_width(r) == w for r in rows), f"a row is not {w} cells"
     return rows
 
 
@@ -175,6 +179,43 @@ def test_root_detail_clean_fits_and_shows_no_review():
                    detail_header_right(d), footer="Esc")
     _fixed(built)
     assert "No pending review." in built
+
+
+def test_root_detail_stage2_rich_review_renders_and_scrolls():
+    """A stage-2 review with the rich bundle shows the two-column keep-lead + PDQ
+    histogram + make-up, and (overflowing the responsive cap) a scroll indicator."""
+    from packrat.tui.geometry import Geometry
+    from packrat.tui.screens.rootdetail import review_content_lines, _review_rows
+
+    d = fixtures.root_detail_stage2_rich()
+    geo = Geometry(100, 34)                     # tall enough for a legible cap
+    built = screen(f"packrat · {d['name']}",
+                   detail_body(d, now=NOW, geo=geo, jobs=[], focus="review"),
+                   detail_header_right(d), footer="Esc", width=100, height=34)
+    _fixed_at(built, 100, 34)
+    assert "keep-lead decided by:" in built
+    assert "photos (" in built and "videos (" in built     # both medium columns
+    assert "PDQ distance" in built                          # histogram present
+    assert "group make-up:" in built and "mixed (internal+external)" in built
+    # Content exceeds the cap → the box carries the scan-card scroll indicator.
+    assert len(review_content_lines(d, geo, focused=True)) > _review_rows(d, geo)
+    assert "of " in built and "↑/↓" in built
+
+
+def test_root_detail_review_height_is_ratio_capped():
+    """The Review box never exceeds half the shared interior (review:jobs ≤ 1:1), and a
+    calm root collapses the box to a single row — the responsive-height contract (§3)."""
+    from packrat.tui.geometry import Geometry
+    from packrat.tui.screens.rootdetail import _detail_split
+
+    for h in (24, 34, 44):
+        geo = Geometry(100, h)
+        review, jobs = _detail_split(fixtures.root_detail_stage2_rich(), geo)
+        s = geo.content_rows - 11
+        assert review + jobs == s               # the split is conserved (lockstep)
+        assert review <= s // 2                 # ≤ 1:1 cap
+        calm_r, calm_j = _detail_split(fixtures.root_detail_clean(), geo)
+        assert calm_r == 1 and calm_j == s - 1  # calm shrinks to 1, Jobs takes the rest
 
 
 def test_queue_interface_fits_and_has_three_sections():

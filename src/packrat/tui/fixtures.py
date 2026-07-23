@@ -280,6 +280,39 @@ def root_detail_pending() -> dict:
     }
 
 
+def root_detail_stage2_rich() -> dict:
+    """iPhone parked at stage 2 with a RICH `stage2` bundle (§8 B item-3 metrics).
+
+    Carries a synthetic keep-lead/PDQ/make-up breakdown big enough to overflow the
+    Review box's responsive cap at the reference size — so it exercises the scroll path
+    and the two-column keep-lead + histogram layout."""
+    d = root_detail_pending()
+    from ..review_stats import stage2_stats
+
+    def perc(g, ext, lead, reason, dist, mt="photo"):
+        return {"kind": "perceptual", "group_no": g, "is_external": ext, "is_lead": lead,
+                "lead_reason": reason, "distance": dist, "media_type": mt,
+                "path": (r"\\nas\x" if ext else "C:\\x")}
+
+    rows = []
+    for i in range(18):
+        rows += [perc(i, 0, 1, "resolution", 1), perc(i, 0, 0, None, 1)]
+    for i in range(9):
+        rows += [perc(100 + i, 0, 1, "resolution + format", 3), perc(100 + i, 0, 0, None, 3)]
+    for i in range(3):
+        rows += [perc(200 + i, 0, 1, "resolution + bitrate + codec", 12, "video"),
+                 perc(200 + i, 0, 0, None, 12, "video")]
+    for i in range(2):
+        rows += [perc(300 + i, 1, 1, "internal/external preference", 2),
+                 perc(300 + i, 0, 0, None, 2)]
+    bundle = stage2_stats(rows, is_network=lambda p: p.startswith("\\\\"))
+    d["pending_review"]["counts"] = {
+        "to_delete_exact": 0, "groups": bundle["groups"], "members": bundle["members"],
+        "network": 0, "stage2": bundle,
+    }
+    return d
+
+
 def root_detail_clean() -> dict:
     """Camera, no pending review (§3.2, the clean case)."""
     return {

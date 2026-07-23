@@ -503,6 +503,12 @@ def dedup(
         help="With --confirm on stage 2: keep ONLY each group's suggested lead, delete the rest — "
              "ignoring your shortcut edits. (Groups with no suggested lead are spared.)",
     ),
+    prefer_internal: bool = typer.Option(
+        False, "--prefer-internal",
+        help="Prefer keeping THIS root's copy over a duplicate in another root: stage 1 deletes the "
+             "external copy (not the internal one), and stage-2 keep-lead ties go to the internal copy. "
+             "Locked when the run opens; carries across --confirm. (Default: the external copy is kept.)",
+    ),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
@@ -524,10 +530,12 @@ def dedup(
     client = _client_or_spawn()
     label = ("dedup --confirm --keep-suggested" if confirm and keep_suggested
              else "dedup --confirm" if confirm else "dedup --cancel" if cancel else "dedup")
+    if prefer_internal:
+        label += " --prefer-internal"
     _run_streamed_job(
         client,
         lambda: client.submit_dedup(folder, confirm=confirm, cancel=cancel, dry_run=dry_run,
-                                    keep_suggested=keep_suggested),
+                                    keep_suggested=keep_suggested, prefer_internal=prefer_internal),
         verb="dedup", label=label, detach=detach, json_out=json_out,
     )
 

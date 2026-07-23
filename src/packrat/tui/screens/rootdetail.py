@@ -44,22 +44,52 @@ def detail_header_right(d: dict) -> str:
     return f"{d['path']} · {d['kind']}"
 
 
-REVIEW_ROWS = 4    # the Review box's interior height WHEN a review is pending (≤4 lines)
+#: Overhead rows in the §3 body OUTSIDE the two box interiors: 1 top spacer + ICON_H
+#: stats + 1 spacer + Review box borders (2) + Jobs box borders (2). The Review and Jobs
+#: INTERIORS share whatever is left (``content_rows − _DETAIL_OVERHEAD``).
+_DETAIL_OVERHEAD = 1 + ICON_H + 1 + 2 + 2   # ref: 11
 
 
-def _review_rows(d: dict) -> int:
-    """The Review box's interior height: 4 for a pending review, 1 for the calm case.
+def _review_text_w(geo: Geometry) -> int:
+    """Usable text width inside the Review box (box border + 1-cell padding each side)."""
+    return geo.roots_w - 4
 
-    An adaptive height means the common no-pending-review root spends only one row on
-    the box (leaving the Jobs History more room), while a pending review gets its full
-    4-line banner."""
-    return REVIEW_ROWS if d.get("pending_review") else 1
+
+def review_content_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> list[str]:
+    """The FULL (unclamped) Review body lines — the height cap/scroll window over these.
+
+    Pure ``dict → lines``; width-aware so the stage-2 columns+histogram lay out to the box.
+    A calm (no-pending-review) root is a single line."""
+    if not d.get("pending_review"):
+        return ["No pending review."]
+    return _review_lines(d, geo, focused=focused)
+
+
+def _detail_split(d: dict, geo: Geometry) -> tuple[int, int]:
+    """Split the shared interior into ``(review_interior, jobs_interior)`` (§3).
+
+    Responsive, mirroring the dashboard's Roots/Queue idea but content-driven: the Review
+    box is capped at review:jobs ≤ 1:1 (``S // 2``, odd row → Jobs so History keeps
+    priority) and SHRINKS to its content when shorter; Jobs backfills the freed rows.
+    Computed in ONE place so the box render, the scroll budget, and the Jobs panel height
+    stay in lockstep."""
+    s = max(2, geo.content_rows - _DETAIL_OVERHEAD)     # ref: 21 − 11 = 10
+    cap = max(1, s // 2)                                 # 1:1 max; ref 5
+    content = len(review_content_lines(d, geo))
+    review = min(content, cap)
+    return review, s - review
+
+
+def _review_rows(d: dict, geo: Geometry = REFERENCE) -> int:
+    """The Review box's interior height this frame (the responsive cap, §3)."""
+    return _detail_split(d, geo)[0]
 
 
 def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
                 jobs: list[dict] | None = None,
                 focus: str | None = None, job_focus: str = "history",
-                cursors: dict | None = None, pages: dict | None = None) -> list[str]:
+                cursors: dict | None = None, pages: dict | None = None,
+                review_scroll: int = 0) -> list[str]:
     """Build the §3 root-detail body for root ``d`` (with its ``jobs`` history).
 
     Top: the 3-column stats header. Then two focus-able bordered boxes — a **Review
@@ -73,7 +103,8 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
     lines = [""]                           # breathing room above the stats/info section
     lines += _stats_columns(d, now, row_w)
     lines.append("")                       # breathing room between stats and Review
-    lines += _review_box(d, geo.roots_w, focused=(focus == "review"))
+    lines += _review_box(d, geo.roots_w, focused=(focus == "review"), geo=geo,
+                         scroll=review_scroll)
     lines += _jobs_panel(d, jobs, now, geo.roots_w, _panel_interior(d, geo),
                          focused=(focus == "jobs"), job_focus=job_focus,
                          cursors=cursors or {}, pages=pages or {})
@@ -81,14 +112,11 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
 
 
 def _panel_interior(d: dict, geo: Geometry) -> int:
-    """Rows the Jobs panel's interior gets — the space left below the header block.
+    """Rows the Jobs panel's interior gets — the Jobs half of :func:`_detail_split`.
 
-    Header block = 1 top spacer + stats(``ICON_H``) + 1 spacer + the Review box
-    (``_review_rows`` + 2 borders); the Jobs box adds its own 2 border rows. Computed
-    here (not inlined) so the screen's ↑/↓ paging budget uses the SAME interior the body
-    rendered, keeping cursor math and layout in lockstep."""
-    header_rows = 1 + ICON_H + 1 + (_review_rows(d) + 2)
-    return max(4, geo.content_rows - header_rows - 2)
+    Kept as its own accessor (not inlined) so the screen's ↑/↓ paging budget uses the SAME
+    interior the body rendered, keeping cursor math and layout in lockstep."""
+    return _detail_split(d, geo)[1]
 
 
 def panel_section_rows(d: dict, geo: Geometry) -> dict:
@@ -236,20 +264,32 @@ def _stats_columns(d: dict, now: str, width: int) -> list[str]:
     ]
 
 
-def _review_box(d: dict, width: int, *, focused: bool) -> list[str]:
+def review_scroll_max(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> int:
+    """Max ↑/↓ scroll offset for the Review box this frame (0 when it all fits)."""
+    content = review_content_lines(d, geo, focused=focused)
+    cap = _review_rows(d, geo)
+    return max(0, len(content) - cap)
+
+
+def _review_box(d: dict, width: int, *, focused: bool, geo: Geometry = REFERENCE,
+                scroll: int = 0) -> list[str]:
     """The bordered, focus-able Review section (§3.1/§3.2).
 
-    Heavy accent border while ``focused``; its ``[o]/[g]/[k]`` action hints read
-    normal when focused and **dim** (guillemet-wrapped) when not — so an out-of-focus
-    Review box doesn't advertise live-looking shortcuts. With no pending review it is
-    a single calm "No pending review." line."""
-    rows = _review_rows(d)
-    body = _review_lines(d, focused=focused)
-    body = (body + [""] * rows)[:rows]
+    Heavy accent border while ``focused``. Height is the responsive cap
+    (:func:`_review_rows`, review:jobs ≤ 1:1); when the content exceeds it, ↑/↓ scroll a
+    window and the title carries a right-aligned ``↑/↓ start–end of n`` indicator (the
+    scan-card idiom). With no pending review it is a single calm line."""
+    cap = _review_rows(d, geo)
+    content = review_content_lines(d, geo, focused=focused)
+    n = len(content)
+    start = max(0, min(scroll, max(0, n - cap)))
+    window = content[start:start + cap]
+    window = (window + [""] * cap)[:cap]
     # No double-press-to-maximize here (unlike the dashboard), so the [e] key hint is
     # only useful while UNFOCUSED; a focused box drops the brackets → plain "Review".
     title = "Review" if focused else "R[e]view"
-    return box(title, body, width, heavy=focused)
+    right = f"↑/↓ {start + 1}–{start + min(cap, n - start)} of {n}" if n > cap else ""
+    return box(title, window, width, heavy=focused, right=right)
 
 
 def _hints(text: str, focused: bool) -> str:
@@ -266,7 +306,7 @@ def is_stage2_dedup(pr: dict | None) -> bool:
     return bool(pr and pr.get("run_type") == "dedup" and pr.get("stage") == 2)
 
 
-def _review_lines(d: dict, *, focused: bool) -> list[str]:
+def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[str]:
     pr = d.get("pending_review")
     if not pr:
         return ["No pending review."]
@@ -286,15 +326,25 @@ def _review_lines(d: dict, *, focused: bool) -> list[str]:
     # rendered a false "0 to delete · 0 groups / 0 members" (the whole staged set as zero).
     if run == "cleanup-perceptual":
         header = f"{WARN} cleanup — awaiting review (perceptual)"
-        counts = (f"  {c.get('exact', 0)} exact-trash (will delete) · "
-                  f"{c.get('perceptual', 0)} perceptual candidate(s) (delete-default)")
+        detail = [(f"  {c.get('exact', 0)} exact-trash (will delete) · "
+                   f"{c.get('perceptual', 0)} perceptual candidate(s) (delete-default)")]
+    elif stage == 2 and c.get("stage2"):
+        # Rich stage-2 breakdown (keep-lead columns + PDQ histogram + make-up + suggestion
+        # split), built by the SHARED review_stats line-builder the CLI log also uses.
+        from ...review_stats import stage2_lines
+        header = f"{WARN} {run} — awaiting review (stage 2 of 3)"
+        detail = [f"  {ln}" for ln in stage2_lines(c["stage2"], _review_text_w(geo) - 2)]
+    elif stage == 1 and c.get("stage1"):
+        from ...review_stats import stage1_lines
+        header = f"{WARN} {run} — awaiting review (stage 1 of 3)"
+        detail = stage1_lines(c["stage1"])
     else:
         header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
-        counts = (f"  {c.get('to_delete_exact', 0)} to delete (exact) · "
-                  f"{c.get('groups', 0)} groups / {c.get('members', 0)} members (default-keep)")
+        detail = [(f"  {c.get('to_delete_exact', 0)} to delete (exact) · "
+                   f"{c.get('groups', 0)} groups / {c.get('members', 0)} members (default-keep)")]
     return [
         header,
-        counts,
+        *detail,
         f"  review: {d['path']}\\_packrat_review\\",
         _hints(hint, focused),
     ]

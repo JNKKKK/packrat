@@ -27,8 +27,12 @@ Ranking keys (best = greatest tuple, all components DESC):
   at equal resolution+codec is a clean quality dial, the video analogue of file ``size``
   within one photo format. It sits last, so it never reverses the cross-codec decision.
 
-Ties on the full key fall to a stable smallest-normcase-path tiebreak (deterministic
-across runs).
+Ties on the full ranking key fall to the internal/external keep-preference (§8 B): in a
+*mixed* group (an internal copy and an external copy tied on everything) the external copy
+is the keep-lead by default, or the internal copy under ``--prefer-internal``. A coin-flip
+on the smallest normcase path decides only among copies on the *same* side (deterministic
+across runs). The preference sits below the whole ranking key, so it never overrides a real
+quality signal — it only replaces the arbitrary path pick when quality is genuinely equal.
 """
 
 from __future__ import annotations
@@ -54,7 +58,40 @@ _EFFICIENT_LOSSY_PHOTO_EXTS = frozenset({"heic", "heif", "avif"})
 _PHOTO_LEAD_LEVELS = ("resolution", "resolution + format", "resolution + format + size")
 _VIDEO_LEAD_LEVELS = ("resolution", "resolution + bitrate", "resolution + bitrate + codec",
                       "resolution + bitrate + codec + fine bitrate")
+#: Full-key tie broken by the internal/external preference (§8 B). Sits ABOVE the bare
+#: path tiebreak: in a mixed group (both an internal and an external copy tied on the
+#: whole ranking key) the keep-lead goes to the external copy by default, or to the
+#: internal copy under ``--prefer-internal`` — a coin-flip on the path only decides among
+#: copies on the *same* side.
+_PREFERENCE_TIEBREAK = "internal/external preference"
 _PATH_TIEBREAK = "path tiebreak (identical rank)"
+
+
+def ordered_lead_levels() -> list[str]:
+    """Canonical best-first display order of the keep-lead decision levels (§8 B).
+
+    The single source of truth for how the stage-2 lead-pick stats are ordered — used by
+    BOTH the CLI staging log (``dedup._report_lead_stats``) and the TUI Review box so the
+    two can't drift when a level is added/reworded. Photo then video (they share the
+    ``resolution`` / path labels; a homogeneous group only ever uses one family), then the
+    preference tiebreak, then the bare path tiebreak.
+    """
+    seen: dict[str, None] = {}
+    for lvl in (*_PHOTO_LEAD_LEVELS, *_VIDEO_LEAD_LEVELS, _PREFERENCE_TIEBREAK, _PATH_TIEBREAK):
+        seen.setdefault(lvl, None)
+    return list(seen)
+
+
+def _pref_rank(is_external: bool, prefer_internal: bool) -> int:
+    """Keep-preference rank (higher = preferred to KEEP) for a full-key tie (§8 B).
+
+    Default: external is the master, so an external copy outranks an internal one.
+    ``--prefer-internal`` flips it. Only meaningful inside a mixed group; homogeneous
+    groups all share one rank, so it is a no-op and the path tiebreak decides.
+    """
+    if prefer_internal:
+        return 0 if is_external else 1
+    return 1 if is_external else 0
 
 
 def _photo_format_rank(path: str) -> int:
@@ -97,15 +134,21 @@ def _video_lead_key(r, config) -> tuple:
     return (pixels, _log_band(eff, config.match.video_bitrate_tie_pct), weight, eff)
 
 
-def _group_lead_and_level(members, rank, config) -> tuple:
+def _group_lead_and_level(members, rank, config, *, root_id=None, prefer_internal=False) -> tuple:
     """Pick the keep-lead of a stage-2 group AND *why* it won (§8 B).
 
     ``members`` is a list of ``(asset_id, instance)`` pairs; ``rank`` maps asset_id →
     the metadata dict (:func:`packrat.jobs.dedup._asset_rank_fields`). Returns
     ``(lead_asset_id, level_label)``. ``level_label`` is the leftmost key component
     that made the lead *uniquely* best (:data:`_PHOTO_LEAD_LEVELS` /
-    :data:`_VIDEO_LEAD_LEVELS`), or :data:`_PATH_TIEBREAK` if every key component tied
-    and the stable smallest-normcase-path tiebreak decided. Empty group → ``(None, None)``.
+    :data:`_VIDEO_LEAD_LEVELS`); if the whole ranking key ties it is
+    :data:`_PREFERENCE_TIEBREAK` when an internal/external preference broke a *mixed*
+    group, else :data:`_PATH_TIEBREAK` (a same-side path coin-flip). Empty group →
+    ``(None, None)``.
+
+    ``root_id`` classifies each member as internal (``inst["root_id"] == root_id``) or
+    external; with ``root_id=None`` every member is treated as internal, so the
+    preference is inert and the bare path tiebreak decides (the pre-preference behavior).
     """
     if not members:
         return None, None
@@ -117,29 +160,44 @@ def _group_lead_and_level(members, rank, config) -> tuple:
         keys = [_photo_lead_key(inst, rank.get(aid, {})) for aid, inst in members]
         levels = _PHOTO_LEAD_LEVELS
 
-    # Lead = greatest key, tiebroken by smallest normcase path (deterministic across runs).
+    # Per-member internal/external flag + keep-preference rank (higher = preferred).
+    is_ext = [root_id is not None and inst["root_id"] != root_id for _, inst in members]
+    prefs = [_pref_rank(e, prefer_internal) for e in is_ext]
+
+    # Lead = greatest (ranking key, preference rank), then smallest normcase path — a
+    # deterministic, cross-run-stable ordering. Preference only separates members whose
+    # whole ranking key tied (a mixed group); within one side it is equal, so the path
+    # decides. It sits BELOW the ranking key, so it never overrides a real quality signal.
     best_i = 0
     for i in range(1, len(members)):
-        if keys[i] > keys[best_i] or (
-            keys[i] == keys[best_i]
+        cur = (keys[i], prefs[i])
+        best = (keys[best_i], prefs[best_i])
+        if cur > best or (
+            cur == best
             and os.path.normcase(members[i][1]["path"]) < os.path.normcase(members[best_i][1]["path"])
         ):
             best_i = i
     klead = keys[best_i]
 
-    # Decision level: the shortest key prefix at which the lead's key is unique.
-    label = _PATH_TIEBREAK
+    # Decision level: the shortest ranking-key prefix at which the lead is unique. If the
+    # whole key ties, the preference broke it iff the tied set spans both sides (mixed);
+    # otherwise it was a bare path tiebreak.
+    label = None
     for depth in range(len(klead)):
         prefix = klead[: depth + 1]
         if sum(1 for k in keys if k[: depth + 1] == prefix) == 1:
             label = levels[depth]
             break
+    if label is None:
+        tied_ext = {is_ext[i] for i in range(len(members)) if keys[i] == klead}
+        label = _PREFERENCE_TIEBREAK if len(tied_ext) > 1 else _PATH_TIEBREAK
     return members[best_i][0], label
 
 
-def _pick_lead(members, rank, config):
+def _pick_lead(members, rank, config, *, root_id=None, prefer_internal=False):
     """Keep-lead asset id for a stage-2 group (§8 B); see :func:`_group_lead_and_level`."""
-    return _group_lead_and_level(members, rank, config)[0]
+    return _group_lead_and_level(members, rank, config,
+                                 root_id=root_id, prefer_internal=prefer_internal)[0]
 
 
 def _effective_bitrate(size, duration_s, weight: float) -> float:

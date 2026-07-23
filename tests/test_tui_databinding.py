@@ -270,18 +270,55 @@ def test_review_counts_reports_network_delete_set(seeded):
             "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
             "VALUES (?, 'dedup', 'pending', 1, 'staged', '2026-07-20T00:00:00')", (rid,)
         ).lastrowid
-        # Two stage-1 exact-delete candidates: one on a UNC share, one local.
-        for path in (r"\\nas\photos\dup.jpg", r"C:\photos\dup2.jpg"):
+        # Two stage-1 exact-delete candidates: one external (on a UNC share), one internal.
+        for path, ext in ((r"\\nas\photos\dup.jpg", 1), (r"C:\photos\dup2.jpg", 0)):
             database.execute(
                 "INSERT INTO review_actions(run_id, stage, folder, kind, reason, "
-                "default_action, asset_id, instance_id, path, shortcut_name) "
+                "default_action, asset_id, instance_id, path, is_external, shortcut_name) "
                 "VALUES (?, 1, 'exact_dup_to_delete', 'exact', 'exact-external', 'delete', "
-                "1, 1, ?, 'g0001_0001.lnk')", (run_id, path),
+                "1, 1, ?, ?, 'g0001_0001.lnk')", (run_id, path, ext),
             )
         d = queries.root_detail(queries.roots_snapshot()[0]["name"])
         counts = d["pending_review"]["counts"]
         assert counts["to_delete_exact"] == 2
         assert counts["network"] == 1              # only the \\nas UNC path counts
+        # Stage-1 internal/external delete split (§8 B item-3 metric).
+        assert counts["stage1"] == {"to_delete": 2, "internal": 1, "external": 1}
+    finally:
+        database.close()
+
+
+def test_review_counts_stage2_bundle(seeded):
+    """A pending stage-2 review carries the rich `stage2` bundle (keep-lead tally by
+    medium, PDQ histogram, group make-up + suggestion split) built by review_stats."""
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, created_at) "
+            "VALUES (?, 'dedup', 'pending', 2, 'staged', '2026-07-20T00:00:00')", (rid,)
+        ).lastrowid
+        # One group: a lead (kept) + a non-lead near-dup, both photos.
+        rows = [
+            ("perceptual", "keep", 1, 1, 0, 1, "resolution", 2, r"C:\a.png"),
+            ("perceptual", "keep", 1, 2, 0, 0, None, 2, r"C:\b.jpg"),
+        ]
+        for kind, act, gno, mno, ext, lead, reason, dist, path in rows:
+            database.execute(
+                "INSERT INTO review_actions(run_id, stage, folder, kind, reason, default_action, "
+                "asset_id, instance_id, path, group_no, member_no, is_external, is_lead, "
+                "lead_reason, distance, shortcut_name) "
+                "VALUES (?, 2, 'suspect_recompression', ?, 'perceptual', ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, 'x.lnk')",
+                (run_id, kind, act, path, gno, mno, ext, lead, reason, dist),
+            )
+        counts = queries.root_detail(queries.roots_snapshot()[0]["name"])["pending_review"]["counts"]
+        b = counts["stage2"]
+        assert b["groups"] == 1 and b["members"] == 2
+        assert b["lead_by_medium"]["photo"] == {"resolution": 1}
+        assert b["pdq"]["0–2"] == 2
+        assert b["groups_all_internal"] == 1 and b["groups_mixed"] == 0
+        assert b["keep_suggested_delete"] == 1        # the one non-lead
     finally:
         database.close()
 
