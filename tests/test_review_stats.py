@@ -113,16 +113,16 @@ def test_stage2_lines_keep_suggested_tip_network_note():
     rows = [_perc(1, is_lead=1, path="C:/k.jpg"), _perc(1, path="Z:/d.jpg")]
     b = rs.stage2_stats(rows, is_network=lambda p: p.startswith("Z:"))
     text = "\n".join(rs.stage2_lines(b, 90))
-    assert "keep-suggested" in text and "1 non-leads" in text and "on network" in text
+    assert "keep suggested" in text and "1 non-leads" in text and "on network" in text
 
 
 def test_stage2_lines_keep_suggested_false_suppresses_tip():
-    """The CLI passes keep_suggested=False (it prints its own tip); the box's TUI-only
-    `[b]` tip must then be absent. Regression: the CLI log emitted a duplicate `[b]` tip."""
+    """The CLI passes keep_suggested=False (it prints its own tip); the box's keep-suggested
+    tip must then be absent. Regression: the CLI log emitted a duplicate tip."""
     rows = [_perc(1, is_lead=1, path="C:/k.jpg"), _perc(1, path="C:/d.jpg")]
     b = rs.stage2_stats(rows)
-    assert not any("[b]" in ln for ln in rs.stage2_lines(b, 90, keep_suggested=False))
-    assert any("[b]" in ln for ln in rs.stage2_lines(b, 90))   # default still shows it
+    assert not any("keep suggested" in ln for ln in rs.stage2_lines(b, 90, keep_suggested=False))
+    assert any("keep suggested" in ln for ln in rs.stage2_lines(b, 90))   # default still shows it
 
 
 def test_stage2_stats_ignores_exact_rows():

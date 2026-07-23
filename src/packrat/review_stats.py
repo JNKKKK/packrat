@@ -235,9 +235,9 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
         )
     if keep_suggested and bundle["keep_suggested_delete"]:
         net = bundle["keep_suggested_network"]
-        net_note = f" ({net} on network ⚠)" if net else ""
+        net_note = f" ({net} on network)" if net else ""
         body.append(
-            f"tip: [b] confirm --keep-suggested — deletes "
+            f"tip: confirm · keep suggested — deletes "
             f"{bundle['keep_suggested_delete']} non-leads{net_note}"
         )
     return body
