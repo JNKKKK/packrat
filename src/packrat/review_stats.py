@@ -36,25 +36,32 @@ def _thirds(lo: int, hi: int) -> list[tuple[str, int, int]]:
     return [(f"{x}–{y}" if x != y else f"{x}", x, y) for x, y in cuts]
 
 
-def _pdq_bins(stage: int, t_rec: int, t_edit: int, t_video: int) -> list[tuple[str, int, int]]:
-    """Histogram bins for a stage, derived from the PDQ thresholds (§5.3, §8 B).
+def _photo_bins(stage: int, t_rec: int, t_edit: int) -> list[tuple[str, int, int]]:
+    """Photo histogram bins for a stage — even thirds of the stage's PDQ band (§5.3).
 
-    - **Stage 2** (recompression): photos band at ``0..t_rec`` → even thirds; video
-      near-dups run on their own frame-vote scale (mean Hamming, can exceed ``t_match``),
-      so they get coarse bins ``t_rec+1..t_video`` + an open overflow. Photo and video
-      bins share one axis but their labels keep them legible.
-    - **Stage 3** (minor edits): photos only, band ``t_rec+1..t_edit`` → even thirds.
+    Stage 2 (recompression) photos band at ``0..t_rec``; stage 3 (minor edits) at
+    ``t_rec+1..t_edit``. (Stage 1 is exact, no distance.)"""
+    return _thirds(0, t_rec) if stage == 2 else _thirds(t_rec + 1, t_edit)
+
+
+def _video_bins(t_video: int) -> list[tuple[str, int, int]]:
+    """Video histogram bins (stage 2 only) — even thirds of ``0..t_match_video`` + an open
+    overflow. Video distance is a *mean* Hamming over comparable frames (matcher §5.3): it
+    can be low for a tight match OR exceed ``t_match_video`` (non-matching frames pull the
+    mean up), so the scale is independent of the photo thresholds and the top bin is open.
     """
-    if stage == 3:
-        return _thirds(t_rec + 1, t_edit)
-    # stage 2: photo thirds of the recompress band, then video bins beyond it.
-    lo_v = t_rec + 1
-    mid_v = lo_v + (t_video - lo_v) // 2
-    return _thirds(0, t_rec) + [
-        (f"{lo_v}–{mid_v}", lo_v, mid_v),
-        (f"{mid_v + 1}–{t_video}", mid_v + 1, t_video),
-        (f"{t_video + 1}+", t_video + 1, _OPEN),
-    ]
+    return _thirds(0, t_video) + [(f"{t_video + 1}+", t_video + 1, _OPEN)]
+
+
+def _bin(bins: list[tuple[str, int, int]], distances: Iterable[int]) -> dict[str, int]:
+    """Tally ``distances`` into ``bins`` (label → count); a distance in no bin is dropped."""
+    out = {label: 0 for label, _, _ in bins}
+    for d in distances:
+        for label, lo, hi in bins:
+            if lo <= d <= hi:
+                out[label] += 1
+                break
+    return out
 
 #: Short video-level labels for the narrow TUI column (the shared ``resolution`` prefix
 #: is implied). Keyed by the full label so the ordering helper stays the source of truth.
@@ -149,17 +156,15 @@ def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
         label = r.get("lead_reason") or ""
         lead_by_medium[medium][label] = lead_by_medium[medium].get(label, 0) + 1
 
-    # (b) PDQ-distance histogram over every member with a known distance.
-    bins = _pdq_bins(stage, t_rec, t_edit, t_video)
-    pdq = {label: 0 for label, _, _ in bins}
-    for r in rows:
-        d = r.get("distance")
-        if d is None:
-            continue
-        for label, lo, hi in bins:
-            if lo <= d <= hi:
-                pdq[label] += 1
-                break
+    # (b) PDQ-distance histograms — SEPARATE photo and video tallies (partitioned by
+    # media_type, not by distance range), since video distance is a mean-Hamming on its
+    # own scale (§5.3). Stage 3 is photo-only, so its video tally stays empty.
+    def _dists(medium: str) -> list[int]:
+        return [r["distance"] for r in rows
+                if r.get("distance") is not None
+                and (r.get("media_type") == "video") == (medium == "video")]
+    pdq_photo = _bin(_photo_bins(stage, t_rec, t_edit), _dists("photo"))
+    pdq_video = _bin(_video_bins(t_video), _dists("video")) if stage == 2 else {}
 
     # (c) group make-up + (stage 2) suggestion split + the keep-suggested delete set.
     all_internal, mixed = _group_makeup(groups.values())
@@ -189,7 +194,8 @@ def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
         "groups": len(groups),
         "members": len(rows),
         "lead_by_medium": lead_by_medium,
-        "pdq": pdq,
+        "pdq_photo": pdq_photo,
+        "pdq_video": pdq_video,
         "groups_all_internal": all_internal,
         "groups_mixed": mixed,
         "mixed_suggest_external": suggest_ext,
@@ -225,7 +231,7 @@ def stage3_lines(bundle: dict, width: int) -> list[str]:
     Stage 3 is deliberately UNRANKED (the edited copy may be the keeper, §8 B), so there is
     no keep-lead column and no keep-suggested action — just the near-dup shape."""
     body = [f"{bundle['groups']} near-dup groups / {bundle['members']} members (default-keep)"]
-    body += _histogram_lines(bundle["pdq"], width)
+    body += _histogram_lines(bundle["pdq_photo"], width, title="PDQ distance")
     body.append(_makeup_line(bundle))
     if bundle["groups_mixed"]:
         body.append(
@@ -234,21 +240,34 @@ def stage3_lines(bundle: dict, width: int) -> list[str]:
     return body
 
 
-def _two_column(left: list[str], right: list[str], width: int) -> list[str]:
-    """Join two vertical lists side by side within ``width`` (left ~half, right the rest)."""
-    if not right:
-        return left
-    if not left:
-        return right
-    lcol = max((len(s) for s in left), default=0) + 2
-    lcol = min(lcol, max(1, width - 8))
-    n = max(len(left), len(right))
+def _hcolumns(cols: list[list[str]], gap: int = 2) -> list[str]:
+    """Join vertical text columns side by side, each padded to its own widest line + ``gap``.
+
+    The last column isn't padded (trailing spaces are stripped). Empty columns are dropped."""
+    cols = [c for c in cols if c]
+    if not cols:
+        return []
+    if len(cols) == 1:
+        return [s.rstrip() for s in cols[0]]
+    widths = [max((len(s) for s in c), default=0) + gap for c in cols]
+    n = max(len(c) for c in cols)
     out = []
     for i in range(n):
-        l = left[i] if i < len(left) else ""
-        r = right[i] if i < len(right) else ""
-        out.append((l.ljust(lcol) + r).rstrip() if r else l.rstrip())
+        row = ""
+        for j, c in enumerate(cols):
+            cell = c[i] if i < len(c) else ""
+            row += cell.ljust(widths[j]) if j < len(cols) - 1 else cell
+        out.append(row.rstrip())
     return out
+
+
+def _columns_width(cols: list[list[str]], gap: int = 2) -> int:
+    """Total display width :func:`_hcolumns` would produce for ``cols``."""
+    cols = [c for c in cols if c]
+    if not cols:
+        return 0
+    return sum(max((len(s) for s in c), default=0) + gap for c in cols[:-1]) \
+        + max((len(s) for s in cols[-1]), default=0)
 
 
 def _lead_column(title: str, tally: dict[str, int], short: dict[str, str]) -> list[str]:
@@ -265,12 +284,13 @@ def _lead_column(title: str, tally: dict[str, int], short: dict[str, str]) -> li
     return lines
 
 
-def _histogram_lines(pdq: dict, width: int) -> list[str]:
-    """A small horizontal PDQ histogram (``label bar count``) within ``width`` cells."""
+def _histogram_lines(pdq: dict, width: int, *, title: str = "PDQ distance") -> list[str]:
+    """A small horizontal PDQ histogram (``label bar count``) titled ``title (N)``, laid
+    out within ``width`` cells. Empty ``pdq`` → just the titled header + a placeholder."""
     total = sum(pdq.values())
-    lines = ["PDQ distance (%d):" % total]
+    lines = [f"{title} ({total}):"]
     if total == 0:
-        return lines + ["  (no distances)"]
+        return lines + ["  (none)"]
     peak = max(pdq.values())
     label_w = max(len(k) for k in pdq)
     bar_max = max(4, min(16, width - label_w - 8))
@@ -281,38 +301,44 @@ def _histogram_lines(pdq: dict, width: int) -> list[str]:
 
 
 def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> list[str]:
-    """The stage-2 Review body (§8 B): keep-lead columns + PDQ histogram, group make-up,
-    suggestion split, and the ``--keep-suggested`` delete/network tip.
+    """The stage-2 Review body (§8 B): keep-lead columns + two PDQ histograms, group
+    make-up, suggestion split, and the ``--keep-suggested`` delete/network tip.
 
-    ``width`` is the usable text width. The keep-lead photo/video columns render
-    side-by-side with the histogram to their right; if too narrow the histogram drops to
-    its own block below. An empty medium column is omitted.
+    Four sub-columns lay out left→right: keep-lead **photos**, keep-lead **videos**, **PDQ
+    photo** histogram, **PDQ video** histogram. When ``width`` fits all four they render
+    side by side under the "keep-lead decided by:" header; otherwise the two histograms
+    WRAP onto their own side-by-side row below the keep-lead columns (and, if even that is
+    too narrow, stack). Empty medium columns/histograms are omitted.
     """
     lead = bundle["lead_by_medium"]
-    cols: list[list[str]] = []
+    lead_cols: list[list[str]] = []
     if sum(lead["photo"].values()):
-        cols.append(_lead_column("photos", lead["photo"], _PHOTO_SHORT))
+        lead_cols.append(_lead_column("photos", lead["photo"], _PHOTO_SHORT))
     if sum(lead["video"].values()):
-        cols.append(_lead_column("videos", lead["video"], _VIDEO_SHORT))
+        lead_cols.append(_lead_column("videos", lead["video"], _VIDEO_SHORT))
+    if not lead_cols:
+        lead_cols = [["(no leads)"]]
 
-    lead_block = ["keep-lead decided by:"]
-    if len(cols) == 2:
-        lead_block += _two_column(cols[0], cols[1], width)
-    elif cols:
-        lead_block += cols[0]
-    else:
-        lead_block += ["  (no leads)"]
+    hist_cols: list[list[str]] = []
+    if bundle.get("pdq_photo"):
+        hist_cols.append(_histogram_lines(bundle["pdq_photo"], width, title="PDQ photo"))
+    if any(bundle.get("pdq_video", {}).values()):
+        hist_cols.append(_histogram_lines(bundle["pdq_video"], width, title="PDQ video"))
 
-    lead_w = max((len(s) for s in lead_block), default=0)
-    # Size the histogram against the width LEFT of the lead columns so the side-by-side
-    # rows never overflow ``width``; a min viable histogram needs ~20 cells. Otherwise
-    # render it full-width as its own block below (the narrow fallback, §8 B).
-    remaining = width - lead_w - 2
-    if remaining >= 20:
-        hist = _histogram_lines(bundle["pdq"], remaining)
-        body = _two_column(lead_block, [""] + hist, width)  # align hist title to the columns row
+    header = ["keep-lead decided by:"]
+    all_cols = lead_cols + hist_cols
+    if hist_cols and _columns_width(all_cols) <= width:
+        # Everything fits on one row: photos · videos · PDQ photo · PDQ video.
+        body = header + _hcolumns(all_cols)
     else:
-        body = lead_block + _histogram_lines(bundle["pdq"], width)
+        # Wrap: keep-lead columns under the header, then the histograms side by side below
+        # (each histogram re-sized to its half so the wrapped row doesn't overflow).
+        body = header + _hcolumns(lead_cols)
+        if len(hist_cols) == 2 and _columns_width(hist_cols) <= width:
+            body += _hcolumns(hist_cols)
+        else:
+            for h in hist_cols:      # too narrow even for two → stack
+                body += h
 
     body.append(_makeup_line(bundle))
     if bundle["groups_mixed"]:

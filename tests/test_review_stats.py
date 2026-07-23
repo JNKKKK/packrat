@@ -58,25 +58,30 @@ def test_stage2_lead_tally_split_by_medium():
     assert b["lead_by_medium"]["video"] == {"resolution": 1}
 
 
-def test_stage2_pdq_histogram_bins_threshold_derived():
-    # Stage 2 bins (t_rec=10, t_video=90): photo thirds 0–2/3–6/7–10, then video 11–50 /
-    # 51–90 / 91+ (mean-Hamming can exceed t_match_video, so the top bin is open).
-    dists = [0, 2, 5, 8, 10, 40, 90, 120]
-    rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
-    b = rs.stage2_stats(rows, stage=2, t_rec=10, t_edit=32, t_video=90)
-    # 0,2 → 0–2 ; 5 → 3–6 ; 8,10 → 7–10 ; 40 → 11–50 ; 90 → 51–90 ; 120 → 91+
-    assert b["pdq"] == {"0–2": 2, "3–6": 1, "7–10": 2, "11–50": 1, "51–90": 1, "91+": 1}
-    assert sum(b["pdq"].values()) == len(rows)
+def test_stage2_pdq_histograms_split_by_medium():
+    # Photo and video get SEPARATE histograms on their own scales (§8 B). Photo bins are
+    # thirds of 0..t_rec (0–2/3–6/7–10); video bins are thirds of 0..t_video + open
+    # overflow (0–29/30–59/60–90/91+). A low-distance video lands in the VIDEO 0–29 bin,
+    # not a photo bin — the partition is by media_type, not by distance range.
+    photos = [_perc(i, distance=d) for i, d in enumerate([0, 2, 5, 8, 10])]
+    videos = [_perc(100 + i, distance=d, media_type="video") for i, d in enumerate([5, 40, 90, 120])]
+    b = rs.stage2_stats(photos + videos, stage=2, t_rec=10, t_edit=32, t_video=90)
+    assert b["pdq_photo"] == {"0–2": 2, "3–6": 1, "7–10": 2}
+    assert b["pdq_video"] == {"0–29": 1, "30–59": 1, "60–90": 1, "91+": 1}
+    assert sum(b["pdq_photo"].values()) == len(photos)
+    assert sum(b["pdq_video"].values()) == len(videos)
 
 
 def test_stage3_pdq_histogram_bins_threshold_derived():
     # Stage 3 bins split the recompress+1 .. t_edit band (11..32) into even thirds; every
     # stage-3 photo lands in a real bar (regression: all fell in a single "11+" bucket).
+    # Stage 3 is photo-only → pdq_video is empty.
     dists = [11, 15, 18, 24, 25, 32]
     rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
     b = rs.stage2_stats(rows, stage=3, t_rec=10, t_edit=32)
-    assert b["pdq"] == {"11–17": 2, "18–24": 2, "25–32": 2}
-    assert sum(b["pdq"].values()) == len(rows)
+    assert b["pdq_photo"] == {"11–17": 2, "18–24": 2, "25–32": 2}
+    assert b["pdq_video"] == {}
+    assert sum(b["pdq_photo"].values()) == len(rows)
 
 
 def test_stage2_group_makeup_and_suggestion_split():

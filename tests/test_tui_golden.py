@@ -194,11 +194,13 @@ def test_root_detail_stage2_rich_review_renders_and_scrolls():
                    detail_header_right(d), footer="Esc", width=100, height=34)
     _fixed_at(built, 100, 34)
     assert "keep-lead decided by:" in built
-    assert "photos (" in built and "videos (" in built     # both medium columns
-    assert "PDQ distance" in built                          # histogram present
-    assert "group make-up:" in built and "mixed (internal+external)" in built
-    # Content exceeds the cap → the box carries the scan-card scroll indicator.
-    assert len(review_content_lines(d, geo, focused=True)) > _review_rows(d, geo)
+    assert "photos (" in built and "videos (" in built     # both keep-lead columns
+    assert "PDQ photo" in built and "PDQ video" in built    # both split histograms, side by side
+    # Content exceeds the cap → the box scrolls; the make-up/tip lines live below the fold,
+    # so assert them against the FULL content (not the clipped frame) + the scroll indicator.
+    content = review_content_lines(d, geo, focused=True)
+    assert any("group make-up:" in ln for ln in content)
+    assert len(content) > _review_rows(d, geo)
     assert "of " in built and "↑/↓" in built
 
 

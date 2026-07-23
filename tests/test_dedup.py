@@ -413,7 +413,7 @@ def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     assert "keep-lead decided by:" in blob
     assert "photos (" in blob                # per-medium column header
     assert "+ format" in blob                # PNG vs JPEG at equal resolution → format decides
-    assert "PDQ distance" in blob            # the histogram is part of the shared block
+    assert "PDQ photo" in blob               # the split photo histogram is in the shared block
 
 
 def test_dedup_stage1_log_shows_group_makeup(queue_and_db, tmp_path):

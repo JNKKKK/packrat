@@ -318,7 +318,7 @@ def test_review_counts_stage2_bundle(seeded):
         b = counts["stage2"]
         assert b["groups"] == 1 and b["members"] == 2
         assert b["lead_by_medium"]["photo"] == {"resolution": 1}
-        assert b["pdq"]["0–2"] == 2
+        assert b["pdq_photo"]["0–2"] == 2             # both photo members at distance ≤2
         assert b["groups_all_internal"] == 1 and b["groups_mixed"] == 0
         assert b["keep_suggested_delete"] == 1        # the one non-lead
     finally:
