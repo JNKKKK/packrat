@@ -416,6 +416,27 @@ def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     assert "PDQ distance" in blob            # the histogram is part of the shared block
 
 
+def test_dedup_result_summary_omits_exact_when_not_stage1(queue_and_db, tmp_path):
+    """A run opened at stage 2 (no stage-1 exact dups) must NOT report '0 exact' in its
+    result summary — the exact count is stage-1-only, so stages 2/3 show grp/mbr instead."""
+    import json as _json
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _photo(lib / "a.png", 5, kind="PNG")                    # PNG + its JPEG recompress →
+    _photo(lib / "a.jpg", 5, kind="JPEG", quality=80)       # a stage-2 near-dup, no stage-1 exact
+    root = register(database, str(lib))
+    _scan_root(q, database, root["id"])
+    jid = _run(q, database, "dedup", root_id=root["id"])
+    summary = _json.loads(
+        database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid,))["result_json"]
+    )["summary"]
+    assert "staged stage 2" in summary
+    assert "exact" not in summary            # regression: was "staged stage 2 · 0 exact · …"
+    assert "grp/" in summary and "mbr" in summary
+
+
 @win_only
 def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
     """A crash between apply and stage-next (stage_phase='applied') → re-confirm advances,

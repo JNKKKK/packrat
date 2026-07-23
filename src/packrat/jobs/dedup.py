@@ -141,6 +141,11 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
                 ctx.db.execute(
                     "UPDATE review_runs SET deleted_count=0 WHERE id=?", (int(run["id"]),)
                 )
+        # The count phrase for run["stage"] (the CURRENT cursor): stage 1 has only exact
+        # rows, stages 2/3 only near-dup groups — so show the one that stage actually has,
+        # never a "0 exact" for a stage that structurally can't hold exact dups (§8 B).
+        cur_counts = (f"{exact} exact" if run["stage"] == STAGE_EXACT
+                      else f"{len(groups)} grp/{members} mbr")
         if run["status"] == "pending":
             if action == "confirm":
                 # A confirm APPLIES its stage, then auto-advances the cursor to the next
@@ -152,11 +157,9 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
                 result["confirmed_stage"] = applied
                 result["summary"] = (
                     f"{action}: applied stage {applied} ({result['deleted']} deleted) · "
-                    f"advanced to stage {run['stage']} · {exact} exact · "
-                    f"{len(groups)} grp/{members} mbr")
+                    f"advanced to stage {run['stage']} · {cur_counts}")
             else:
-                result["summary"] = (f"{action}: staged stage {run['stage']} · {exact} exact · "
-                                     f"{len(groups)} grp/{members} mbr")
+                result["summary"] = (f"{action}: staged stage {run['stage']} · {cur_counts}")
         elif run["status"] == "completed" and action == "analyze":
             # An analyze that completed immediately = already clean (no stages to review).
             result["summary"] = f"{action}: already clean (nothing to review)"
