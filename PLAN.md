@@ -328,13 +328,18 @@ roots(
   kind /* library|trash */, enabled, ignore_globs, last_full_scan_at,
   last_probe_at   /* when `probe` last completed on this root (§8 A2b; recency display) */,
   probe_new_count /* new/changed files probe last saw awaiting a scan. Set by a completed
-                     probe; CLEARED to 0 by a completed scan of the root. This ONE field
-                     carries the whole 4-state-dot precedence signal (§12): a completed scan
-                     always zeroes it, so count>0 means exactly "a probe found unscanned files
-                     and no scan has consumed them yet" — no `last_activity` column needed.
-                     Offline probe writes nothing (an unreachable root never reads as clean). */)
+                     probe; CLEARED to 0 by a completed scan of the root. Feeds the §12
+                     4-state dot's top rung: a completed scan always zeroes it, so count>0
+                     means exactly "a probe found unscanned files and no scan has consumed
+                     them yet." Offline probe writes nothing (unreachable never reads clean). */,
+  needs_dedup     /* dedup-dirty flag: 1 ⇒ scanned content awaiting a (re-)dedup (§12 ◉ yellow).
+                     SET (in the asset write's transaction, crash-atomic) when a scan indexes a
+                     new/backfilled ACTIVE decodable asset, or a merge registers new content;
+                     CLEARED to 0 when a dedup run reaches `completed`. An event signal, NOT a
+                     last_dedup_at>last_scan_at recency test (last_scan_at bumps on every walked
+                     file, so a no-op re-scan must NOT flip a deduped root back to yellow). */)
   -- (per-root scan interval deferred with scheduled scans → M8; not settable in v1)
-  -- last_probe_at/probe_new_count are nullable/default-0 (a row predating them reads
+  -- last_probe_at/probe_new_count/needs_dedup are nullable/default-0 (a row predating them reads
   --   NULL/0 = current behavior); the live DB gets them via db.connection._ensure_added_columns
   --   (ALTER TABLE ADD COLUMN), a fresh DB from SCHEMA_SQL — no migration runner (§4 pre-release).
 
@@ -2761,21 +2766,34 @@ sample dataset (no daemon) for demoing/development.
 
 **The 4-state freshness dot (a color signal, not just a shape).** Each library root shows one dot;
 **color, not just shape, carries the meaning** — `◉` is drawn **both green and yellow**. Driven by
-`roots.probe_new_count` (§8 A2b) + the scan/dedup timestamps, resolved in this precedence order
-(`tui/tokens.status_dot`, a pure `(glyph, role)` function):
+`roots.probe_new_count` (§8 A2b) + `roots.needs_dedup` + `last_scan_at`/`last_dedup_at`, resolved in this
+precedence order (`tui/tokens.status_dot`, a pure `(glyph, role)` function):
 1. **`probe_new_count > 0`** → **`◐` grey** — a probe found unscanned files waiting. **Outranks every
    other state, including `never`**: a freshly-registered root whose first probe finds files shows ◐,
    not ○.
 2. **no `last_scan_at`** → **`○` grey** — never scanned.
-3. **`last_dedup_at > last_scan_at`** → **`◉` green** — deduped *after* the latest scan (recency-relative:
-   a scan after the last dedup drops it to yellow — a timestamp comparison, not a truthiness check).
-4. **else (scanned)** → **`◉` yellow** — scanned, not (re-)deduped since.
+3. **`needs_dedup` OR no `last_dedup_at`** → **`◉` yellow** — has scanned content awaiting a (re-)dedup,
+   or was never deduped.
+4. **else** → **`◉` green** — scanned AND deduped, nothing dirty since.
+
+**Why an event flag, not a scan-vs-dedup recency test.** Rung 3 keys off the **`needs_dedup` signal**, NOT
+`last_dedup_at > last_scan_at`. That comparison was wrong: `last_scan_at = MAX(file_instances.last_seen_at)`
+bumps on *every* walked file, so a no-op re-scan (found nothing new) wrongly flipped a fully-deduped root
+back to yellow. `needs_dedup` is instead **SET when a scan/merge indexes new dedup-able content** — in the
+*same transaction* as the asset write (`scan._persist_new`/`_persist_backfill`, so an interrupted scan
+can't strand it; `merge` after registering) — and **CLEARED when a dedup run reaches `completed`** (incl.
+the already-clean path). A no-op scan sets nothing (green stays green); an undecodable-only scan and a
+reappearing-trash hit aren't dedup-able, so they don't dirty. `last_dedup_at` now only gates "ever
+deduped?" in rung 3's OR (which also makes the `needs_dedup=0` retrofit default self-correct — a
+scanned-but-never-deduped legacy root still reads yellow).
+
 A completed `scan` zeroes `probe_new_count`, so a scan-latest root skips rung 1; a **found-nothing probe
 (count 0) is inherently a dot no-op** — it skips rung 1 and falls through to the scan/dedup rungs, which
-a probe never writes (never→never, green→green, yellow→yellow). *(Rendering note: the runtime colorizer
-derives color from the glyph, so `◉`'s two colors are applied by a small post-pass — `colorize.recolor_root_dots`
-recolors each root row's dot to its true role, and `recolor_dot_legend` fixes the legend's two `◉`; the
-plain/golden frames stay colorless, the role is asserted via the row `Cell`.)*
+a probe never writes. *(Rendering note: the runtime colorizer derives color from the glyph, so `◉`'s two
+colors are applied by a small post-pass — `colorize.recolor_root_dots` recolors each root row's dot to its
+true role, anchoring on the displayed (elided) name so a long root name still matches, and
+`recolor_dot_legend` fixes the legend's two `◉`; the plain/golden frames stay colorless, the role is
+asserted via the row `Cell`.)*
 
 ### 12.2 Architecture (how it's built)
 
@@ -2922,8 +2940,10 @@ function.
   (`jobs/scheduler.py` — APScheduler `BackgroundScheduler` + a declarative `PeriodicTask` registry,
   in-memory jobstore, wired into the daemon lifespan; `probe-all` its first task, every 24 h), and
   the **4-state status dot** it drives (§12 — `◉` green deduped / `◉` yellow need-dedup / `◐` grey
-  new-files-probed / `○` grey never; `roots.last_probe_at`/`probe_new_count`). This realizes §3's
-  "Scheduler (APScheduler)" line ahead of M8's scheduled *scans*, and adds APScheduler as a core dep.
+  new-files-probed / `○` grey never; `roots.last_probe_at`/`probe_new_count`, plus a `needs_dedup`
+  event flag set by a scan/merge that indexes new dedup-able content and cleared on dedup completion —
+  so a no-op re-scan never flips a deduped root back to yellow). This realizes §3's "Scheduler
+  (APScheduler)" line ahead of M8's scheduled *scans*, and adds APScheduler as a core dep.
 - **M7 — Semantic embeddings**: opt-in `scan --embed` CLIP pass writing the `embeddings` table;
   brute-force cosine search scaffold. Tagging/classification behavior on top is **TBD** (§7).
 - **M8 — Hardening**: scheduled interval-scan triggers (**the scheduler now exists — M6.5**; M8
