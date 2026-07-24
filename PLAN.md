@@ -1359,8 +1359,10 @@ registered root. **Survivor** = the one file instance of an asset that stage 1 k
    Then compute stage 1 (Phase 2). If the whole run would be empty (no stage has
    any candidate) it **auto-completes "already clean"** without leaving a `pending` row dangling.
    Otherwise **write** a `review_runs` row (`root_id`, `status='pending'`, `stage=1`,
-   `stage_phase='staged'`, `created_at`) — which now *owns* the root until confirmed/cancelled — and
-   open a `jobs` row (`type='dedup'`).
+   `stage_phase='staged'`, `created_at`, plus the analyze-time policy snapshot — `prefer_internal`
+   and the PDQ thresholds `t_photo_recompress`/`t_photo_edit`/`t_match_video`, §4 — locked here and
+   read back by every `--confirm` and both review-stats faces) — which now *owns* the root until
+   confirmed/cancelled — and open a `jobs` row (`type='dedup'`).
 
 **Phase 1 — Build from the DB (no eager stat)** *(edge case 5)*
 Analyze builds the plan directly from existing `file_instances`/`phash`/`vphash` rows; it does
@@ -1908,7 +1910,7 @@ format decodes to sampled RGB frames.** Everything downstream then follows autom
 | heic heif | `pillow-heif` (libheif) | ✅ | ✅ | ✅ | ✅ |
 | avif | Pillow ≥11.3 native, else `pillow-heif` | ✅ | ✅ | ✅ | ✅ | ⚠ POC |
 | RAW: dng cr2 cr3 nef arw raf orf rw2 pef srw | `rawpy` (LibRaw ≥0.20 for cr3) → embedded preview or postprocess | ✅ | ✅ | ✅ | ✅ | ⚠ POC |
-| mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts 3gp | PyAV/ffmpeg (H.264/HEVC/VP9/AV1/MPEG-2/VC-1…) → sampled frames | ✅ | ✅ | ✅ | ✅ (ffprobe) |
+| mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts ts 3gp | PyAV/ffmpeg (H.264/HEVC/VP9/AV1/MPEG-2/VC-1…) → sampled frames | ✅ | ✅ | ✅ | ✅ (ffprobe) |
 
 **Decode-stage notes:**
 - **Perceptual + embedding both gate on decode.** There is no separate per-format work for
@@ -1924,8 +1926,15 @@ format decodes to sampled RGB frames.** Everything downstream then follows autom
 - **Animated GIF / multi-page TIFF:** decode the **first frame** for the perceptual hash and
   embedding (still treated as one asset).
 - **Video codecs:** ffmpeg (via PyAV) decodes every codec these containers realistically carry
-  (H.264, HEVC, VP8/9, AV1, MPEG-2/4, VC-1/WMV3). `m2ts`/`mts` are AVCHD/MPEG-TS. The only real
-  risk is an exotic/ancient codec, which is negligible for a personal collection.
+  (H.264, HEVC, VP8/9, AV1, MPEG-2/4, VC-1/WMV3). The only real risk is an exotic/ancient codec,
+  which is negligible for a personal collection.
+- **Transport streams (`ts`/`m2ts`/`mts`, MPEG-TS/AVCHD):** the *container*, not the codec, is the
+  hazard — they routinely report **no duration** and **break mid-file seeking** (a seek to a
+  non-zero target silently yields nothing; they also carry a non-zero `start_time`). §5.3's sampler
+  handles both: a demux-only last-packet pass recovers the timeline, and per-target seeking falls
+  back to a single sequential decode pass; a genuinely undecodable `.ts` still flags `undecodable`.
+  (`ts` collides with TypeScript, so a *code* directory registered as a library root would treat
+  `.ts` sources as media candidates — a non-issue for a media collection.)
 - **Graceful failure is mandatory:** a file whose bytes hash fine but *won't decode* is still
   recorded as an asset (identity is the hash) but flagged `undecodable` — no perceptual sig, no
   embedding, no near-dup matching for it. Scan never crashes on a bad file; it logs and moves on.
