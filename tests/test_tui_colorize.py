@@ -32,8 +32,9 @@ def test_deduped_dot_gets_success_color():
     assert _span_color(f" {tokens.DOT_DEDUPED} x", tokens.DOT_DEDUPED) == T.color("success")
 
 
-def test_scanned_dot_gets_warn_color():
-    assert _span_color(f" {tokens.DOT_SCANNED} x", tokens.DOT_SCANNED) == T.color("warn")
+def test_probed_new_dot_gets_dim_color():
+    # ◐ "new files probed" is grey in the base glyph pass (§12 4-state).
+    assert _span_color(f" {tokens.DOT_PROBED} x", tokens.DOT_PROBED) == T.color("dim")
 
 
 def test_never_dot_gets_dim_color():
@@ -266,9 +267,9 @@ def test_emphasize_selected_row_works_inside_outer_frame_border():
 
 def test_emphasize_selected_row_reasserts_semantic_glyph_colors():
     # A selected row keeps meaningful glyph colors (bolded), not washed to white: the
-    # ◐ scanned dot stays warn, the █ bar fill stays running — just bold.
+    # ◉ deduped dot stays its base success color, the █ bar fill stays running — just bold.
     from packrat.tui.colorize import emphasize_selected_row
-    frame = (f"┃ {tokens.CURSOR} Camera   {tokens.DOT_SCANNED}   {tokens.BAR_FILL * 3} 50% ┃")
+    frame = (f"┃ {tokens.CURSOR} Camera   {tokens.DOT_DEDUPED}   {tokens.BAR_FILL * 3} 50% ┃")
     text = emphasize_selected_row(colorize(frame), frame)
 
     def over(needle):
@@ -276,7 +277,7 @@ def test_emphasize_selected_row_reasserts_semantic_glyph_colors():
         covering = [s for s in text.spans if s.start <= i < s.end]
         return str(covering[-1].style) if covering else str(text.style)
 
-    assert over(tokens.DOT_SCANNED) == f"bold {T.color('warn')}"
+    assert over(tokens.DOT_DEDUPED) == f"bold {T.color('success')}"
     assert over(tokens.BAR_FILL) == f"bold {T.color('running')}"
 
 
@@ -290,3 +291,94 @@ def test_shade_box_title_also_shades_the_pager():
     shaded = sorted((frame[s.start:s.end]) for s in text.spans if str(s.style) == want)
     assert shaded == [" [R]oots ", " page 1/2 "]   # title + pager, each with its spaces
     assert text.plain == frame
+
+
+# --- 4-state dot recolor (§12): ◉ green vs ◉ yellow needs a per-row post-pass --------
+def _mk_root(rid, name, path, scan, dedup, probe_new):
+    return {"id": rid, "name": name, "path": path, "kind": "library", "enabled": 1,
+            "last_full_scan_at": None, "last_probe_at": None, "probe_new_count": probe_new,
+            "asset_count": 10, "photos": 10, "videos": 0, "instance_count": 10,
+            "size_bytes": 1000, "last_scan_at": scan, "last_dedup_at": dedup}
+
+
+def _dot_color(text, frame, roots, target_name):
+    """The color applied to ``target_name``'s row dot after recolor_root_dots."""
+    from packrat.tui import render
+    r = next(x for x in roots if x["name"] == target_name)
+    glyph, _ = render.root_dot_pair(r)
+    prefix = "│┃ " + tokens.CURSOR
+    for i, ln in enumerate(frame.split("\n")):
+        npos = ln.find(target_name)
+        if npos == -1 or not all(c in prefix for c in ln[:npos]):
+            continue
+        after = npos + len(target_name)
+        if after < len(ln) and ln[after] != " ":
+            continue
+        dpos = ln.find(glyph, after)
+        if dpos == -1:
+            continue
+        base = sum(len(x) + 1 for x in frame.split("\n")[:i]) + dpos
+        c = text.style
+        for s in text.spans:
+            if s.start <= base < s.end:
+                c = s.style
+        return str(c)
+    raise AssertionError(f"no dot row for {target_name!r}")
+
+
+def test_recolor_root_dots_splits_deduped_green_from_need_dedup_yellow():
+    """◉ renders BOTH green (deduped>scan) and yellow (need-dedup) — the per-row post-pass
+    colors each root's ◉ to its true role, which the glyph pass alone can't (§12)."""
+    from packrat.tui.colorize import recolor_root_dots
+    from packrat.tui.screens.roots import roots_body
+    from packrat.tui.framing import screen
+    roots = [
+        _mk_root(1, "Green", r"D:\a", "2024-01-01", "2024-02-01", 0),   # dedup>scan → green
+        _mk_root(2, "Yellow", r"D:\b", "2024-02-01", None, 0),          # scanned, no dedup → yellow
+        _mk_root(3, "Probed", r"D:\c", None, None, 5),                  # probe new → grey ◐
+        _mk_root(4, "Never", r"D:\d", None, None, 0),                   # never → grey ○
+    ]
+    frame = screen("x", roots_body(roots, now="2026-07-15T00:00:00"), "up", footer="f")
+    text = recolor_root_dots(colorize(frame), frame, roots)
+    assert _dot_color(text, frame, roots, "Green") == T.color("success")
+    assert _dot_color(text, frame, roots, "Yellow") == T.color("warn")
+    assert _dot_color(text, frame, roots, "Probed") == T.color("dim")
+    assert _dot_color(text, frame, roots, "Never") == T.color("dim")
+
+
+def test_recolor_root_dots_ignores_name_prefix_and_path_collisions():
+    """A root name that is a PREFIX of another ("Photo" vs "Photos"), or that appears inside
+    another root's PATH, must color the RIGHT row's dot — not the wrong one (regression)."""
+    from packrat.tui.colorize import recolor_root_dots
+    from packrat.tui.screens.roots import roots_body
+    from packrat.tui.framing import screen
+    roots = [
+        _mk_root(1, "Photo", r"D:\a", "2024-01-01", "2024-02-01", 0),      # green
+        _mk_root(2, "Photos", r"D:\Photo\sub", "2024-02-01", None, 0),     # yellow (path has "Photo")
+        _mk_root(3, "Camera", r"E:\Photos\dcim", None, None, 7),           # grey ◐ (path has "Photos")
+    ]
+    frame = screen("x", roots_body(roots, now="2026-07-15T00:00:00"), "up", footer="f")
+    text = recolor_root_dots(colorize(frame), frame, roots)
+    assert _dot_color(text, frame, roots, "Photo") == T.color("success")
+    assert _dot_color(text, frame, roots, "Photos") == T.color("warn")
+    assert _dot_color(text, frame, roots, "Camera") == T.color("dim")
+
+
+def test_recolor_dot_legend_makes_need_dedup_yellow():
+    """The legend's two ◉ split green (deduped) / yellow (need dedup) like the row dots."""
+    from packrat.tui.colorize import recolor_dot_legend
+    from packrat.tui.screens.roots import DOTKEY_WIDE
+    frame = f"│ {DOTKEY_WIDE} │"
+    text = recolor_dot_legend(colorize(frame), frame)
+
+    def color_at(idx):
+        c = text.style
+        for s in text.spans:
+            if s.start <= idx < s.end:
+                c = s.style
+        return str(c)
+
+    i_dedup = frame.index(tokens.DOT_DEDUPED)                  # first ◉ = "deduped"
+    i_need = frame.rindex(tokens.DOT_DEDUPED, 0, frame.index("need dedup"))
+    assert color_at(i_dedup) == T.color("success")            # green
+    assert color_at(i_need) == T.color("warn")                # yellow

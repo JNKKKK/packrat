@@ -40,18 +40,39 @@ def _role_for(cells: list[Cell], text_contains: str) -> str | None:
     raise AssertionError(f"no cell containing {text_contains!r}")
 
 
+def _dot_role(cells: list[Cell]) -> str | None:
+    """The role of the freshness-dot cell (width-1 cell holding a dot glyph).
+
+    ◉ is both green + yellow, so the row's dot cell carries the true role directly
+    (from render.root_dot_pair) — assert THAT, not the ambiguous glyph."""
+    dots = {tokens.DOT_DEDUPED, tokens.DOT_NEEDS_DEDUP, tokens.DOT_PROBED, tokens.DOT_NEVER}
+    for c in cells:
+        if c.width == 1 and c.text in dots:
+            return c.style
+    raise AssertionError("no freshness-dot cell found")
+
+
 def test_deduped_dot_has_success_role():
     from packrat.tui import render
-    iphone = next(r for r in fixtures.ROOTS if r["name"] == "iPhone")   # ◉ deduped
+    iphone = next(r for r in fixtures.ROOTS if r["name"] == "iPhone")   # ◉ green (dedup>scan)
     cells = _cells_of(render.root_row_compact, iphone)
-    assert _role_for(cells, tokens.DOT_DEDUPED) == "success"
+    # ◉ appears for both deduped(green) and need-dedup(yellow); assert the ROLE the cell
+    # carries (not just the glyph) — iPhone's dedup is newer than its scan → success.
+    assert _dot_role(cells) == "success"
 
 
-def test_scanned_only_dot_has_warn_role():
+def test_need_dedup_dot_has_warn_role():
     from packrat.tui import render
-    photos = next(r for r in fixtures.ROOTS if r["name"] == "Photos")   # ◐ scanned only
+    camera = next(r for r in fixtures.ROOTS if r["name"] == "Camera")   # ◉ yellow (scan>dedup)
+    cells = _cells_of(render.root_row_compact, camera)
+    assert _dot_role(cells) == "warn"
+
+
+def test_probed_new_dot_has_dim_role():
+    from packrat.tui import render
+    photos = next(r for r in fixtures.ROOTS if r["name"] == "Photos")   # ◐ probe found new
     cells = _cells_of(render.root_row_compact, photos)
-    assert _role_for(cells, tokens.DOT_SCANNED) == "warn"
+    assert _dot_role(cells) == "dim"
 
 
 def test_trash_count_has_dim_role():

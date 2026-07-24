@@ -72,12 +72,19 @@ class Dashboard(FrameScreen):
         # Apply the base theme colors, then sweep the gem's gradient on top so the held
         # stone glints — and tint the "· N assets hoarded ·" count the SAME color so the
         # number glints with the gem (post-layout, live widget only — §Theming).
-        from ..colorize import (gem_gradient_color, recolor_gem, recolor_hoard_count,
-                               shade_box_title)
+        from ..colorize import (gem_gradient_color, recolor_dot_legend, recolor_gem,
+                               recolor_hoard_count, recolor_root_dots, shade_box_title)
         # Base colors + the ▸-selected-row emphasis (inherited from FrameScreen), then
         # the dashboard's own effects on top: the gem gradient sweep, the hoard-count
         # tint, and the focused box's shaded title tab.
         text = super()._colorize(frame)
+        # ◉ is green (deduped) OR yellow (need-dedup) — recolor each Roots-box row's dot to
+        # its true role (the glyph pass can't split one glyph into two colors). Uses the
+        # SAME sorted+masked roots the body was built from (dashboard default sort 0 → §12).
+        from .. import render
+        roots = render.sort_roots(self.app.view(self.app.snapshot.get("roots", [])), 0)
+        recolor_root_dots(text, frame, roots)
+        recolor_dot_legend(text, frame)
         color = gem_gradient_color(self._gem_phase)
         recolor_gem(text, frame, self._gem, color)
         recolor_hoard_count(text, frame, color)

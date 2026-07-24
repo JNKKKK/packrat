@@ -206,6 +206,41 @@ class Database:
             self._conn.close()
 
 
+#: Additive columns a `CREATE TABLE IF NOT EXISTS` can't retrofit onto an existing
+#: table (pre-release, no migration runner — §4). Each entry is a column that must
+#: exist on an already-created table; :func:`_ensure_added_columns` `ALTER TABLE … ADD
+#: COLUMN`s any that are missing at every ``init_db``, so a live DB gains new columns
+#: without a manual patch and a fresh DB (which gets them from ``SCHEMA_SQL``) skips them.
+#: DEFAULT/nullable only — SQLite's ADD COLUMN forbids a NOT NULL column without a
+#: default, and every value here reads as current behavior on an old row.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, DDL) — the roots probe-signal columns (§8 A2b / §12 dot).
+    ("roots", "last_probe_at", "TEXT"),
+    ("roots", "probe_new_count", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _ensure_added_columns(conn: sqlite3.Connection) -> None:
+    """`ALTER TABLE … ADD COLUMN` any :data:`_ADDED_COLUMNS` missing from the DB.
+
+    Idempotent and cheap: reads each table's ``PRAGMA table_info`` and adds only the
+    columns not already present. On a fresh DB ``SCHEMA_SQL`` already created them, so
+    every check is a no-op; on a live DB predating a column this retrofits it (§4 —
+    the pre-release stand-in for a migration runner). Skips a not-yet-created table.
+    """
+    tables = {
+        r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for table, column, ddl in _ADDED_COLUMNS:
+        if table not in tables:
+            continue
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     """Create the schema if missing and return an open connection (§4).
 
@@ -213,10 +248,15 @@ def init_db(db_file: Path | None = None) -> sqlite3.Connection:
     ``CREATE … IF NOT EXISTS``, so this is idempotent: a no-op on an already-current
     DB, and a full build on a fresh one. There is no migration runner (§4); the
     ``schema_version`` marker is stamped into ``meta`` for future use.
+
+    :func:`_ensure_added_columns` then retrofits any additive columns a
+    ``CREATE … IF NOT EXISTS`` can't add to an already-existing table (the live-DB
+    patch the pre-release model uses instead of a migration runner).
     """
     conn = connect(db_file)
     conn.executescript(SCHEMA_SQL)
     with transaction(conn):
+        _ensure_added_columns(conn)
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

@@ -37,7 +37,7 @@ def test_row_len_equals_width_fixed_cells(w):
         Cell(tokens.CURSOR, width=1),
         Cell("Downloads", width=9),
         Cell(r"D:\dump", width=20, elide="middle"),
-        Cell(tokens.DOT_SCANNED, width=1),
+        Cell(tokens.DOT_PROBED, width=1),
         Cell("241", width=7, align="right"),
     ]
     assert len(row(w, cells)) == w
@@ -202,21 +202,49 @@ def test_fit_width_hard_truncates():
     assert fit_width("abcdef", 3) == "abc"
 
 
-# --- status_dot: the four branches ----------------------------------------
+# --- status_dot: the 4-state ladder (§12 / TODO Part C) --------------------
+# Signature: status_dot(kind, probe_new_count, last_scan_at, last_dedup_at) -> (glyph, role).
 def test_status_dot_trash_blank():
-    assert tokens.status_dot("trash", "2024", "2024") == tokens.DOT_TRASH
+    assert tokens.status_dot("trash", 0, "2024", "2024") == (tokens.DOT_TRASH, "dim")
 
 
-def test_status_dot_deduped():
-    assert tokens.status_dot("library", "2024", "2024") == tokens.DOT_DEDUPED
+def test_status_dot_deduped_is_green():
+    # dedup NEWER than the latest scan → ◉ green (recency-relative).
+    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01") == (
+        tokens.DOT_DEDUPED, "success")
 
 
-def test_status_dot_scanned_only():
-    assert tokens.status_dot("library", "2024", None) == tokens.DOT_SCANNED
+def test_status_dot_need_dedup_is_yellow():
+    # scanned, never deduped → ◉ yellow.
+    assert tokens.status_dot("library", 0, "2024-01-01", None) == (
+        tokens.DOT_NEEDS_DEDUP, "warn")
 
 
-def test_status_dot_never():
-    assert tokens.status_dot("library", None, None) == tokens.DOT_NEVER
+def test_status_dot_scan_after_dedup_drops_to_yellow():
+    # a scan AFTER the last dedup → dedup no longer newest → ◉ yellow (need re-dedup).
+    assert tokens.status_dot("library", 0, "2024-03-01", "2024-02-01") == (
+        tokens.DOT_NEEDS_DEDUP, "warn")
+
+
+def test_status_dot_never_is_grey_hollow():
+    assert tokens.status_dot("library", 0, None, None) == (tokens.DOT_NEVER, "dim")
+
+
+def test_status_dot_probe_new_outranks_every_state():
+    # probe_new_count>0 → ◐ grey, from ANY prior state incl. never (rung 1, above `never`).
+    assert tokens.status_dot("library", 5, None, None) == (tokens.DOT_PROBED, "dim")      # never
+    assert tokens.status_dot("library", 5, "2024-01-01", "2024-02-01") == (
+        tokens.DOT_PROBED, "dim")                                                        # was green
+    assert tokens.status_dot("library", 5, "2024-02-01", "2024-01-01") == (
+        tokens.DOT_PROBED, "dim")                                                        # was yellow
+
+
+def test_status_dot_count_zero_probe_is_a_noop():
+    # A found-nothing probe (count 0) leaves the dot at its scan/dedup rung: never→never,
+    # green→green, yellow→yellow (the count is the whole self-clearing signal).
+    assert tokens.status_dot("library", 0, None, None)[0] == tokens.DOT_NEVER
+    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01")[0] == tokens.DOT_DEDUPED
+    assert tokens.status_dot("library", 0, "2024-02-01", None)[0] == tokens.DOT_NEEDS_DEDUP
 
 
 # --- token derivations -----------------------------------------------------
@@ -244,7 +272,7 @@ def test_cell_width_counts_cjk_as_two():
 def test_cell_width_glyphs_are_one_cell():
     # our box/dot glyphs must measure as 1 cell (keeps golden frames byte-identical)
     from packrat.tui import render
-    for g in (tokens.DOT_DEDUPED, tokens.DOT_SCANNED, tokens.DOT_NEVER,
+    for g in (tokens.DOT_DEDUPED, tokens.DOT_NEEDS_DEDUP, tokens.DOT_PROBED, tokens.DOT_NEVER,
               tokens.CURSOR, tokens.RUNNING, tokens.WARN, tokens.ELLIPSIS,
               tokens.BAR_FILL, tokens.BAR_EMPTY, *render.LOGO_GEMS):
         assert cell_width(g) == 1, g

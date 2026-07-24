@@ -93,6 +93,27 @@ def test_plain_scan_sets_scan_recency_not_full(queue_and_db, tiny_photos):
     assert snap2["last_full_scan_at"] is not None
 
 
+def test_full_scan_of_offline_root_does_not_stamp_last_full_scan(queue_and_db, tmp_path):
+    """An offline/unreadable root in a --full scan must NOT record last_full_scan_at — its
+    enumeration failed, so nothing was fingerprinted or deletion-detected (§8 A2 / §10.1).
+
+    A --all sweep skips+logs a busy root but still ENTERS the per-root loop for an offline
+    one (offline is discovered at enumerate time, not the dequeue gate), so the post-scan
+    roots writes must guard on root_offline exactly as the probe-signal clear does."""
+    from packrat import queries
+
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib))
+    # Point the stored path at a now-missing dir so enumerate's first listing fails → offline.
+    database.execute("UPDATE roots SET path=? WHERE id=?", (str(tmp_path / "gone"), root["id"]))
+    _run_scan(q, database, root["id"], full=True)   # completes 'done', but the root is offline
+    snap = queries.roots_snapshot()[0]
+    assert snap["last_full_scan_at"] is None         # no full scan actually happened
+    assert snap["probe_new_count"] == 0              # (untouched default; not falsely cleared either)
+
+
 def test_roots_snapshot_media_split_and_dedup_recency(queue_and_db, tiny_photos):
     """roots_snapshot exposes photos/videos + last_dedup_at for the M6 dot & sort (Open Q#1)."""
     from packrat import queries

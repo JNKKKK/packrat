@@ -78,8 +78,10 @@ def test_roots_snapshot_binds_to_rootrow(seeded):
     compact = render.root_row_compact(r)
     assert "MyPhotos" in compact
     assert r["asset_count"] == 3            # 3 distinct PNGs
-    # Never scanned dedup → the ◐ scanned-only dot.
-    assert render.root_dot(r) == "◐"
+    # Scanned (probe_new_count cleared to 0), never deduped → ◉ "need dedup" (yellow).
+    assert r["probe_new_count"] == 0       # a completed scan zeroed the probe signal
+    glyph, role = render.root_dot_pair(r)
+    assert (glyph, role) == (render.tokens.DOT_NEEDS_DEDUP, "warn")
 
 
 def test_fmt_size_formats_human_readable():

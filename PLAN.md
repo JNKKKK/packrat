@@ -112,7 +112,7 @@ cancel. This is what makes a job survive the terminal that launched it.
              │  │   scan · dedup · merge · cleanup · trash refresh ·    │ │
              │  │   embed — each cooperatively cancellable + resumable  │ │
              │  └──────────────────────────────────────────────────────┘ │
-             │  Scheduler (APScheduler → interval scans)                  │
+             │  Scheduler (APScheduler → periodic probe/scan sweeps)      │
              │  core library (fingerprint · match engine · trash · review)│
              │  SQLite (WAL)  +  perceptual/vector search  +  (opt) CLIP  │
              └───────────────────────────────────────────────────────────┘
@@ -124,10 +124,26 @@ cancel. This is what makes a job survive the terminal that launched it.
 - a **persisted job queue** running **one mutating job at a time**, the rest waiting in a durable
   FIFO backlog that survives restart (§3 guarantee 1); each job is cooperatively cancellable and
   checkpointed/resumable (per §8);
-- the **scheduler** for interval scans (submits scan jobs like any client);
+- the **periodic-job scheduler** (`jobs/scheduler.py`, **now realized** — see below) which
+  submits jobs like any client;
 - the review-run state (`review_runs`) and audit trail.
 Exposes a small HTTP API on `127.0.0.1` with a local token (`%APPDATA%\packrat\token`). Reads
 tunable settings from `%APPDATA%\packrat\config.toml` (§9.2), reloaded at each job start.
+
+**The periodic scheduler (`PeriodicScheduler`, `jobs/scheduler.py`).** A thin wrapper over
+APScheduler's `BackgroundScheduler` + a declarative `PeriodicTask` registry (`PERIODIC_TASKS`,
+mirroring the `JobSpec` pattern), general enough for future periodic work (scheduled `--full`
+scans → M8, audit pruning §8.1, embedding backfills §7). Its **first client is `probe`** (§8
+A2b): the `probe-all` task's `submit(queue, db)` thunk fans out to one `probe <root>` per
+enabled library root every `schedule.probe_interval_hours` (24 h default, small jitter). The
+scheduler is **just another queue client** — its job func runs on APScheduler's own thread and
+only calls `queue.submit(...)`, never runs job work, so the "one mutating job at a time"
+invariant is untouched. It uses an **in-memory jobstore** (the schedule is re-armed from
+`PERIODIC_TASKS` on every daemon start; durability lives in the job queue, not the schedule —
+`coalesce=True` + a misfire grace collapse missed fires). `build_app` constructs it after the
+queue + reconcile; `scheduler.start()`/`shutdown()` run in the daemon's startup/shutdown lifespan
+hooks, symmetric with `queue.shutdown()`. APScheduler is a **new core dependency** (pure-Python,
+no wheel risk — §9.1).
 
 **Progress transport — server-sent events (SSE), not polling.** A client that submits (or attaches
 to) a job holds an SSE stream on the HTTP API; the daemon pushes progress/state events (bar, counts,
@@ -309,8 +325,18 @@ tray app / Windows Service wrapper is a later nicety.
 ```sql
 roots(
   id, path /* unique */, name /* unique, case-insensitive; leaf name or --name */,
-  kind /* library|trash */, enabled, ignore_globs, last_full_scan_at)
+  kind /* library|trash */, enabled, ignore_globs, last_full_scan_at,
+  last_probe_at   /* when `probe` last completed on this root (§8 A2b; recency display) */,
+  probe_new_count /* new/changed files probe last saw awaiting a scan. Set by a completed
+                     probe; CLEARED to 0 by a completed scan of the root. This ONE field
+                     carries the whole 4-state-dot precedence signal (§12): a completed scan
+                     always zeroes it, so count>0 means exactly "a probe found unscanned files
+                     and no scan has consumed them yet" — no `last_activity` column needed.
+                     Offline probe writes nothing (an unreachable root never reads as clean). */)
   -- (per-root scan interval deferred with scheduled scans → M8; not settable in v1)
+  -- last_probe_at/probe_new_count are nullable/default-0 (a row predating them reads
+  --   NULL/0 = current behavior); the live DB gets them via db.connection._ensure_added_columns
+  --   (ALTER TABLE ADD COLUMN), a fresh DB from SCHEMA_SQL — no migration runner (§4 pre-release).
 
 assets(
   id, content_hash /* blake3, unique */, media_type /* photo|video (by extension) */,
@@ -1266,6 +1292,74 @@ fast-path. Re-running `roots register` on an existing root is rejected by the ov
 
 ---
 
+#### A2b. `probe` — cheap discovery: is there anything new here worth a scan?
+
+```
+packrat probe "D:\Backup\iPhone"     # count new/changed files; write NO fingerprints
+packrat probe --all                  # probe every enabled library root (one job each)
+```
+
+`probe` (`jobs/probe.py`) splits the two halves `scan` conflates — *discovery* (walk + notice
+new paths; seconds, no per-file I/O) and *fingerprinting* (hash + decode + PDQ; the multi-hour
+cost). Probe is **discovery-only**: it answers one question about a root — *are there files here
+we haven't scanned yet?* — and records a per-root "new files waiting" signal (the TUI surfaces it
+as a status-dot state, §12), so the user learns a root needs a `scan` without remembering they
+dropped files in. Runs every 24 h per root via the scheduler (§3); never blocks the user (press
+`[s]`/`packrat scan` to scan now). CLI-exposed; **no** TUI keyshortcut (background-only).
+
+**What it does.** Reuse scan's `enumerate_root(root_path, ignore)` (the walk + allowlist + ignore
+filter — Phase 1) to build the candidate list, then per candidate apply scan's **existing
+fast-path skip predicate** (path + exact size + tolerant mtime + "fully fingerprinted", step 4)
+to decide *known* vs *new/changed*. Count the news. **No BLAKE3, no decode, no PDQ, no
+`assets`/`phash`/`vphash` writes** — that is exactly the line between probe and scan. The
+predicate is factored into a shared helper (`scan.load_existing_instances` +
+`scan.is_fastpath_hit`) that both scan and probe call, so **"probe says N" ⇒ "scan would
+fingerprint ≥ N"** holds by construction — no second copy of the rule.
+
+- **"New"** = a candidate with no matching live `file_instances` row, OR a matching row whose
+  size/mtime drifted past tolerance (a changed file also needs re-scanning).
+- Probe does **no deletion-detection** (that mutates the catalog — scan's job, needs the full
+  pass). Probe is **read-only on the catalog**; its only write is the per-root signal.
+- **Trash roots:** never probed (scan never touches `kind='trash'` — §6.1); `probe --all`
+  iterates `enabled=1 AND kind='library'`.
+- **Offline / unreadable root** (SMB blip, §10.1): report `root_offline`, write **no** signal —
+  absence of a readable listing ≠ "no new files"; never let an unreachable root read as "clean".
+
+**Per-root exclusivity — probe OWNS its root.** `owned_root=root_id`, so a probe **waits in the
+backlog until its root is idle** (no running scan/dedup/cleanup/merge on it) via the existing
+dequeue gate (§3 guarantee 2), exactly like scan. Rationale for N per-root probe jobs over one
+`probe --all` sweep: a single sweep owns no root and *iterates*, so at a busy root it must either
+skip it (a silent miss) or stall the whole sweep; N per-root jobs sidestep it — each is an
+independent queue entry the scheduler holds until *its* root frees. The cost ("100 roots → 100
+jobs / 24 h") is bounded by the submit-dedup below. Probe is sub-second-to-seconds, so the brief
+block it imposes is negligible; non-destructive → reconcile drains a queued probe normally, an
+interrupted running probe just re-runs (idempotent — recomputes from scratch, writes nothing else).
+
+**The signal.** On **clean completion** (not offline): set `last_probe_at=now` and
+`probe_new_count=<n found>` — which may be **0** (found nothing). Writing 0 is correct and
+important: it means "a probe ran and there's nothing unscanned," so the dot stays whatever the
+scan/dedup state says (§12). **A completed `scan` clears `probe_new_count=0`** (Phase 5, alongside
+`last_full_scan_at`; skipped for a dry-run or an offline root) — the news are now fingerprinted.
+Because the count is self-clearing, `count > 0` *is* the "latest meaningful op is a
+probe-with-news" state — no `last_activity` column needed, and it stays honest if the user deletes
+the new files and re-probes (re-enumeration finds 0 → dot reverts).
+
+**Submit-time dedup — "one pending probe per root".** The queue never dedups in general (every
+submission is enqueued — §3 guarantee 1). A **narrow, probe-only** exception in `JobQueue.submit`
+(`_dedup_probe`): if an un-started `probe` job for the same `root_id` is already `status='queued'`,
+skip the insert and return that job's id. Match `queued` only — **not** a *running* probe (a fresh
+queued one after it is legitimate; files may have arrived after it started). This bounds the "100
+roots" backlog: a root whose probe from yesterday is still `queued` (worker backed up) gets a no-op
+today. Scan/dedup/merge still enqueue freely.
+
+**Result / CLI / API.** `result_json`: `{op:"probe", new_count, root_offline, candidates}` for the
+§12 job card. `packrat probe <root>`/`--all`/`--detach`/`--json`, `client.submit_probe` (returns a
+list of job ids), `POST /probe` (does the `--all` fan-out to per-root submissions). §1.6 parity
+holds: probe is a first-class CLI verb; the TUI only *reflects* its result in the dot, and the
+user's manual equivalent is `[s]` scan.
+
+---
+
 ### B. Dedup a single registered folder
 
 `dedup` **targets one registered folder** (root) at a time and stages its removable duplicates
@@ -1881,7 +1975,7 @@ one half, only the other half is `new` and copies — no special pairing logic i
 | Video              | ffmpeg / **PyAV** (frame sampling), ffprobe (metadata) |
 | Metadata           | exiftool via pyexiftool |
 | Embeddings (opt-in) | torch (CUDA) + open_clip — only on `scan --embed` (§7); OCR (PaddleOCR/Tesseract) is speculative/TBD |
-| Scheduling         | APScheduler (in daemon) |
+| Scheduling         | **APScheduler** (`BackgroundScheduler`, in daemon) — a **core dep** (pure-Python, no wheel risk); realized by `jobs/scheduler.py`'s `PeriodicScheduler` + `PeriodicTask` registry (§3), first client `probe` (§8 A2b) |
 | Job cancellation   | cooperative — jobs poll a cancel flag at their existing checkpoints |
 | Locking            | in-daemon single-worker queue (mutating ops); `review_runs` row (per-root review) |
 | Optional watch     | watchdog (real-time; not required for v1) |
@@ -2017,6 +2111,12 @@ scan_workers = 6       # concurrent hashing/decoding streams over SMB (§10.1); 
 
 [audit]
 retention_days = 0     # 0 = keep review audits forever (§8.1); >0 = prune older (deferred knob, §14 #5)
+
+[schedule]
+# Background periodic jobs (§3 scheduler / §8 A2b probe). Interval edits apply on the NEXT
+# daemon restart (a background cadence, so no live reload in v1).
+probe_interval_hours = 24     # run a probe sweep (one probe per enabled library root) every N hours
+probe_enabled        = true   # off-switch for the scheduled probe (probe stays a manual CLI verb)
 ```
 
 > **Defaults marked tuning-dependent** (`t_photo_recompress`, `t_photo_edit`, `t_match_video`, the
@@ -2124,13 +2224,16 @@ Mapping this onto packrat's operations:
 
 ## 11. CLI surface (complete command reference)
 
-Adding a folder is two commands (`roots register` then `scan`); `dedup` de-duplicates one folder via
-Explorer shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot);
-trash is handled by `cleanup`, `trash refresh`, and `untrash` (§6). `status` (read-only) and `jobs`
+Adding a folder is two commands (`roots register` then `scan`); `probe` cheaply checks whether a root
+has unscanned files (no fingerprinting, §8 A2b); `dedup` de-duplicates one folder via Explorer
+shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot); trash is
+handled by `cleanup`, `trash refresh`, and `untrash` (§6). `status` (read-only) and `jobs`
 (list / cancel / prioritize the work queue) surface runtime state; `daemon` manages the background
-process. (Per design tenet §1.6, every command here is also reachable from the TUI, §12.)
+process. (Per design tenet §1.6, every command here is also reachable from the TUI — except `probe`,
+which is background-only: the TUI *reflects* its result in the status dot rather than exposing a
+keyshortcut, §12.)
 
-**Shared client semantics** (all job-submitting commands — `scan`, `dedup`, `merge`, `cleanup`,
+**Shared client semantics** (all job-submitting commands — `scan`, `probe`, `dedup`, `merge`, `cleanup`,
 `trash refresh`, `untrash`, `scan --embed`): each **submits a job to the daemon** and streams its progress.
 - **Ctrl-C detaches the view; the job keeps running in the daemon.** Re-attach or stop it via the
   `packrat` TUI, or from another terminal.
@@ -2151,7 +2254,7 @@ process. (Per design tenet §1.6, every command here is also reachable from the 
 - `packrat` with **no arguments** opens the TUI (logo, stats, live/recent jobs, operation menu).
 
 **Root argument resolution — path vs. `--name` handle.** Commands that take a registered root
-(`scan`, `dedup`, `cleanup`, and `merge --into`) accept **either** a filesystem path **or** a
+(`scan`, `probe`, `dedup`, `cleanup`, and `merge --into`) accept **either** a filesystem path **or** a
 root's `--name` handle. Resolution is unambiguous and order-independent:
 1. If the argument, canonicalized as a path (§8 A1 step 1), exactly matches a root's stored `path`
    → that root.
@@ -2242,6 +2345,30 @@ in-flight merge — but a manual `scan <root>` is **enqueued and held** (shown `
 confirm/cancel to unblock`), then runs automatically once you confirm/cancel the review (or the
 merge finishes). It is no longer rejected at submit. A `--all`/scheduled scan owns no single root, so
 it skips a held root and logs it rather than parking the whole sweep.
+```
+
+### `packrat probe`
+Walk a registered library root and **count new/changed files without fingerprinting** (§8 A2b) —
+scan's cheap *discovery* half. No BLAKE3/decode/PDQ and no catalog writes beyond a per-root "new
+files waiting" signal (`roots.probe_new_count`) the TUI surfaces as a 4-state status dot (§12). Runs
+automatically every 24 h per root via the scheduler (§3); this verb triggers one now.
+
+```
+packrat probe [<path>] [options]
+
+Arguments
+  <path>                 A registered library root to probe. Omit with --all.
+
+Options
+  --all                  Probe every enabled library root (one probe job each; trash roots skipped).
+  --detach               Submit and return without streaming (see shared client semantics).
+  --json                 Machine-readable result (the submitted job id(s)).
+
+Exit: for a single root, streams the probe and prints the new/changed count; for --all, submits N
+per-root jobs and returns (`packrat status` shows each root's result). Owns its root like scan, so a
+probe on an under-review root is enqueued and held until the holder clears; the queue keeps at most
+one *queued* probe per root (submit-dedup), so the 24 h sweep re-firing before the last batch drained
+is a no-op for any root still waiting. Never fingerprints — press `[s]`/`packrat scan` to do that.
 ```
 
 ### `packrat dedup`
@@ -2585,15 +2712,16 @@ sample dataset (no daemon) for demoing/development.
 
 - **Dashboard** (default): three stacked full-width sections — the packrat logo + live "N assets
   hoarded" line beside the **Collection** stats box (total/photo/video/trashed + **lifetime deduped**,
-  the total files removed across all dedup runs); the **Roots** box (name, path, `◉/◐/○` freshness dot,
-  asset count, **total size on disk**); and the **Queue** box (the
+  the total files removed across all dedup runs); the **Roots** box (name, path, a **4-state
+  freshness dot** [see below], asset count, **total size on disk**); and the **Queue** box (the
   running job's live bar + the queued backlog preview). `[r]`/`[q]` focus the Roots/Queue box (heavy
   accent-colored frame + `▸` cursor); pressing the same key again **maximizes** into the full Roots /
   Queue interface.
 - **Roots interface** (maximized): the full root list with a `[s]` **sort cycle** (recent /
   most-assets / photos / videos, client-side over the id-ascending snapshot), `[a]` **add-root form**
   (§2.2 register flow — Tab between fields, radios/checkboxes, paste-aware path input), `[Enter]` opens
-  root detail. Dot legend + `page i/N` share the header line. **Trash-root exception:** a `kind='trash'`
+  root detail. The **4-state dot legend** (`◉ deduped · ◉ need dedup · ◐ new files probed · ○ never`)
+  + `page i/N` share the header line. **Trash-root exception:** a `kind='trash'`
   root has **no detail screen** (detail is scan/dedup/merge/cleanup — all library-only), so `[Enter]`
   on one instead opens a **confirm modal** (the packrat mascot clutching a trash can) asking to absorb +
   empty that folder; confirming issues `packrat trash refresh <root>` (§6.1). Same guard from either
@@ -2628,7 +2756,26 @@ sample dataset (no daemon) for demoing/development.
   a running job shows the live SSE bar and swaps to its terminal card on completion; error/interrupted
   render from `status` + `error` (NULL `result_json` tolerated). A **scan** card also lists its
   undecodable/read-error **problem files** (paths + reasons, from `scan_problem_files`) in a fixed-height
-  `↑/↓`-scrollable section below the count summary.
+  `↑/↓`-scrollable section below the count summary. A **probe** card shows its `new_count` (files awaiting
+  a scan) or the offline notice.
+
+**The 4-state freshness dot (a color signal, not just a shape).** Each library root shows one dot;
+**color, not just shape, carries the meaning** — `◉` is drawn **both green and yellow**. Driven by
+`roots.probe_new_count` (§8 A2b) + the scan/dedup timestamps, resolved in this precedence order
+(`tui/tokens.status_dot`, a pure `(glyph, role)` function):
+1. **`probe_new_count > 0`** → **`◐` grey** — a probe found unscanned files waiting. **Outranks every
+   other state, including `never`**: a freshly-registered root whose first probe finds files shows ◐,
+   not ○.
+2. **no `last_scan_at`** → **`○` grey** — never scanned.
+3. **`last_dedup_at > last_scan_at`** → **`◉` green** — deduped *after* the latest scan (recency-relative:
+   a scan after the last dedup drops it to yellow — a timestamp comparison, not a truthiness check).
+4. **else (scanned)** → **`◉` yellow** — scanned, not (re-)deduped since.
+A completed `scan` zeroes `probe_new_count`, so a scan-latest root skips rung 1; a **found-nothing probe
+(count 0) is inherently a dot no-op** — it skips rung 1 and falls through to the scan/dedup rungs, which
+a probe never writes (never→never, green→green, yellow→yellow). *(Rendering note: the runtime colorizer
+derives color from the glyph, so `◉`'s two colors are applied by a small post-pass — `colorize.recolor_root_dots`
+recolors each root row's dot to its true role, and `recolor_dot_legend` fixes the legend's two `◉`; the
+plain/golden frames stay colorless, the role is asserted via the row `Cell`.)*
 
 ### 12.2 Architecture (how it's built)
 
@@ -2713,7 +2860,8 @@ Keyword list (English + Chinese) and the pure helpers (`mask_text` / `sensitive_
 
 **Status: v1 (M0–M6) is DONE.** ✅ The complete register/scan/dedup/trash/merge workflow plus the
 TUI — everything needed to hoard, dedup, and merge a real collection through Explorer — is
-implemented. **M7 (semantic embeddings) and M8 (hardening) remain post-v1** and are not yet built.
+implemented. **M6.5 (probe + periodic scheduler + 4-state dot) also landed** post-v1. **M7
+(semantic embeddings) and M8 (hardening) remain** and are not yet built.
 
 **What "v1" means (resolves the scope ambiguity):** **v1 = M0–M6**. The "**(v1)**" qualifiers
 elsewhere (non-goals §1, the schema's deferred knobs §4) refer to this scope. **M7 (semantic
@@ -2768,11 +2916,19 @@ function.
   every action submitting a real daemon call (§1.6). The default entrypoint and a live window onto
   daemon jobs from any terminal; `--offline` renders bundled sample data. Pure presentation over the
   M0 runtime's durable **queue** + per-job **`root_id`/`result_json`** columns (§3/§4).
+- ✅ **M6.5 — Probe + periodic scheduler**: the `probe` job (§8 A2b — cheap discovery: count
+  new/changed files without fingerprinting; owns its root; one-pending-per-root submit-dedup;
+  `packrat probe`/`--all`, `POST /probe`), the **general periodic scheduler** it realizes
+  (`jobs/scheduler.py` — APScheduler `BackgroundScheduler` + a declarative `PeriodicTask` registry,
+  in-memory jobstore, wired into the daemon lifespan; `probe-all` its first task, every 24 h), and
+  the **4-state status dot** it drives (§12 — `◉` green deduped / `◉` yellow need-dedup / `◐` grey
+  new-files-probed / `○` grey never; `roots.last_probe_at`/`probe_new_count`). This realizes §3's
+  "Scheduler (APScheduler)" line ahead of M8's scheduled *scans*, and adds APScheduler as a core dep.
 - **M7 — Semantic embeddings**: opt-in `scan --embed` CLIP pass writing the `embeddings` table;
   brute-force cosine search scaffold. Tagging/classification behavior on top is **TBD** (§7).
-- **M8 — Hardening**: scheduled interval-scan triggers (APScheduler wiring in the daemon),
-  DB backup, resumability polish, larger-scale perf (hnswlib), SMB tuning (§10.1), optional
-  watchdog real-time mode.
+- **M8 — Hardening**: scheduled interval-scan triggers (**the scheduler now exists — M6.5**; M8
+  adds a `full-scan-all` `PeriodicTask` on it), DB backup, resumability polish, larger-scale perf
+  (hnswlib), SMB tuning (§10.1), optional watchdog real-time mode.
 
 ---
 

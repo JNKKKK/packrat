@@ -78,8 +78,9 @@ def test_roots_max_structural():
     rows = built.split("\n")
     assert len(rows) == 24 and all(len(r) == 100 for r in rows)
     assert "[S]ort: most recent registered" in built
-    # legend + paginator share the line directly under the sort header
-    legend_line = next(ln for ln in rows if "scanned + deduped" in ln)
+    # legend + paginator share the line directly under the sort header (4-state dot).
+    legend_line = next(ln for ln in rows if "new files probed" in ln)
+    assert "deduped" in legend_line and "need dedup" in legend_line
     assert "page 1/1" in legend_line
     # Each root row carries its total on-disk size (item 3); trash shows "—".
     assert "477 GB" in built and "138 GB" in built

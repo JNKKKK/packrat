@@ -156,8 +156,23 @@ NAME_W = 24
 
 
 def root_dot(r: dict) -> str:
-    """The ◉/◐/○ (or blank for trash) freshness dot for a root row."""
-    return tokens.status_dot(r["kind"], r.get("last_scan_at"), r.get("last_dedup_at"))
+    """The freshness-dot GLYPH for a root row (◉/◐/○, or blank for trash).
+
+    Thin accessor over :func:`root_dot_pair` for callers that only need the glyph (e.g.
+    the maximized-Roots trash branch). Prefer :func:`root_dot_pair` where the color role
+    is also needed (a row cell), since ``◉`` is both green and yellow (§12)."""
+    return root_dot_pair(r)[0]
+
+
+def root_dot_pair(r: dict) -> tuple[str, str]:
+    """The freshness dot as ``(glyph, role)`` (§12 4-state ladder — TODO Part C).
+
+    Reads ``probe_new_count`` + ``last_scan_at`` + ``last_dedup_at`` off the query row
+    and delegates to :func:`tokens.status_dot`. The role is what a row Cell carries (so
+    the theme colorizes ◉ green vs. yellow correctly), NOT a glyph the colorizer guesses."""
+    return tokens.status_dot(
+        r["kind"], r.get("probe_new_count"), r.get("last_scan_at"), r.get("last_dedup_at")
+    )
 
 
 def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str:
@@ -168,7 +183,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str
     width. Trash roots show ``(trash)`` in the count column and no dot.
     """
     cur = CURSOR if selected else " "
-    dot = root_dot(r)
+    dot, dot_role = root_dot_pair(r)
     count = "(trash)" if r["kind"] == "trash" else f"{r['asset_count']:,}"
     size = "—" if r["kind"] == "trash" else fmt_size(r.get("size_bytes"))
     return row(
@@ -177,7 +192,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str
             Cell(cur, width=1, style="highlighted" if selected else None),
             Cell(r["name"], width=NAME_W),
             Cell(r["path"], grow=1, elide="middle"),   # absorbs the middle
-            Cell(dot, width=1, style=_dot_style(dot)),
+            Cell(dot, width=1, style=dot_role),
             Cell(count, width=7, align="right", style="dim" if r["kind"] == "trash" else None),
             Cell(size, width=9, align="right", style="dim"),   # total size on disk
         ],
@@ -194,7 +209,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
     the count and ``—`` recency.
     """
     cur = CURSOR if selected else " "
-    dot = root_dot(r)
+    dot, dot_role = root_dot_pair(r)
     size = "—" if r["kind"] == "trash" else fmt_size(r.get("size_bytes"))
     if r["kind"] == "trash":
         count, recency = "(trash)", "—"
@@ -202,14 +217,8 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
         count_cell = Cell(count, width=8, align="right", style="dim")
     else:
         count = f"{r['asset_count']:,}"
-        dd = r.get("last_dedup_at")
-        if not dd:
-            recency = "never deduped"
-        elif same_day(dd, now):
-            recency = "deduped today"
-        else:
-            recency = f"deduped {reltime(dd, now)}"
-        dot_cell = Cell(dot, width=1, style=_dot_style(dot))
+        recency = _dedup_recency(r, now)
+        dot_cell = Cell(dot, width=1, style=dot_role)
         count_cell = Cell(count, width=8, align="right")
     return row(
         width,
@@ -225,12 +234,17 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
     ).rstrip()
 
 
-def _dot_style(dot: str) -> str | None:
-    if dot == tokens.DOT_DEDUPED:
-        return "success"
-    if dot == tokens.DOT_SCANNED:
-        return "warn"
-    return None
+def _dedup_recency(r: dict, now: str) -> str:
+    """The right-column dedup-recency label for a maximized Roots row (§2.1).
+
+    ``deduped today`` / ``deduped <ago>`` / ``never deduped`` off ``last_dedup_at`` —
+    unchanged from the inline logic it replaced; extracted so the row builder stays flat."""
+    dd = r.get("last_dedup_at")
+    if not dd:
+        return "never deduped"
+    if same_day(dd, now):
+        return "deduped today"
+    return f"deduped {reltime(dd, now)}"
 
 
 # --- [s] sort cycle (§2 Roots interface) -----------------------------------

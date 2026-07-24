@@ -166,8 +166,10 @@ def roots_snapshot() -> list[dict]:
     on every present file (§8 A2 step 4/9), so it answers "when was this root last
     scanned" without a schema column. ``last_dedup_at`` is the newest *successful*
     dedup (the same all-stages-or-already-clean ``completed`` rule as ``root_detail``
-    / §11, via :func:`_last_completed_at`) — it drives the M6 ◉/◐/○ status dot
-    (``last_scan_at`` + ``last_dedup_at`` → deduped / scanned-only / never).
+    / §11, via :func:`_last_completed_at`). ``last_probe_at`` + ``probe_new_count`` are
+    the probe signal (§8 A2b). Together these drive the M6 4-state status dot (§12):
+    ``probe_new_count`` (>0 → ◐ new-files, outranks all) + ``last_scan_at`` +
+    ``last_dedup_at`` (dedup>scan → ◉ green, else ◉ yellow, else ○ never).
 
     Order is ``r.id`` ascending (registration order) — unchanged, since this also
     backs ``packrat status``/``roots list``; the TUI sorts client-side over the
@@ -177,6 +179,7 @@ def roots_snapshot() -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT r.id, r.name, r.path, r.kind, r.enabled, r.last_full_scan_at, "
+            "  r.last_probe_at, r.probe_new_count, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
             "   WHERE fi.root_id = r.id) AS asset_count, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
@@ -300,6 +303,10 @@ def root_detail(root_arg: str) -> dict | None:
         return {
             "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
             "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
+            # Probe signal (§8 A2b): last_probe_at (recency) + probe_new_count (the dot
+            # driver — >0 means unscanned files await a scan; §12 rung 1).
+            "last_probe_at": match["last_probe_at"],
+            "probe_new_count": match["probe_new_count"],
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
             "size_bytes": size_bytes,             # total on-disk bytes of this root's files

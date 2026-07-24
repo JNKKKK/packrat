@@ -166,6 +166,19 @@ class AuditConfig:
 
 
 @dataclass(frozen=True)
+class ScheduleConfig:
+    """Periodic-scheduler cadence (§3 / §8 A2b). Read when the scheduler arms its jobs
+    at daemon start; an interval edit applies on the next daemon restart (a background
+    cadence, so no live reload needed in v1)."""
+
+    #: run a ``probe`` sweep every N hours (fan-out: one ``probe <root>`` per enabled
+    #: library root, deduped to one-per-root by the queue). Default 24 h (§8 A2b).
+    probe_interval_hours: float = 24.0
+    #: master off-switch for the scheduled probe sweep (probe stays a manual CLI verb).
+    probe_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     allowlist: AllowlistConfig = field(default_factory=AllowlistConfig)
     fastpath: FastpathConfig = field(default_factory=FastpathConfig)
@@ -174,6 +187,7 @@ class Config:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     smb: SmbConfig = field(default_factory=SmbConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +246,11 @@ photo_buffer_max_bytes    = 134217728   # photos above this bypass buffering (st
 
 [audit]
 retention_days = 0     # 0 = keep review audits forever; >0 = prune older (deferred knob)
+
+[schedule]
+# Background periodic jobs (§3 scheduler). Interval edits apply on the next daemon restart.
+probe_interval_hours = 24     # run a probe sweep (one probe per enabled library root) every N hours
+probe_enabled        = true   # off-switch for the scheduled probe (probe stays a manual CLI verb)
 """
 
 

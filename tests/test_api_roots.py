@@ -95,3 +95,49 @@ def test_status_root_detail(client, tiny_photos):
     d = client.get("/status?root=Pics", headers=_h()).json()["root_detail"]
     assert d["name"] == "Pics"
     assert d["photos"] == 2
+
+
+# --- POST /probe (§8 A2b) ---------------------------------------------------
+def test_probe_by_name(client, tiny_photos):
+    client.post("/roots", json={"path": str(tiny_photos), "name": "Pics"}, headers=_h())
+    r = client.post("/probe", json={"root": "Pics"}, headers=_h())
+    assert r.status_code == 200
+    ids = r.json()["job_ids"]
+    assert len(ids) == 1
+    d = _wait(client, ids[0])
+    assert d["status"] == "done"
+    # The completed probe recorded a signal on the root (3 media files, never scanned).
+    det = client.get("/status?root=Pics", headers=_h()).json()["root_detail"]
+    assert det["probe_new_count"] == 3
+
+
+def test_probe_all_fans_out_per_library_root(client, tmp_path):
+    for n in ("A", "B"):
+        p = tmp_path / n
+        p.mkdir()
+        client.post("/roots", json={"path": str(p), "name": n}, headers=_h())
+    # A trash root must be excluded from the --all fan-out (§6.1).
+    trash = tmp_path / "T"
+    trash.mkdir()
+    client.post("/roots", json={"path": str(trash), "name": "T", "kind": "trash"}, headers=_h())
+    r = client.post("/probe", json={"all": True}, headers=_h())
+    assert r.status_code == 200
+    assert len(r.json()["job_ids"]) == 2   # A + B, not the trash root
+
+
+def test_probe_unknown_root_404(client):
+    r = client.post("/probe", json={"root": "ghost"}, headers=_h())
+    assert r.status_code == 404
+
+
+def test_probe_trash_root_rejected_400(client, tmp_path):
+    trash = tmp_path / "trash"
+    trash.mkdir()
+    client.post("/roots", json={"path": str(trash), "name": "Bin", "kind": "trash"}, headers=_h())
+    r = client.post("/probe", json={"root": "Bin"}, headers=_h())
+    assert r.status_code == 400
+
+
+def test_probe_needs_root_or_all_400(client):
+    r = client.post("/probe", json={}, headers=_h())
+    assert r.status_code == 400

@@ -14,7 +14,7 @@ from ..framing import box, hjoin
 from ..geometry import REFERENCE, Geometry
 from ..layout import fit
 
-DOTKEY = "  ◉ deduped   ◐ scanned only   ○ never"
+DOTKEY = "  ◉ deduped   ◉ need dedup   ◐ new files   ○ never"
 
 
 def dashboard_body(

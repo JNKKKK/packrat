@@ -97,14 +97,24 @@ _ROOT_SPECS = [
 ]
 
 
+# Roots (by id) where a probe found unscanned files → ◐ grey "new files probed" (§12
+# 4-state dot). {id: new_count}; every other library root probed clean (count 0). Picked
+# to span the cases: a scanned+deduped root (13 Screenshots) that got new drops, and a
+# never-scanned root (8 Scans) whose first probe found files (◐, NOT ○ — outranks never).
+_PROBE_NEW = {13: 128, 8: 640, 23: 54}
+
+
 def _root(spec) -> dict:
     rid, name, path, kind, photos, videos, scan, dedup, full = spec
     # Synthesize a plausible on-disk size (~4 MB/photo, ~60 MB/video) so the demo's
     # size column shows varied realistic values; trash roots are empty.
     size_bytes = 0 if kind == "trash" else photos * 4_000_000 + videos * 60_000_000
+    probe_new = 0 if kind == "trash" else _PROBE_NEW.get(rid, 0)
     return {
         "id": rid, "name": name, "path": path, "kind": kind, "enabled": 1,
         "last_full_scan_at": full,
+        "last_probe_at": None if kind == "trash" else "2026-07-15T12:45:00",
+        "probe_new_count": probe_new,
         "asset_count": photos + videos, "photos": photos, "videos": videos,
         "instance_count": photos + videos, "size_bytes": size_bytes,
         "last_scan_at": scan, "last_dedup_at": dedup,
@@ -373,6 +383,7 @@ def root_detail(name: str) -> dict | None:
     return {
         "id": r["id"], "name": r["name"], "path": r["path"], "kind": r["kind"],
         "enabled": 1, "last_full_scan_at": r["last_full_scan_at"],
+        "last_probe_at": r.get("last_probe_at"), "probe_new_count": r.get("probe_new_count", 0),
         "last_scan_at": r["last_scan_at"],
         "photos": r["photos"], "videos": r["videos"], "instances": r["instance_count"],
         "size_bytes": r["size_bytes"],

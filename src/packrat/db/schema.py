@@ -38,7 +38,14 @@ CREATE TABLE IF NOT EXISTS roots (
     kind               TEXT NOT NULL CHECK (kind IN ('library', 'trash')),
     enabled            INTEGER NOT NULL DEFAULT 1,
     ignore_globs       TEXT,                 -- JSON array of per-root --ignore patterns
-    last_full_scan_at  TEXT
+    last_full_scan_at  TEXT,
+    last_probe_at      TEXT,                 -- when `probe` last completed on this root (§8 A2b)
+    probe_new_count    INTEGER NOT NULL DEFAULT 0
+    -- new/changed files probe last saw awaiting a scan. Set by a completed probe; CLEARED
+    -- to 0 by a completed scan of the root. This ONE field carries the whole dot-precedence
+    -- signal (§12): because a completed scan always resets it to 0, `count > 0` means exactly
+    -- "a probe found unscanned files and no scan has consumed them yet" — no separate
+    -- `last_activity` column is needed. Offline probe writes nothing (never reads as "clean").
 );
 
 -- ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from .. import render
 from ..geometry import REFERENCE, Geometry
 from ..layout import Cell, fit, row
 
-DOTKEY_WIDE = "◉ scanned + deduped   ◐ scanned only   ○ never scanned"
+DOTKEY_WIDE = "◉ deduped   ◉ need dedup   ◐ new files probed   ○ never scanned"
 
 
 def roots_body(roots: list[dict], *, now: str, geo: Geometry = REFERENCE,

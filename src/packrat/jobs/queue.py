@@ -104,9 +104,39 @@ class JobQueue:
             raise ValueError(f"unknown job type: {job_type}")
 
         with self._lock:
+            existing = self._dedup_probe(job_type, params)
+            if existing is not None:
+                # A queued probe for this root already waits — coalesce (§8 A2b). No pump
+                # needed: the existing job is already in the backlog and will run.
+                return existing
             job_id = self._create_job_row(job_type, params)
         self._pump()
         return job_id
+
+    def _dedup_probe(self, job_type: str, params: dict) -> int | None:
+        """Submit-time dedup — **probe-only** "one pending probe per root" (§8 A2b).
+
+        The queue never dedups in general (every submission is enqueued — §3 guarantee 1);
+        this is a narrow, documented exception for ``probe``. If an un-started ``probe``
+        job for the **same ``root_id``** is already ``status='queued'``, skip the insert
+        and return that job's id — so the 24 h scheduler re-firing before yesterday's
+        batch drained is a no-op for any root that still has a probe waiting, which is
+        what bounds the "100 roots → 100 jobs" backlog. Match ``queued`` only, NOT a
+        *running* probe (a fresh queued one after it is legitimate — files may have
+        arrived after it started). Every other job type enqueues freely (a second scan
+        behind a first is intentional). Caller holds ``self._lock``.
+        """
+        if job_type != "probe":
+            return None
+        root_id = params.get("root_id")
+        if root_id is None:
+            return None
+        row = self.db.query_one(
+            "SELECT id FROM jobs WHERE type='probe' AND status='queued' AND root_id=? "
+            "ORDER BY id LIMIT 1",
+            (root_id,),
+        )
+        return int(row["id"]) if row is not None else None
 
     def _create_job_row(self, job_type: str, params: dict) -> int:
         # root_id is the root the job *concerns* (for the per-root history/TUI, §12) —

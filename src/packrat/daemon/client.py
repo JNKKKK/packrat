@@ -156,6 +156,20 @@ class DaemonClient:
              "dry_run": dry_run, "profile": profile},
         )["job_id"])
 
+    def submit_probe(
+        self, root: str | None = None, *, all_roots: bool = False
+    ) -> list[int]:
+        """Submit a probe job (§8 A2b); returns the per-root job id(s) (always enqueued).
+
+        A single ``root`` (path/--name) probes that one root; ``--all`` fans out to one
+        ``probe <root>`` per enabled library root (the daemon does the fan-out). The
+        queue's submit-dedup coalesces a re-fire to a still-queued probe, so a returned
+        id may repeat. A non-library / unknown root comes back as HTTP 400/404 →
+        :class:`DaemonError`."""
+        return list(self._post(
+            "/probe", {"root": root, "all": all_roots}
+        )["job_ids"])
+
     def submit_dedup(
         self,
         folder: str,

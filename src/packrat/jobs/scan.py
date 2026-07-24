@@ -223,6 +223,52 @@ def _asset_fully_fingerprinted(undecodable: int, media_type: str, has_phash: int
     return bool(has_phash)
 
 
+def load_existing_instances(db, root_id: int, profiler=NULL_PROFILER) -> dict[str, dict]:
+    """Preload a root's ``file_instances`` + their assets' fingerprint-completeness.
+
+    Returns a dict keyed by ``normcase(path)`` — the in-memory fast-path lookup table
+    (§8 A2 step 4), so neither scan nor probe pays a per-file DB round-trip. Each value
+    carries ``fid``/``path``/``size``/``mtime``/``asset_id`` plus
+    ``undecodable``/``media_type``/``has_phash``/``has_vphash`` so :func:`is_fastpath_hit`
+    can apply the "fully fingerprinted" test. **Shared** by ``scan`` (skip
+    re-fingerprinting) and ``probe`` (count new/changed) so the two can never drift.
+    """
+    existing: dict[str, dict] = {}
+    with profiler.timer("shared", "db"):
+        rows = db.query(
+            "SELECT fi.id fid, fi.path, fi.size, fi.mtime, fi.asset_id, "
+            "a.undecodable, a.media_type, "
+            "EXISTS(SELECT 1 FROM phash p WHERE p.asset_id=a.id) has_phash, "
+            "EXISTS(SELECT 1 FROM vphash v WHERE v.asset_id=a.id) has_vphash "
+            "FROM file_instances fi JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=?",
+            (root_id,),
+        )
+    for r in rows:
+        existing[os.path.normcase(r["path"])] = dict(r)
+    return existing
+
+
+def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
+    """True if ``cand`` matches a *known, unchanged, fully-fingerprinted* instance (§8 A2 step 4).
+
+    ``rec`` is a :func:`load_existing_instances` row (``None`` → no known instance at this
+    path → not a hit). "Unchanged" = exact ``size`` + ``mtime`` within ``tol``; the asset
+    must also be fully fingerprinted (:func:`_asset_fully_fingerprinted`). This is the ONE
+    skip predicate: ``scan`` uses it to skip re-fingerprinting (behind its ``--full``
+    bypass), and ``probe`` uses its negation to decide *new/changed*, so "probe says N" ⇒
+    "scan would fingerprint ≥ N" holds by construction — no second copy of the rule.
+    """
+    return (
+        rec is not None
+        and rec["size"] == cand.size
+        and rec["mtime"] is not None
+        and abs(rec["mtime"] - cand.mtime) <= tol
+        and _asset_fully_fingerprinted(
+            rec["undecodable"], rec["media_type"], rec["has_phash"], rec["has_vphash"]
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # persistence helpers (all idempotent — safe under the parallel workers)
 # ---------------------------------------------------------------------------
@@ -457,18 +503,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     }
 
     # Preload existing instances for the root → in-memory fast-path (no per-file DB read).
-    existing: dict[str, dict] = {}
-    with profiler.timer("shared", "db"):
-        rows = db.query(
-            "SELECT fi.id fid, fi.path, fi.size, fi.mtime, fi.asset_id, "
-            "a.undecodable, a.media_type, "
-            "EXISTS(SELECT 1 FROM phash p WHERE p.asset_id=a.id) has_phash, "
-            "EXISTS(SELECT 1 FROM vphash v WHERE v.asset_id=a.id) has_vphash "
-            "FROM file_instances fi JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=?",
-            (root_id,),
-        )
-    for r in rows:
-        existing[os.path.normcase(r["path"])] = dict(r)
+    existing = load_existing_instances(db, root_id, profiler)
 
     seen_fids: set[int] = set()
     to_process: list[Candidate] = []
@@ -477,16 +512,9 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
 
     for cand in en.candidates:
         rec = existing.get(os.path.normcase(cand.path))
-        if (
-            not full
-            and rec is not None
-            and rec["size"] == cand.size
-            and rec["mtime"] is not None
-            and abs(rec["mtime"] - cand.mtime) <= tol
-            and _asset_fully_fingerprinted(
-                rec["undecodable"], rec["media_type"], rec["has_phash"], rec["has_vphash"]
-            )
-        ):
+        # The shared skip predicate (`is_fastpath_hit`) is the SAME one probe reads —
+        # scan skips a hit (behind --full), probe counts a miss as new/changed.
+        if not full and is_fastpath_hit(rec, cand, tol):
             seen_fids.add(rec["fid"])
             fastpath_fids.append(rec["fid"])
             report["skipped_fastpath"] += 1
@@ -781,8 +809,24 @@ def _run_scan(ctx: JobContext) -> None:
         rep, done = _scan_one_root(ctx, root_row, en, full=full, dry_run=dry_run,
                                    seen_at=seen_at, done=done, profiler=profiler,
                                    collector=collector)
-        if not dry_run and full:
-            db.execute("UPDATE roots SET last_full_scan_at=? WHERE id=?", (seen_at, root_row["id"]))
+        # Post-scan roots writes — only for a completed scan of a REACHABLE root. Dry-run
+        # returns above; an interrupted/failed scan raises out of _scan_one_root before
+        # here, so it writes nothing. An OFFLINE root is skipped: an unreachable pass
+        # fingerprinted nothing and ran no deletion-detection (§8 A2 step 11 / §10.1), so it
+        # must not read as "full-scanned" or "clean" — the same reason probe writes nothing
+        # offline (§8 A2b). (Before the offline guard, `--full` stamped last_full_scan_at on
+        # a root whose enumeration failed, recording a full scan that never happened.)
+        if not dry_run and not rep.get("root_offline"):
+            if full:
+                # --full: stamp the integrity-pass timestamp AND consume the probe signal.
+                db.execute(
+                    "UPDATE roots SET last_full_scan_at=?, probe_new_count=0 WHERE id=?",
+                    (seen_at, root_row["id"]),
+                )
+            else:
+                # Incremental: just consume the probe signal (the news are now fingerprinted,
+                # so the §12 dot moves off "new files probed" onto its scan/dedup rungs).
+                db.execute("UPDATE roots SET probe_new_count=0 WHERE id=?", (root_row["id"],))
         reports.append(rep)
 
     # Persist the scan result (per (job, root)) + problem files so `status <root>`

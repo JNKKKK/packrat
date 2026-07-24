@@ -48,6 +48,7 @@ log = logging.getLogger("packrat.daemon")
 
 # Import job type modules for their register_job() side effects.
 from ..jobs import scan as _scan  # noqa: E402,F401
+from ..jobs import probe as _probe  # noqa: E402,F401
 from ..jobs import dedup as _dedup  # noqa: E402,F401
 from ..jobs import cleanup as _cleanup  # noqa: E402,F401
 from ..jobs import merge as _merge  # noqa: E402,F401
@@ -130,10 +131,19 @@ def build_app(token: str, *, db_file=None, config_path=None):
     reconcile_on_startup(database)
     queue.pump()
 
+    # The periodic-job scheduler (§3, now realized — §8 A2b probe is its first client).
+    # Constructed right after the queue + reconcile; started/stopped in the lifespan
+    # hooks below, symmetric with the queue. It is just another queue *client* (its jobs
+    # only enqueue), so §3's single-worker invariant is untouched.
+    from ..jobs.scheduler import PeriodicScheduler
+
+    scheduler = PeriodicScheduler(queue, database, _load_config())
+
     app = FastAPI(title="packrat daemon", version=__version__)
     app.state.token = token
     app.state.db = database
     app.state.queue = queue
+    app.state.scheduler = scheduler
     app.state.started_at = now_iso()
 
     def require_token(authorization: str | None = Header(default=None)):
@@ -323,6 +333,29 @@ def build_app(token: str, *, db_file=None, config_path=None):
             row = _resolve_root_or_400(database, arg, require_kind="library", verb="scan")
             params["root_id"] = row["id"]
         return {"job_id": queue.submit("scan", params)}
+
+    @app.post("/probe", dependencies=[Depends(require_token)])
+    def submit_probe(body: dict):
+        """Resolve a root arg (path/--name) + submit a probe job, or fan out for --all (§8 A2b).
+
+        A single ``<root>`` submits one ``probe`` job (owns its root, dequeue-gated like
+        ``scan``). ``--all`` expands here to one ``probe <root>`` per enabled **library**
+        root — the per-root policy (§8 A2b decision #2), NOT a single root-less sweep — so
+        each gets its own queue entry + gate; the queue's submit-dedup caps the backlog at
+        one queued probe per root. Returns ``{job_ids: [...]}`` (the per-root job ids;
+        deduped ids may repeat a still-queued probe). A trash root is rejected (400).
+        """
+        if bool(body.get("all")):
+            rows = database.query(
+                "SELECT id FROM roots WHERE enabled=1 AND kind='library' ORDER BY id"
+            )
+            job_ids = [queue.submit("probe", {"root_id": r["id"]}) for r in rows]
+            return {"job_ids": job_ids}
+        arg = body.get("root")
+        if not arg:
+            raise HTTPException(status_code=400, detail="probe needs a <root> or --all")
+        row = _resolve_root_or_400(database, arg, require_kind="library", verb="probe")
+        return {"job_ids": [queue.submit("probe", {"root_id": row["id"]})]}
 
     @app.post("/dedup", dependencies=[Depends(require_token)])
     def submit_dedup(body: dict):
@@ -548,11 +581,17 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
         def _on_start():
             token_mod.write_token(token, paths.token_path())
             current_state().write()
+            # Arm the periodic scheduler (§3) — its BackgroundScheduler thread starts
+            # here, symmetric with the queue; a fired task only submits jobs.
+            app.state.scheduler.start()
             log.info("packrat daemon up on %s:%d (pid=%d)", HOST, port, current_state().pid)
 
         @app.on_event("shutdown")
         def _on_stop():
             clear_state()
+            # Stop the periodic scheduler first (no new work into the teardown),
+            # symmetric with queue.shutdown() below.
+            app.state.scheduler.shutdown()
             # Signal a running job to checkpoint and join it before closing the DB.
             # Its row is reconciled to 'interrupted' on next start (§3 clean-stop).
             app.state.queue.shutdown()

@@ -27,15 +27,19 @@ def _rj(d: dict) -> str:
 
 # --- roots_snapshot() rows -------------------------------------------------
 # Fields exactly per queries.roots_snapshot(): id, name, path, kind, enabled,
-# last_full_scan_at, asset_count, photos, videos, instance_count, last_scan_at,
-# last_dedup_at. Order here is registration (id ASC) — exactly what the query
-# returns; the TUI sorts client-side (the [s] cycle), whose default
-# "most-recently-registered" is an id-DESC reordering (→ Downloads, _Trash,
+# last_full_scan_at, last_probe_at, probe_new_count, asset_count, photos, videos,
+# instance_count, last_scan_at, last_dedup_at. Order here is registration (id ASC) —
+# exactly what the query returns; the TUI sorts client-side (the [s] cycle), whose
+# default "most-recently-registered" is an id-DESC reordering (→ Downloads, _Trash,
 # Photos, Camera, iPhone, the mockup dashboard order).
+# The 4-state dot (§12) spans all states across these fixtures: iPhone ◉ green
+# (deduped>scan), Camera ◉ yellow (a scan after its last dedup → need re-dedup),
+# Photos ◐ grey (probe found new files: probe_new_count>0), Downloads ○ grey (never).
 ROOTS: list[dict] = [
     {
         "id": 1, "name": "iPhone", "path": r"D:\Backup\iPhone", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-10T10:00:00",
+        "last_probe_at": "2026-07-15T12:00:00", "probe_new_count": 0,
         "asset_count": 98412, "photos": 92110, "videos": 6302, "instance_count": 98540,
         "size_bytes": 512_000_000_000,
         "last_scan_at": "2026-07-15T09:04:00", "last_dedup_at": "2026-07-15T11:31:00",
@@ -43,13 +47,17 @@ ROOTS: list[dict] = [
     {
         "id": 2, "name": "Camera", "path": r"E:\Photos", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-08T08:00:00",
+        "last_probe_at": "2026-07-15T12:00:00", "probe_new_count": 0,
         "asset_count": 26150, "photos": 25900, "videos": 250, "instance_count": 26150,
         "size_bytes": 148_000_000_000,
+        # scanned Jul 14 09:31, last deduped Jul 12 → scan is NEWER → ◉ yellow (need re-dedup).
         "last_scan_at": "2026-07-14T09:31:00", "last_dedup_at": "2026-07-12T15:00:00",
     },
     {
         "id": 3, "name": "Photos", "path": r"E:\Photos2", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-14T20:00:00",
+        # A probe found 37 unscanned files → ◐ grey "new files probed" (outranks the scan state).
+        "last_probe_at": "2026-07-15T12:30:00", "probe_new_count": 37,
         "asset_count": 8900, "photos": 8600, "videos": 300, "instance_count": 8900,
         "size_bytes": 41_300_000_000,
         "last_scan_at": "2026-07-15T09:00:00", "last_dedup_at": None,
@@ -57,6 +65,7 @@ ROOTS: list[dict] = [
     {
         "id": 4, "name": "_Trash", "path": r"D:\Backup\_Trash", "kind": "trash",
         "enabled": 1, "last_full_scan_at": None,
+        "last_probe_at": None, "probe_new_count": 0,
         "asset_count": 0, "photos": 0, "videos": 0, "instance_count": 0,
         "size_bytes": 0,
         "last_scan_at": None, "last_dedup_at": None,
@@ -64,6 +73,8 @@ ROOTS: list[dict] = [
     {
         "id": 5, "name": "Downloads", "path": r"D:\dump", "kind": "library",
         "enabled": 1, "last_full_scan_at": None,
+        # Scanned, probe found nothing new, never deduped → ◉ yellow (need dedup).
+        "last_probe_at": "2026-07-15T12:00:00", "probe_new_count": 0,
         "asset_count": 241, "photos": 200, "videos": 41, "instance_count": 241,
         "size_bytes": 3_200_000_000,
         "last_scan_at": "2026-07-15T11:02:00", "last_dedup_at": None,

@@ -3,6 +3,7 @@
 Current surface (M1–M5):
 - ``packrat roots register|list`` — declare/list roots (§8 A1, §11).
 - ``packrat scan`` — walk a root and fingerprint it (§8 A2).
+- ``packrat probe`` — cheap discovery: count new/changed files, no fingerprint (§8 A2b).
 - ``packrat dedup`` — 3-stage dedup of one folder (§8 B).
 - ``packrat merge`` — copy new files into a folder by exact hash (§8 C).
 - ``packrat cleanup`` / ``trash refresh`` / ``untrash`` — the trash model (§6).
@@ -487,6 +488,52 @@ def scan(
         ),
         verb="scan", label="scan", detach=detach, json_out=json_out,
     )
+
+
+# ---------------------------------------------------------------------------
+# probe — cheap discovery: are there new files here worth a scan? (§8 A2b)
+# ---------------------------------------------------------------------------
+@app.command("probe")
+def probe(
+    path: Optional[str] = typer.Argument(None, help="A registered library root (path or --name). Omit with --all."),
+    all_roots: bool = typer.Option(False, "--all", help="Probe every enabled library root."),
+    detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
+    json_out: bool = typer.Option(False, "--json"),
+):
+    """Walk a root and count new/changed files WITHOUT fingerprinting (fast; §8 A2b).
+
+    Probe is scan's cheap discovery half: it enumerates the root and counts files a scan
+    would (re)fingerprint — no hashing, decode, or PDQ, no catalog writes beyond a
+    per-root "new files waiting" signal the TUI shows as a status dot. Runs every 24 h
+    per root automatically; this verb triggers one now. `--all` probes every enabled
+    library root (one job each). Press `[s]`/`packrat scan` to actually fingerprint.
+    """
+    if not all_roots and not path:
+        typer.echo("probe needs a <root> path/name, or --all.", err=True)
+        raise typer.Exit(2)
+    if all_roots and path:
+        typer.echo("give a <root> or --all, not both.", err=True)
+        raise typer.Exit(2)
+    client = _client_or_spawn()
+    try:
+        job_ids = client.submit_probe(path, all_roots=all_roots)
+    except DaemonError as exc:
+        typer.echo(f"cannot probe: {_detail(exc)}", err=True)
+        raise typer.Exit(1)
+    if json_out:
+        typer.echo(json.dumps({"job_ids": job_ids}, indent=2))
+        return
+    if not job_ids:
+        typer.echo("no enabled library roots to probe.")
+        return
+    # --all (or --detach): fan-out submits N jobs — report + return, don't stream N at once.
+    if all_roots or detach or len(job_ids) != 1:
+        typer.echo(f"submitted {len(job_ids)} probe job(s) — running in the daemon; "
+                   "`packrat status` to see results.")
+        return
+    final = stream_job(client, job_ids[0], label="probe")
+    typer.echo(f"probe {final}")
+    _exit_if_failed(final)
 
 
 # ---------------------------------------------------------------------------

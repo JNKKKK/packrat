@@ -46,6 +46,19 @@ class RootsMax(FrameScreen):
         return screen("packrat · Roots", body, self.app.header_right,
                       footer=self.FOOTER, width=geo.w, height=geo.h)
 
+    def _colorize(self, frame: str):
+        # ◉ is green (deduped) OR yellow (need-dedup) — recolor each list row's dot to its
+        # true role after the base pass (the glyph pass can't split one glyph two ways).
+        # Uses the SAME sorted+masked roots roots_body rendered (§12 4-state dot).
+        from .. import render
+        from ..colorize import recolor_dot_legend, recolor_root_dots
+        text = super()._colorize(frame)
+        roots = render.sort_roots(self.app.view(self.app.snapshot.get("roots", [])),
+                                  self.sort_mode)
+        recolor_root_dots(text, frame, roots)
+        recolor_dot_legend(text, frame)
+        return text
+
     def action_sort(self) -> None:
         self.sort_mode = (self.sort_mode + 1) % 4
         self.cursor = 0

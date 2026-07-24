@@ -24,6 +24,11 @@ dependencies = [
     # Phase 6). Platform-marked so a non-Windows dev install stays importable.
     "pywin32>=312; sys_platform == 'win32'",
     "send2trash>=2.1.0",
+    # Periodic-job scheduler (§3 "Scheduler (APScheduler → interval scans)", now
+    # realized — §8 A2b probe is its first client). Pure-Python, no wheel risk → safe
+    # for the lean core (unlike the media extras). BackgroundScheduler owns its own
+    # daemon thread, slotting into the daemon lifecycle where JobQueue's thread does.
+    "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]

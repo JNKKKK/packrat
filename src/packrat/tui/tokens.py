@@ -32,11 +32,15 @@ GAP = 1
 ROOTS_W = (CW - 2) - COLLECTION_W - GAP
 
 # --- Glyphs (each one terminal cell — align in a monospace TUI font) --------
-# Root freshness/health dot (conventions in the mockups doc):
-DOT_DEDUPED = "◉"   # ◉ solid  — scanned AND successfully deduped
-DOT_SCANNED = "◐"   # ◐ half   — scanned, never a successful dedup
-DOT_NEVER = "○"     # ○ hollow — never scanned nor deduped
-DOT_TRASH = " "          # trash roots show "(trash)", never a dot
+# Root freshness/health dot — a 4-state signal where COLOR (not just shape) carries
+# meaning (§12 / TODO Part C): ◉ is BOTH green (deduped) and yellow (need dedup), so
+# `status_dot` returns a (glyph, role) pair and the colorizer paints the role. The
+# `probe_new_count` signal outranks every scan/dedup state (rung 1).
+DOT_DEDUPED = "◉"     # ◉ solid  — GREEN: deduped after the latest scan (recency-relative)
+DOT_NEEDS_DEDUP = "◉" # ◉ solid  — YELLOW: scanned, not (re-)deduped since (same glyph as ◉ green)
+DOT_PROBED = "◐"      # ◐ half   — GREY: probe found unscanned files waiting (probe_new_count > 0)
+DOT_NEVER = "○"       # ○ hollow — GREY: never scanned (no probe news, no scan)
+DOT_TRASH = " "       # trash roots show "(trash)", never a dot
 CURSOR = "▸"        # ▸ selection cursor
 RUNNING = "▶"       # ▶ running job
 WARN = "⚠"          # ⚠ needs attention
@@ -149,19 +153,37 @@ GEM_GRADIENT = (
 )
 
 
-def status_dot(kind: str, last_scan_at, last_dedup_at) -> str:
-    """The ◉/◐/○ freshness dot for a root (component-plan §StatusDot).
+def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at) -> tuple[str, str]:
+    """The 4-state freshness dot for a root as a ``(glyph, role)`` pair (§12 / TODO Part C).
 
-    - trash root       → blank (it renders "(trash)", never a dot);
-    - deduped (◉)      → scanned AND successfully deduped (``last_dedup_at`` set —
-      the same all-stages-or-already-clean ``completed`` rule as ``root_detail``/§11);
-    - scanned only (◐) → scanned, never a successful dedup;
-    - never (○)        → never scanned nor deduped (a freshly-registered root).
+    Color, not just shape, carries meaning: ``◉`` is BOTH green (deduped) and yellow
+    (need-dedup), so this returns the semantic **role** the colorizer paints, not a bare
+    glyph. The precedence ladder — get the order right, it's the subtle part:
+
+    1. ``probe_new_count > 0``          → ``◐`` grey  — new files probed, unscanned files
+       waiting. **Checked FIRST, above `never`**: a freshly-registered root's first probe
+       finds every file new (count>0) with ``last_scan_at=NULL``; it must read "new files
+       probed", not "never". "Has unscanned files" outranks ALL scan/dedup states.
+    2. no ``last_scan_at``              → ``○`` grey  — never scanned.
+    3. ``last_dedup_at > last_scan_at`` → ``◉`` green — deduped AFTER the latest scan
+       (recency-relative: a scan after the last dedup drops it to yellow — a timestamp
+       comparison, not a truthiness check).
+    4. else (scanned)                   → ``◉`` yellow — scanned, not (re-)deduped since.
+
+    A found-nothing probe (``count == 0``) skips rung 1 and falls through to the
+    never/scan/dedup rungs — which read only the probe-untouched timestamps — so it is
+    inherently a dot no-op (never→never, green→green, yellow→yellow). A completed scan
+    zeroes ``probe_new_count``, so a scan-latest root skips rung 1 too.
+
+    Trash roots return a blank glyph (they render "(trash)", never a dot); the role is
+    irrelevant there.
     """
     if kind == "trash":
-        return DOT_TRASH
-    if last_dedup_at:
-        return DOT_DEDUPED
-    if last_scan_at:
-        return DOT_SCANNED
-    return DOT_NEVER
+        return DOT_TRASH, "dim"
+    if (probe_new_count or 0) > 0:
+        return DOT_PROBED, "dim"            # ◐ grey — outranks EVERY other state
+    if not last_scan_at:
+        return DOT_NEVER, "dim"             # ○ grey
+    if last_dedup_at and last_dedup_at > last_scan_at:
+        return DOT_DEDUPED, "success"       # ◉ green
+    return DOT_NEEDS_DEDUP, "warn"          # ◉ yellow

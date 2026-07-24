@@ -27,15 +27,18 @@ from .tokens import Theme
 # earlier roles win a cell (Text.stylize is applied in list order; later spans can
 # override, so put broad/lowest-priority first, specific/highest-priority last).
 ROLE_PATTERNS: list[tuple[str, str]] = [
-    # dim: the ○ never dot, ░ bar remainder (the guillemet-hint rule is applied LAST,
-    # below, so a ‹…› aside stays dim even when it contains a `[k]` hint).
+    # dim: the ○ never dot + ◐ probed-new dot (both grey — §12 4-state), ░ bar remainder
+    # (the guillemet-hint rule is applied LAST, below, so a ‹…› aside stays dim even when
+    # it contains a `[k]` hint).
     ("dim", re.escape(tokens.DOT_NEVER)),
+    ("dim", re.escape(tokens.DOT_PROBED)),
     ("dim", re.escape(tokens.BAR_EMPTY) + "+"),
-    # success: ◉ deduped dot, ✓ applied
+    # success: ◉ dot BASE color (deduped-green). ◉ is also yellow (need-dedup) — a
+    # distinction the glyph pass can't make — so `recolor_root_dots` recolors each root
+    # ROW's dot to its true role post-pass; this is the standalone/legend default. ✓ applied.
     ("success", re.escape(tokens.DOT_DEDUPED)),
     ("success", re.escape(tokens.CHECK)),
-    # warn: ◐ scanned-only dot, ⚠ attention
-    ("warn", re.escape(tokens.DOT_SCANNED)),
+    # warn: ⚠ attention
     ("warn", re.escape(tokens.WARN)),
     # running: ▶ marker, █ bar fill
     ("running", re.escape(tokens.RUNNING)),
@@ -138,6 +141,85 @@ def recolor_gem(text: Text, frame: str, gem: str, color: str) -> Text:
             break
         text.stylize(color, idx, idx + 1)
         start = idx + 1
+    return text
+
+
+def recolor_root_dots(text: Text, frame: str, roots: list[dict],
+                      theme: Theme = tokens.DEFAULT_THEME) -> Text:
+    """Recolor each root ROW's freshness dot to its true role (in place, post-colorize).
+
+    The ◉ dot is BOTH green (deduped) and yellow (need-dedup) — a distinction the
+    glyph-based :func:`colorize` can't draw (one glyph → one color). So after the base
+    pass we walk the displayed ``roots`` (query rows) and, for each, find its row line by
+    the root NAME and recolor the ``◉``/``◐``/``○`` dot that follows the name to the role
+    :func:`packrat.tui.render.root_dot_pair` computes. A trash root has no dot (skipped);
+    a root whose row isn't on screen (paged out) simply isn't found (no-op). Robust to
+    the row layout: it anchors on the name span, then colors the first dot glyph at/after
+    it — never a dot elsewhere on the line (there is only one per row).
+
+    ``roots`` is the SAME list the frame was built from (post-sort/-mask), so names match
+    what's rendered. Called by the dashboard/roots screens' ``_colorize`` hooks (which own
+    the displayed roots); no-op if ``roots`` is empty."""
+    from . import render
+
+    lines = frame.split("\n")
+    # Precompute each line's absolute start offset in `frame` (for stylize positions).
+    offsets, off = [], 0
+    for ln in lines:
+        offsets.append(off)
+        off += len(ln) + 1  # +1 for '\n'
+
+    for r in roots:
+        if r.get("kind") == "trash":
+            continue
+        glyph, role = render.root_dot_pair(r)
+        if not glyph.strip():          # blank (shouldn't happen for library) → nothing to color
+            continue
+        name = r.get("name")
+        if not name:
+            continue
+        for i, ln in enumerate(lines):
+            npos = ln.find(name)
+            # Anchor on the row's NAME CELL, matching the WHOLE name, not a prefix:
+            #  (a) only frame/box borders, the ▸ cursor, and spaces may precede it (the
+            #      name is the first TEXT cell of a row) — rejects a name occurring inside
+            #      another root's PATH (e.g. "Photos" inside `E:\Photos2`); AND
+            #  (b) the char right after it must be a space (the name cell is fixed-width,
+            #      space-padded) — rejects a shorter name matching a longer one as a prefix
+            #      ("Photo" must NOT anchor on the "Photos" row).
+            if npos == -1 or not all(c in _ROOT_NAME_PREFIX for c in ln[:npos]):
+                continue
+            after = npos + len(name)
+            if after < len(ln) and ln[after] != " ":
+                continue               # matched a longer name as a prefix — not this row
+            dpos = ln.find(glyph, after)
+            if dpos == -1:
+                continue
+            base = offsets[i] + dpos
+            text.stylize(theme.color(role), base, base + len(glyph))
+            break                      # one row per root
+    return text
+
+
+#: Chars allowed BEFORE a root name on its row line (frame/box borders, the ▸ cursor,
+#: spaces) — the anchor that identifies the NAME cell, not a name inside a path.
+_ROOT_NAME_PREFIX = frozenset("│┃ " + tokens.CURSOR)
+
+# The dot legend's ◉ appears twice — "◉ deduped" (green) and "◉ need dedup" (yellow) —
+# the same green/yellow split the row dots use. The glyph pass colors BOTH ◉ green, so
+# recolor the "need dedup" one to warn. Matched by the label that follows each ◉.
+_LEGEND_DEDUP_RE = re.compile(re.escape(tokens.DOT_DEDUPED) + r"(?=\s+need dedup)")
+
+
+def recolor_dot_legend(text: Text, frame: str, theme: Theme = tokens.DEFAULT_THEME) -> Text:
+    """Recolor the dot legend's second ``◉`` (``◉ need dedup``) to warn (in place).
+
+    The legend shows both ◉ states; the base glyph pass paints every ◉ green, so the
+    "need dedup" one must be corrected to yellow to match the row dots (§12). The
+    "deduped" ◉ and the grey ◐/○ are already correct from the glyph pass. No-op if the
+    legend isn't on the frame (a screen without it)."""
+    for m in _LEGEND_DEDUP_RE.finditer(frame):
+        text.stylize(theme.color("warn"), m.start(), m.end())
     return text
 
 
