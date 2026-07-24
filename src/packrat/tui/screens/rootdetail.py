@@ -349,11 +349,12 @@ def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[
         # the same bundle the same way): stage 1 = delete split + make-up; stage 2 = keep-lead
         # columns + PDQ histograms + make-up + suggestion split; stage 3 = histogram + make-up
         # (unranked, no keep-lead). One lines_for_stage call — no per-stage builder ladder (§8 B).
-        from ...review_stats import lines_for_stage
-        header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
+        from ...review_stats import N_DEDUP_STAGES, lines_for_stage
+        header = f"{WARN} {run} — awaiting review (stage {stage} of {N_DEDUP_STAGES})"
         detail = lines_for_stage(c[f"stage{stage}"], stage, _review_text_w(geo) - 2)
     else:
-        header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
+        from ...review_stats import N_DEDUP_STAGES
+        header = f"{WARN} {run} — awaiting review (stage {stage} of {N_DEDUP_STAGES})"
         detail = [(f"  {c.get('to_delete_exact', 0)} to delete (exact) · "
                    f"{c.get('groups', 0)} groups / {c.get('members', 0)} members (default-keep)")]
     return [

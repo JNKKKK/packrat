@@ -231,7 +231,15 @@ def _analyze(ctx: JobContext) -> None:
         run_id = int(cur.lastrowid)
     audit_dir = review.audit_run_dir("dedup", root["name"], run_id)
 
-    _stage_and_pause(ctx, root, run_id, audit_dir, probe, prefer_internal=prefer_internal)
+    # The histogram thresholds the staging log renders with = the values we JUST snapshotted,
+    # normalized through the single review_stats seam (same shape --confirm feeds it from the
+    # run row), so the log never re-reads the row it just wrote and matches the TUI poll.
+    from .. import review_stats
+    thresholds = review_stats.thresholds_from_row(
+        {"t_photo_recompress": m.t_photo_recompress, "t_photo_edit": m.t_photo_edit,
+         "t_match_video": m.t_match_video})
+    _stage_and_pause(ctx, root, run_id, audit_dir, probe, prefer_internal=prefer_internal,
+                     thresholds=thresholds)
 
 
 # ===========================================================================
@@ -321,8 +329,13 @@ def _confirm(ctx: JobContext) -> None:
     if nxt is None:
         _finalize_completed(ctx, root, run_id)
         return
+    # Render the next stage's log with the run's ANALYZE-TIME threshold snapshot (from the
+    # `run` row we already hold — SELECT *), NOT live config, so a confirm after a config
+    # edit reports the bands the run was analyzed under (matches the TUI poll; §8 B).
+    from .. import review_stats
+    thresholds = review_stats.thresholds_from_row(run)
     _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True,
-                     prefer_internal=prefer_internal)
+                     prefer_internal=prefer_internal, thresholds=thresholds)
 
 
 # ===========================================================================
@@ -655,8 +668,12 @@ def _first_nonempty_stage(ctx, root_id, root_path, *, start, precomputed=None,
 # staging (materialize one stage's folder + review_actions + manifest + audit)
 # ---------------------------------------------------------------------------
 def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False,
-                     prefer_internal=False):
-    """Materialize ``plan``'s stage, persist edges + rows, pause. Auto-advance if empty."""
+                     prefer_internal=False, thresholds=None):
+    """Materialize ``plan``'s stage, persist edges + rows, pause. Auto-advance if empty.
+
+    ``thresholds`` is the run's analyze-time PDQ snapshot (from :func:`thresholds_from_row`),
+    threaded from the caller — which already holds it (analyze from config, confirm from the
+    run row) — so the staging log needn't re-query ``review_runs`` to render its histogram."""
     db = ctx.db
     root_id, root_path = int(root["id"]), root["path"]
     stage = plan["stage"]
@@ -683,10 +700,11 @@ def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False,
             _finalize_completed(ctx, root, run_id)
             return
         _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True,
-                         prefer_internal=prefer_internal)
+                         prefer_internal=prefer_internal, thresholds=thresholds)
         return
 
-    _report_staged(ctx, root, run_id, stage, staged, skipped, plan, advancing=advancing)
+    _report_staged(ctx, root, run_id, stage, staged, skipped, plan, advancing=advancing,
+                   thresholds=thresholds)
 
 
 def _materialize(ctx, root_path, run_id, stage, actions):
@@ -996,7 +1014,8 @@ def _finalize_completed(ctx, root, run_id) -> None:
     ctx.log(f"dedup complete for {root['name']}: all stages reviewed.")
 
 
-def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing) -> None:
+def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing,
+                   thresholds=None) -> None:
     parent = review.staging_parent(root["path"])
     verb = "advanced to" if advancing else "staged"
     if stage == STAGE_EXACT:
@@ -1009,31 +1028,27 @@ def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing
         ctx.log("  default KEEP — remove a shortcut to DELETE that file.")
     if skipped:
         ctx.log(f"  {skipped} candidate(s) skipped at staging (already gone / promoted).")
-    _report_review_stats(ctx, run_id, stage, plan.get("actions") or [])
+    _report_review_stats(ctx, thresholds, stage, plan.get("actions") or [])
     if stage == STAGE_RECOMPRESS:
         ctx.log(f"  tip: `packrat dedup {root['name']} --confirm --keep-suggested` keeps only the "
                 f"suggested lead per group (ignores your shortcut edits this stage).")
     ctx.log(f"review in Explorer, then: `packrat dedup {root['name']} --confirm` (or --cancel).")
 
 
-def _report_review_stats(ctx, run_id, stage, actions: list[dict]) -> None:
+def _report_review_stats(ctx, thresholds, stage, actions: list[dict]) -> None:
     """Log the per-stage review breakdown — the SAME text the TUI Review box shows.
 
     Both faces route through :mod:`packrat.review_stats`' ``stats_for_stage`` +
     ``lines_for_stage`` dispatch over the same ``review_actions`` shape, so the CLI staging
     log and the box can't drift — neither the text NOR the stage→builder choice (§8 B). Silent
-    on empty stages. Thresholds come from the run's ANALYZE-TIME snapshot on ``review_runs``
-    (``thresholds_from_row``), NOT live config, so a confirm after a config edit still reports
-    the bands the run was analyzed under (the same snapshot the read-only poll reads).
+    on empty stages. ``thresholds`` is the run's ANALYZE-TIME snapshot (from
+    ``thresholds_from_row``), threaded in by the caller (analyze from config, confirm from the
+    run row), NOT re-read from live config — so a confirm after a config edit still reports the
+    bands the run was analyzed under (the same snapshot the read-only poll reads).
     """
     from .. import review_stats
     if not actions:
         return
-    run = ctx.db.query_one(
-        "SELECT t_photo_recompress, t_photo_edit, t_match_video FROM review_runs WHERE id=?",
-        (run_id,),
-    )
-    thresholds = review_stats.thresholds_from_row(run)
     # Lay the block out to the SAME width the Review box feeds the shared builder at the
     # reference geometry (review_stats.REFERENCE_TEXT_WIDTH): the daemon streams logs to
     # whatever client is attached (no known terminal size), so it renders to that reference

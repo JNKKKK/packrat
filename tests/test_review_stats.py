@@ -202,6 +202,16 @@ def test_thresholds_from_row_reads_snapshot_and_falls_back_on_null():
                                             "t_video": rs._T_MATCH_VIDEO}
 
 
+def test_thresholds_from_row_degrades_on_non_numeric_value():
+    """A non-int snapshot value (hand-edited dev DB / future writer bug) degrades to the
+    default rather than crashing the read-only poll or the staging log — the fallback exists
+    precisely so a bad snapshot can never take a face down."""
+    out = rs.thresholds_from_row({"t_photo_recompress": "oops", "t_photo_edit": "12",
+                                  "t_match_video": 90})
+    # "oops" → default; "12" is int-coercible → 12; 90 stays 90.
+    assert out == {"t_rec": rs._T_RECOMPRESS, "t_edit": 12, "t_video": 90}
+
+
 def test_snapshot_thresholds_band_the_histogram_bins():
     """The snapshot's t_rec/t_edit actually move the stage-3 bins (they're load-bearing, not
     cosmetic): the same distances band differently under a non-default snapshot vs the
@@ -213,3 +223,17 @@ def test_snapshot_thresholds_band_the_histogram_bins():
         {"t_photo_recompress": 10, "t_photo_edit": 50, "t_match_video": 90}))
     assert default["pdq_photo"] != widened["pdq_photo"]        # different bands → different bins
     assert sum(default["pdq_photo"].values()) == len(rows)     # every distance still binned
+
+
+def test_ordered_lead_levels_returns_a_fresh_list_each_call():
+    """The canonical lead-order is the SINGLE source both faces read; mutating one caller's
+    result must not corrupt it (regression: it returned the shared module list). Each call
+    yields a fresh, equal list, and mutating one doesn't touch the next."""
+    from packrat.jobs.dedup_rank import ordered_lead_levels
+
+    a = ordered_lead_levels()
+    b = ordered_lead_levels()
+    assert a == b and a is not b          # equal value, distinct objects
+    a.append("junk"); a.clear()           # abuse the returned list
+    assert ordered_lead_levels() == b     # canonical order is untouched
+    assert "resolution" in b

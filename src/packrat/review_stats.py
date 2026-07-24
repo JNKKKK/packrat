@@ -53,7 +53,15 @@ def thresholds_from_row(row) -> dict:
             val = row[key]
         except (KeyError, IndexError, TypeError):
             return default
-        return default if val is None else int(val)
+        if val is None:
+            return default
+        # A non-int value (hand-edited dev DB, future writer bug) degrades to the default
+        # rather than crashing the read-only poll / staging log — the whole point of the
+        # fallback is that a bad snapshot can never take a face down.
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
     return {"t_rec": _pick("t_photo_recompress", _T_RECOMPRESS),
             "t_edit": _pick("t_photo_edit", _T_EDIT),
             "t_video": _pick("t_match_video", _T_MATCH_VIDEO)}
@@ -385,6 +393,14 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
 # these two entry points instead of hand-writing the ladder (queries poll, dedup
 # staging log, rootdetail render). A new stage 4 is then a one-place edit here.
 # ---------------------------------------------------------------------------
+#: Number of dedup review stages (exact → recompression → minor-edit). The single source
+#: for the "stage N of <count>" phrase every face prints, so adding a stage doesn't leave a
+#: stale "of 3" hardcoded across the CLI log and the TUI Review box (§8 B). Mirrors the
+#: jobs-layer STAGE_* constants, kept here (the neutral module both faces already import)
+#: because the TUI render layer must not import the jobs layer.
+N_DEDUP_STAGES = 3
+
+
 def stats_for_stage(rows: Iterable[dict], stage: int, *, thresholds: dict | None = None,
                     is_network: Callable[[str], bool] = lambda _p: False) -> dict:
     """``stage → the right bundle`` — the ONE place the stage→compute map lives (§8 B).

@@ -72,15 +72,19 @@ _PATH_TIEBREAK = "path tiebreak (identical rank)"
 #: staging log and the TUI Review box so the two can't drift when a level is added/reworded.
 #: Photo then video (they share the ``resolution`` / path labels; a homogeneous group only
 #: ever uses one family, so the shared labels dedup), then the preference tiebreak, then the
-#: bare path tiebreak. Constant — its inputs are all frozen at import.
-_ORDERED_LEAD_LEVELS = list(dict.fromkeys(
+#: bare path tiebreak. A **tuple** — the source of truth is immutable, so no caller can
+#: mutate the canonical order in place (the two faces would then silently diverge).
+_ORDERED_LEAD_LEVELS = tuple(dict.fromkeys(
     (*_PHOTO_LEAD_LEVELS, *_VIDEO_LEAD_LEVELS, _PREFERENCE_TIEBREAK, _PATH_TIEBREAK)))
 
 
 def ordered_lead_levels() -> list[str]:
     """The canonical best-first keep-lead decision-level order (§8 B); see
-    :data:`_ORDERED_LEAD_LEVELS`."""
-    return _ORDERED_LEAD_LEVELS
+    :data:`_ORDERED_LEAD_LEVELS`.
+
+    Returns a FRESH list each call, so a caller that mutates the result can't corrupt the
+    shared order (the source of truth is the immutable :data:`_ORDERED_LEAD_LEVELS` tuple)."""
+    return list(_ORDERED_LEAD_LEVELS)
 
 
 def _pref_rank(is_external: bool, prefer_internal: bool) -> int:
