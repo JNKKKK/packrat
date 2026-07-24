@@ -52,31 +52,45 @@ def test_ts_family_is_allowlisted_video():
 
 # --- decode: duration fallback recovers a timeline from packet timestamps -----
 def test_duration_by_demux_recovers_timeline_from_packets(tmp_path):
-    """The helper estimates duration from the last packet's presentation end when the
-    container reports none — ~frames / rate (15 fps here → ~2 s for 30 frames)."""
-    av = pytest.importorskip("av")
+    """The helper estimates LENGTH from packet timestamps when the container reports none —
+    ~frames / rate (15 fps here → ~2 s for 30 frames). Opens its own container by path, so
+    it leaves the caller's container untouched."""
+    pytest.importorskip("av")
     p = tmp_path / "len.ts"
     _write_ts(p, frames=30)
-    c = av.open(str(p))
-    try:
-        vs = c.streams.video[0]
-        dur = media._duration_by_demux(c, vs, vs.time_base)
-    finally:
-        c.close()
+    dur = media._duration_by_demux(str(p))
     assert dur is not None
     assert 1.0 <= dur <= 4.0, dur                        # generous band around ~2 s
 
 
-def test_duration_by_demux_none_without_time_base(tmp_path):
-    """No time_base → no way to convert timestamps → None (caller keeps single-frame path)."""
+def test_duration_by_demux_subtracts_start_time(tmp_path):
+    """The estimate is a LENGTH, not an absolute end-timestamp: a transport stream's non-zero
+    start_time (PCR offset) is subtracted, so it stays ~ (last_pts − start)·tb and matches the
+    native duration — otherwise seek targets offset by start_time would overshoot past EOF."""
     av = pytest.importorskip("av")
-    p = tmp_path / "n.ts"
-    _write_ts(p, frames=10)
+    p = tmp_path / "off.ts"
+    _write_ts(p, frames=30)
+    # A synthetic .ts carries start_time = 12000 (1/90000 tb ≈ 0.133 s). The demux length must
+    # NOT include it: last_pts (~end) minus start ≈ the true content length (~2 s), not ~2.13 s.
     c = av.open(str(p))
     try:
-        assert media._duration_by_demux(c, c.streams.video[0], None) is None
+        start_s = (c.streams.video[0].start_time or 0) * c.streams.video[0].time_base
     finally:
         c.close()
+    dur = media._duration_by_demux(str(p))
+    assert dur is not None
+    # Length excludes start_time: it's below (last_pts·tb), i.e. below length+start.
+    assert dur < 4.0 and dur < (4.0 + float(start_s) + 1.0)
+    assert 1.0 <= dur <= 4.0
+
+
+def test_duration_by_demux_none_on_unopenable(tmp_path):
+    """A path that isn't a decodable container → None (caller keeps the single-frame path),
+    never raises."""
+    pytest.importorskip("av")
+    p = tmp_path / "bogus.ts"
+    p.write_bytes(b"\x47" + b"\x00" * 512)               # TS sync byte, no real stream
+    assert media._duration_by_demux(str(p)) is None
 
 
 # --- duration source selection (pure ladder, no container) -------------------
@@ -111,10 +125,13 @@ def test_ts_fingerprint_samples_multiple_frames(tmp_path):
     single frame the old no-duration path produced."""
     p = tmp_path / "clip.ts"
     _write_ts(p, frames=45)
-    fp = media.fingerprint(str(p), p.stat().st_size, Config())
+    cfg = Config()
+    fp = media.fingerprint(str(p), p.stat().st_size, cfg)
     assert not fp.undecodable, fp.decode_error
     assert fp.duration_s and fp.duration_s > 0
-    assert len(fp.frames) >= Config().video.min_comparable_frames
+    # Full sample count (seek path works on this synthetic .ts); well above the dedup floor.
+    assert len(fp.frames) == cfg.video.sample_frames
+    assert len(fp.frames) >= cfg.video.min_comparable_frames
     assert all(len(fr.pdq_bits) == 32 for fr in fp.frames)
 
 
@@ -152,3 +169,64 @@ def test_undecodable_ts_still_flagged_not_frame_faked(tmp_path):
     assert fp.undecodable
     assert fp.frames == []
     assert fp.decode_error
+
+
+# --- the core robustness path: broken seek → sequential fallback -------------
+def test_broken_seek_triggers_sequential_fallback(tmp_path, monkeypatch):
+    """THE scenario the feature exists for: mid-file seeking silently under-delivers on a
+    transport stream, so _probe_video must fall back to _sample_sequential and recover the
+    full sample. Simulated by forcing the seek sampler to under-deliver (the real .ts seek
+    breakage), then asserting the end result still has the full frame count — i.e. the
+    fallback ran and won. Guards the fallback against silent regression (it isn't reached by
+    the seekable synthetic clips otherwise)."""
+    p = tmp_path / "clip.ts"
+    _write_ts(p, frames=60)
+    cfg = Config()
+
+    real_seek_sampler = media._sample_by_seek
+    seq_calls = {"n": 0}
+
+    def crippled_seek(container, vs, tb, targets, *, max_edge, profiler):
+        # Model a transport stream where seeking returns only the first couple targets
+        # (5–11 range) — enough to have passed the OLD `< min_comparable_frames` gate.
+        full = real_seek_sampler(container, vs, tb, targets, max_edge=max_edge, profiler=profiler)
+        return full[:6]
+
+    real_seq = media._sample_sequential
+
+    def counting_seq(*a, **k):
+        seq_calls["n"] += 1
+        return real_seq(*a, **k)
+
+    monkeypatch.setattr(media, "_sample_by_seek", crippled_seek)
+    monkeypatch.setattr(media, "_sample_sequential", counting_seq)
+
+    dur, w, h, cap, codec, frames = media._probe_video(str(p), cfg.video)
+    assert seq_calls["n"] == 1                           # a 6-frame shortfall (< 12) triggered it
+    assert len(frames) == cfg.video.sample_frames        # sequential recovered the full count
+    assert all(len(fr.pdq_bits) == 32 for fr in frames)
+
+
+def test_sample_sequential_fills_every_covered_slot(tmp_path):
+    """_sample_sequential must not drop target slots when one frame covers several (short /
+    low-fps clips): every satisfied target gets a FrameSig, so the slot count == targets
+    satisfied, preserving frame_index alignment with a full-count peer (§5.3)."""
+    av = pytest.importorskip("av")
+    p = tmp_path / "few.ts"
+    _write_ts(p, frames=3)                               # far fewer real frames than 12 targets
+    c = av.open(str(p))
+    try:
+        vs = c.streams.video[0]
+        tb = vs.time_base
+        start = vs.start_time or 0
+        # 12 ascending targets across a duration that outruns the 3 real frames, so late
+        # targets are covered by the last decoded frame — the multi-cover case.
+        dur = media._duration_by_demux(str(p)) or 0.2
+        targets = [start + int(dur * (k + 0.5) / 12 / tb) for k in range(12)]
+        frames = media._sample_sequential(c, vs, tb, targets, max_edge=0,
+                                          profiler=media.NULL_PROFILER)
+    finally:
+        c.close()
+    # Indices are contiguous 0..len-1 (no gaps) even though real frames << targets.
+    assert [fr.frame_index for fr in frames] == list(range(len(frames)))
+    assert len(frames) >= 3                              # at least one slot per real frame

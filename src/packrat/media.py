@@ -309,16 +309,14 @@ def _probe_video(
         # below → too few comparable frames to ever match (§5.3 min_comparable_frames), so the
         # clip is catalogued but invisible to dedup. `_video_duration_s` prefers the stream
         # duration, then the container's, then a demux-only fallback (packet headers, not
-        # pixels) — the fallback only runs when neither native source exists.
-        with profiler.timer("video", "decode"):
+        # pixels, in its OWN container so THIS one stays pristine) — only when neither native
+        # source exists. Timed as "io", NOT "decode": the fallback reads packet headers off
+        # disk/SMB and decodes no pixels, so it belongs in the byte-transfer bucket, not the
+        # CPU decode bucket the profiler distinguishes (§profiler-metrics).
+        with profiler.timer("video", "io"):
             duration_s = _video_duration_s(
                 vs.duration, tb, container.duration, av.time_base,
-                demux_dur=lambda: _duration_by_demux(container, vs, tb))
-        if duration_s and tb:
-            try:
-                container.seek(0, stream=vs)         # rewind after any demux pass, before sampling
-            except Exception:  # noqa: BLE001 - per-k seeks are absolute, so this is belt-and-braces
-                pass
+                demux_dur=lambda: _duration_by_demux(path))
 
         captured_at = _video_capture_time(container)
         frames: list[FrameSig] = []
@@ -332,12 +330,15 @@ def _probe_video(
             frames = _sample_by_seek(container, vs, tb, targets, max_edge=max_edge,
                                      profiler=profiler)
             # Transport streams frequently BREAK mid-file seeking (a seek to a non-zero target
-            # returns zero frames — measured), collapsing the sample set. When seeking yields
-            # well under the target count, fall back to a single sequential decode pass that
-            # picks the frame nearest each target — O(clip) but reliable, and it only runs when
-            # seeking under-delivered. min_comparable_frames is the floor that makes a clip
-            # dedup-able (§5.3), so recover at least that many before giving up on the timeline.
-            if len(frames) < min(n, cfg.min_comparable_frames):
+            # returns zero frames — measured), collapsing the sample set. Whenever seeking
+            # yields fewer than the FULL target count, fall back to a single sequential decode
+            # pass — O(clip) but reliable — and keep whichever produced more frames. Triggering
+            # on any shortfall (not just below min_comparable_frames) matters: a partial 5–11
+            # frame seek result is still a thinner, sparser signal than the full n, and the
+            # matcher aligns two clips by frame_index — so more frames = more comparable pairs
+            # = higher recall on borderline near-dups (§5.3). The sequential pass is cheap
+            # relative to a missed dup, and only runs when the fast seek path under-delivered.
+            if len(frames) < n:
                 seq = _sample_sequential(container, vs, tb, targets, max_edge=max_edge,
                                          profiler=profiler)
                 if len(seq) > len(frames):
@@ -400,7 +401,14 @@ def _sample_sequential(container, vs, tb, targets, *, max_edge, profiler) -> lis
     decode from the start once, and for each ascending target keep the first frame whose pts
     is at/after it. O(clip) rather than O(keyframe) but correct where seeking silently
     returns nothing. Rewinds to the start first; ``targets`` must be ascending (they are —
-    segment midpoints)."""
+    segment midpoints).
+
+    When a clip has FEWER real frames than targets (short/low-fps, or targets past the last
+    frame), one decoded frame is the nearest to several targets: it is emitted under EACH such
+    target's index — PDQ'd once, reused — so the slot count stays == the number of satisfied
+    targets rather than collapsing. Matching aligns by frame_index (§5.3), so filling every
+    covered slot with the same frame preserves alignment with a full-count peer instead of
+    leaving gaps that shrink the comparable-pair set."""
     frames: list[FrameSig] = []
     with profiler.timer("video", "decode"):
         try:
@@ -413,15 +421,16 @@ def _sample_sequential(container, vs, tb, targets, *, max_edge, profiler) -> lis
                 break
             if frame.pts is None:
                 continue
-            # Advance past any targets this frame satisfies (handles sparse/low-fps clips
-            # where one decoded frame is the nearest to several targets — take it once).
             if frame.pts >= targets[ti]:
                 arr = frame.to_ndarray(format="rgb24")
                 bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
+                # This frame satisfies target ti and possibly later ones too — emit it under
+                # each covered index (hash computed once, reused) so no slot is dropped.
                 frames.append(FrameSig(ti, float(frame.pts * tb), bits, q))
                 ti += 1
                 while ti < len(targets) and frame.pts >= targets[ti]:
-                    ti += 1                          # this frame is also nearest later targets
+                    frames.append(FrameSig(ti, float(frame.pts * tb), bits, q))
+                    ti += 1
     return frames
 
 
@@ -445,20 +454,33 @@ def _video_duration_s(stream_dur, tb, container_dur, container_tb, *, demux_dur)
     return None
 
 
-def _duration_by_demux(container, vs, tb) -> float | None:
-    """Estimate a video's duration from its last packet's timestamp (§5.3 fallback).
+def _duration_by_demux(path: str) -> float | None:
+    """Estimate a video's LENGTH (seconds) from its packet timestamps (§5.3 fallback).
 
     For containers that report no stream/container duration (transport streams, truncated
-    captures), demux the video stream WITHOUT decoding — cheap relative to a full decode,
-    since it reads packet headers, not pixels — and take the greatest presentation end
-    (``pts + packet.duration``). Falls back to ``dts`` when ``pts`` is absent. Returns
-    ``None`` if the stream carries no timestamps at all (the caller then keeps the
-    single-frame path). Never raises — a demux error just means "no better estimate".
+    captures), open a **separate short-lived container** and demux the video stream WITHOUT
+    decoding — cheap relative to a full decode, since it reads packet headers, not pixels —
+    then take the greatest presentation end (``pts + packet.duration``, or ``dts``) **minus
+    the stream ``start_time``**. Subtracting start_time yields a true LENGTH consistent with
+    the native ``stream``/``container`` durations, NOT an absolute end-timestamp — otherwise a
+    non-zero start_time (common on transport streams) is double-counted when the sampler later
+    offsets its targets by start_time. A dedicated container keeps the caller's container
+    pristine (never advanced to EOF, so no fragile post-EOF rewind). Returns ``None`` when the
+    stream carries no usable timestamps. Never raises — any error just means "no estimate".
     """
-    if not tb:
-        return None
-    last = None
+    import av  # type: ignore
+
     try:
+        container = av.open(fsutil.extended(path))
+    except Exception:  # noqa: BLE001 - unopenable → best-effort None
+        return None
+    try:
+        vs = container.streams.video[0]
+        tb = vs.time_base
+        if not tb:
+            return None
+        start = vs.start_time or 0
+        last = None
         for packet in container.demux(vs):
             ts = packet.pts if packet.pts is not None else packet.dts
             if ts is None:
@@ -466,9 +488,14 @@ def _duration_by_demux(container, vs, tb) -> float | None:
             end = ts + (packet.duration or 0)
             if last is None or end > last:
                 last = end
+        if last is None:
+            return None
+        length = last - start
+        return float(length * tb) if length > 0 else None
     except Exception:  # noqa: BLE001 - unreadable tail → best-effort None
         return None
-    return float(last * tb) if last else None
+    finally:
+        container.close()
 
 
 def _video_capture_time(container) -> str | None:
@@ -546,7 +573,7 @@ def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
                 # rather than NULL — one seam, consistent across both probe paths (§5.3).
                 fp.duration_s = _video_duration_s(
                     vs.duration, tb, container.duration, av.time_base,
-                    demux_dur=lambda: _duration_by_demux(container, vs, tb))
+                    demux_dur=lambda: _duration_by_demux(path))
                 fp.captured_at = _video_capture_time(container)
             finally:
                 container.close()
