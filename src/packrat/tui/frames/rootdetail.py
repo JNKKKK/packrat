@@ -204,7 +204,7 @@ class RootDetailScreen(FrameScreen):
         if self.focus == "review":
             # ↑/↓ scroll the Review box when its content exceeds the responsive cap.
             from ..screens.rootdetail import review_scroll_max
-            hi = review_scroll_max(self._detail or {}, self._geo, focused=True)
+            hi = review_scroll_max(self._detail or {}, self._geo)
             self.review_scroll = max(0, min(self.review_scroll + delta, hi))
             self.refresh_frame()
             return

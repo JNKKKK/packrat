@@ -1474,9 +1474,12 @@ blowup.
        how much of the collection the lead rests on resolution alone vs. the finer calls, so the
        suggestion's confidence is visible before you act on it. The CLI staging log and the TUI
        Review box render this from **one shared builder** (`packrat/review_stats.py`) over the same
-       persisted `review_actions` rows, so they can't drift — the box also adds a PDQ-distance
-       histogram, the internal/external group make-up, and the mixed-group suggestion split
-       (all-internal vs. mixed → suggest-external vs. suggest-internal).
+       persisted `review_actions` rows, so they can't drift — the box also adds **separate photo and
+       video PDQ-distance histograms** (bins derived from the stage's thresholds; video is a mean-
+       Hamming on its own scale, §5.3), the internal/external group make-up, and the mixed-group
+       suggestion split (all-internal vs. mixed → suggest-external vs. suggest-internal). **Stage 3
+       (minor edits)** renders the same near-dup shape (groups/members + photo histogram + make-up)
+       but no keep-lead columns, since it is unranked.
      - **`--confirm --keep-suggested` (stage 2 only): act on the suggestion in bulk.** Instead of
        reviewing shortcut-by-shortcut, this **keeps only each group's `_suggested` lead and deletes
        every other member, ignoring your shortcut edits for the stage**. It is the "I trust packrat's
@@ -2624,7 +2627,7 @@ screen over a shared `frames.base`, each paired with its `screens/*` builder of 
 plain strings; the Textual screens each display one pre-composed frame and own only key routing / focus
 / liveness (a light poll timer + the running job's SSE stream — the app drives fetch/subscribe directly,
 no separate subscription object). One pure builder lives **outside** `tui/`: `packrat/review_stats.py`
-(dedup stage-1/2 review stats — compute + line-builders) is shared by the TUI Review box AND the CLI
+(dedup stage-1/2/3 review stats — compute + line-builders) is shared by the TUI Review box AND the CLI
 `dedup` staging log, so it sits at the top level where both the jobs layer and the TUI can import it
 without either depending on the other ([[review-stats-shared-renderer]]).
 

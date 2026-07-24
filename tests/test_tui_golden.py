@@ -185,7 +185,7 @@ def test_root_detail_stage2_rich_review_renders_and_scrolls():
     """A stage-2 review with the rich bundle shows the two-column keep-lead + PDQ
     histogram + make-up, and (overflowing the responsive cap) a scroll indicator."""
     from packrat.tui.geometry import Geometry
-    from packrat.tui.screens.rootdetail import review_content_lines, _review_rows
+    from packrat.tui.screens.rootdetail import review_content_lines, _detail_split
 
     d = fixtures.root_detail_stage2_rich()
     geo = Geometry(100, 34)                     # tall enough for a legible cap
@@ -200,7 +200,7 @@ def test_root_detail_stage2_rich_review_renders_and_scrolls():
     # so assert them against the FULL content (not the clipped frame) + the scroll indicator.
     content = review_content_lines(d, geo, focused=True)
     assert any("group make-up:" in ln for ln in content)
-    assert len(content) > _review_rows(d, geo)
+    assert len(content) > _detail_split(d, geo)[0]
     assert "of " in built and "↑/↓" in built
 
 
@@ -211,9 +211,7 @@ def test_root_detail_stage3_review_shows_histogram_and_makeup():
     from packrat.tui.geometry import Geometry
 
     def perc(g, ext, dist):
-        return {"kind": "perceptual", "group_no": g, "is_external": ext, "is_lead": 0,
-                "lead_reason": None, "distance": dist, "media_type": "photo",
-                "path": (r"\\nas\x" if ext else "C:\\x")}
+        return fixtures.perceptual_action(g, is_external=ext, distance=dist)
     rows = []
     for i in range(6):
         rows += [perc(i, 0, 12 + i * 3), perc(i, 0, 12 + i * 3)]

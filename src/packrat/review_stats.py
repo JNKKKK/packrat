@@ -26,6 +26,13 @@ from .jobs.dedup_rank import ordered_lead_levels
 _T_RECOMPRESS, _T_EDIT, _T_MATCH_VIDEO = 10, 32, 90
 _OPEN = 10 ** 9   # open-ended top-bin upper bound
 
+#: The text width the line-builders receive at the TUI's reference geometry — the SAME
+#: value the Review box passes them there (``_review_text_w(REFERENCE) − 2`` for the 2-space
+#: indent). Headless callers (the daemon staging log, with no client terminal size) render
+#: to this so the log and the box stay byte-identical (§8 B "can't drift"); the live TUI
+#: derives its width from the real geometry instead.
+REFERENCE_TEXT_WIDTH = 90
+
 
 def _thirds(lo: int, hi: int) -> list[tuple[str, int, int]]:
     """Split the inclusive range [lo, hi] into 3 near-even bins → (label, lo, hi) each."""
@@ -82,23 +89,6 @@ def _truthy(v) -> bool:
     return bool(v)
 
 
-def _group_makeup(grouped: Iterable[list[dict]]) -> tuple[int, int]:
-    """Count ``(internal_only, mixed)`` over groups of ``review_actions`` (§8 B).
-
-    A group is *mixed* if it spans both an internal and an external member, else
-    *internal-only*. (An all-external group is unreachable — every group has a target-root
-    member — so it's folded into neither; see :func:`stage2_stats`.)"""
-    internal_only = mixed = 0
-    for members in grouped:
-        has_ext = any(_truthy(m.get("is_external")) for m in members)
-        has_int = any(not _truthy(m.get("is_external")) for m in members)
-        if has_ext and has_int:
-            mixed += 1
-        elif has_int:
-            internal_only += 1
-    return internal_only, mixed
-
-
 def stage1_split(rows: Iterable[dict]) -> dict:
     """Stage-1 exact-delete breakdown: files to delete (internal/external) + group make-up.
 
@@ -113,18 +103,12 @@ def stage1_split(rows: Iterable[dict]) -> dict:
     """
     rows = [r for r in rows if r.get("kind") == "exact"]
     external = sum(1 for r in rows if _truthy(r.get("is_external")))
-    # Group make-up: a stage-1 group spans roots iff its asset's copies aren't all internal.
-    # `exact-internal` = internal-only; any other reason means an external copy is involved
+    # Group make-up: a stage-1 group (one asset's copies) spans roots iff any of its rows
+    # isn't `exact-internal` — a non-internal reason means an external copy is involved
     # (survivor external, or an external delete under --prefer-internal) → mixed.
-    by_asset: dict = {}
-    for r in rows:
-        by_asset.setdefault(r.get("asset_id"), []).append(r)
-    internal_only = mixed = 0
-    for members in by_asset.values():
-        if all(m.get("reason") == "exact-internal" for m in members):
-            internal_only += 1
-        else:
-            mixed += 1
+    mixed_assets = {r.get("asset_id") for r in rows if r.get("reason") != "exact-internal"}
+    mixed = len(mixed_assets)
+    internal_only = len({r.get("asset_id") for r in rows}) - mixed
     return {"to_delete": len(rows), "internal": len(rows) - external, "external": external,
             "groups_internal_only": internal_only, "groups_mixed": mixed}
 
@@ -166,13 +150,16 @@ def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
     pdq_photo = _bin(_photo_bins(stage, t_rec, t_edit), _dists("photo"))
     pdq_video = _bin(_video_bins(t_video), _dists("video")) if stage == 2 else {}
 
-    # (c) group make-up + (stage 2) suggestion split + the keep-suggested delete set.
-    all_internal, mixed = _group_makeup(groups.values())
-    suggest_ext = suggest_int = ks_delete = ks_network = 0
+    # (c) group make-up + (stage 2) suggestion split + the keep-suggested delete set — one
+    # pass over the groups. A group is *mixed* if it spans both sides, *all-internal* if it
+    # has only internal members; an all-external group is unreachable (every group has a
+    # target-root member) so it falls into neither count.
+    all_internal = mixed = suggest_ext = suggest_int = ks_delete = ks_network = 0
     for members in groups.values():
         has_ext = any(_truthy(m.get("is_external")) for m in members)
         has_int = any(not _truthy(m.get("is_external")) for m in members)
         if has_ext and has_int:
+            mixed += 1
             # Every stage-2 group has ≥1 internal member (cluster built from edges with a
             # target-root endpoint), so a mixed group always has a suggested lead and these
             # two counts sum to `mixed` — for fresh data. A leadless mixed group (only stale
@@ -183,6 +170,8 @@ def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
                     suggest_ext += 1
                 else:
                     suggest_int += 1
+        elif has_int:
+            all_internal += 1
         # --keep-suggested deletes every non-lead member (deterministic from is_lead).
         for m in members:
             if not _truthy(m.get("is_lead")):
@@ -208,21 +197,25 @@ def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
 # ---------------------------------------------------------------------------
 # line-builders (bundle → list[str]); pure text, width-parameterized
 # ---------------------------------------------------------------------------
+def _makeup_line(internal_only: int, mixed: int, *,
+                 internal_label: str = "all-internal", indent: str = "") -> str:
+    """The shared internal/mixed group make-up line (§8 B) — one source for the
+    ``· N mixed (internal+external)`` tail across all three stages, so it can't drift.
+
+    Stage 1 labels its internal count "internal-only" and bakes in its own indent (its
+    callers don't add one); stages 2/3 use "all-internal" and let their caller indent."""
+    return (f"{indent}group make-up:  {internal_only} {internal_label} · "
+            f"{mixed} mixed (internal+external)")
+
+
 def stage1_lines(split: dict) -> list[str]:
     """The stage-1 lines: delete count (internal/external) + group make-up (§8 B)."""
-    lines = [f"  to delete (exact): {split['to_delete']} file(s)  ·  "
-             f"{split['internal']} internal, {split['external']} external"]
-    lines.append(
-        f"  group make-up:  {split.get('groups_internal_only', 0)} internal-only · "
-        f"{split.get('groups_mixed', 0)} mixed (internal+external)"
-    )
-    return lines
-
-
-def _makeup_line(bundle: dict) -> str:
-    """The shared internal/mixed group make-up line for stages 2/3 (§8 B)."""
-    return (f"group make-up:  {bundle['groups_all_internal']} all-internal · "
-            f"{bundle['groups_mixed']} mixed (internal+external)")
+    return [
+        f"  to delete (exact): {split['to_delete']} file(s)  ·  "
+        f"{split['internal']} internal, {split['external']} external",
+        _makeup_line(split.get("groups_internal_only", 0), split.get("groups_mixed", 0),
+                     internal_label="internal-only", indent="  "),
+    ]
 
 
 def stage3_lines(bundle: dict, width: int) -> list[str]:
@@ -232,7 +225,7 @@ def stage3_lines(bundle: dict, width: int) -> list[str]:
     no keep-lead column and no keep-suggested action — just the near-dup shape."""
     body = [f"{bundle['groups']} near-dup groups / {bundle['members']} members (default-keep)"]
     body += _histogram_lines(bundle["pdq_photo"], width, title="PDQ distance")
-    body.append(_makeup_line(bundle))
+    body.append(_makeup_line(bundle["groups_all_internal"], bundle["groups_mixed"]))
     if bundle["groups_mixed"]:
         body.append(
             f"  of the {bundle['groups_mixed']} mixed groups, an external copy is present"
@@ -261,13 +254,9 @@ def _hcolumns(cols: list[list[str]], gap: int = 2) -> list[str]:
     return out
 
 
-def _columns_width(cols: list[list[str]], gap: int = 2) -> int:
-    """Total display width :func:`_hcolumns` would produce for ``cols``."""
-    cols = [c for c in cols if c]
-    if not cols:
-        return 0
-    return sum(max((len(s) for s in c), default=0) + gap for c in cols[:-1]) \
-        + max((len(s) for s in cols[-1]), default=0)
+def _fits(lines: list[str], width: int) -> bool:
+    """Whether a laid-out block (from :func:`_hcolumns`) stays within ``width`` cells."""
+    return max((len(ln) for ln in lines), default=0) <= width
 
 
 def _lead_column(title: str, tally: dict[str, int], short: dict[str, str]) -> list[str]:
@@ -326,21 +315,23 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
         hist_cols.append(_histogram_lines(bundle["pdq_video"], width, title="PDQ video"))
 
     header = ["keep-lead decided by:"]
-    all_cols = lead_cols + hist_cols
-    if hist_cols and _columns_width(all_cols) <= width:
+    one_row = _hcolumns(lead_cols + hist_cols)
+    if hist_cols and _fits(one_row, width):
         # Everything fits on one row: photos · videos · PDQ photo · PDQ video.
-        body = header + _hcolumns(all_cols)
+        body = header + one_row
     else:
-        # Wrap: keep-lead columns under the header, then the histograms side by side below
-        # (each histogram re-sized to its half so the wrapped row doesn't overflow).
+        # Wrap: keep-lead columns under the header, then the two histograms side by side on
+        # their own row below; if even that overflows, stack them (bar length is capped by
+        # ``width`` in either case, so they never spill — only their side-by-side sum can).
         body = header + _hcolumns(lead_cols)
-        if len(hist_cols) == 2 and _columns_width(hist_cols) <= width:
-            body += _hcolumns(hist_cols)
+        hist_row = _hcolumns(hist_cols)
+        if len(hist_cols) == 2 and _fits(hist_row, width):
+            body += hist_row
         else:
             for h in hist_cols:      # too narrow even for two → stack
                 body += h
 
-    body.append(_makeup_line(bundle))
+    body.append(_makeup_line(bundle["groups_all_internal"], bundle["groups_mixed"]))
     if bundle["groups_mixed"]:
         body.append(
             f"  of the {bundle['groups_mixed']} mixed groups →  "

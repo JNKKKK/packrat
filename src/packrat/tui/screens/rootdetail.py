@@ -84,17 +84,13 @@ def _split_rows(content_len: int, geo: Geometry) -> tuple[int, int]:
     return review, s - review
 
 
-def _detail_split(d: dict, geo: Geometry, *, focused: bool = False) -> tuple[int, int]:
+def _detail_split(d: dict, geo: Geometry) -> tuple[int, int]:
     """``(review_interior, jobs_interior)`` for root ``d`` — see :func:`_split_rows`.
 
-    ``focused`` must match how the box is rendered so the cap and the rendered content
-    are derived from the SAME line list (no desync)."""
-    return _split_rows(len(review_content_lines(d, geo, focused=focused)), geo)
-
-
-def _review_rows(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> int:
-    """The Review box's interior height this frame (the responsive cap, §3)."""
-    return _detail_split(d, geo, focused=focused)[0]
+    The split is a function of the review content's LINE COUNT, which is focus-invariant
+    (focus only swaps the box title/hint TEXT, never the number of lines), so this needs no
+    ``focused`` flag."""
+    return _split_rows(len(review_content_lines(d, geo)), geo)
 
 
 def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
@@ -282,12 +278,13 @@ def _stats_columns(d: dict, now: str, width: int) -> list[str]:
     ]
 
 
-def review_scroll_max(d: dict, geo: Geometry = REFERENCE, *, focused: bool = False) -> int:
+def review_scroll_max(d: dict, geo: Geometry = REFERENCE) -> int:
     """Max ↑/↓ scroll offset for the Review box this frame (0 when it all fits).
 
-    Derives BOTH the content length and the cap from the same focused build (via
-    :func:`_detail_split`), so the scroll bound matches the rendered window exactly."""
-    content = review_content_lines(d, geo, focused=focused)
+    Derives the content length and the cap from the same :func:`_split_rows` the render
+    uses, so the scroll bound matches the rendered window exactly. (Line count is
+    focus-invariant, so no focused flag is needed.)"""
+    content = review_content_lines(d, geo)
     review_h, _ = _split_rows(len(content), geo)
     return max(0, len(content) - review_h)
 

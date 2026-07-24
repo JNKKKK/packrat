@@ -280,6 +280,20 @@ def root_detail_pending() -> dict:
     }
 
 
+def perceptual_action(group_no, *, is_external=0, is_lead=0, lead_reason=None,
+                      distance=0, media_type="photo", path=None) -> dict:
+    """A synthetic stage-2/3 perceptual ``review_actions`` row-dict (§8 B).
+
+    One factory for the shape so the fixture and the golden test can't drift from the real
+    row the dedup job emits (they had to move in lockstep when ``is_lead``/``lead_reason``
+    were added). ``path`` defaults to a representative internal/external sample path."""
+    if path is None:
+        path = "\\\\nas\\x" if is_external else "C:\\x"
+    return {"kind": "perceptual", "group_no": group_no, "is_external": is_external,
+            "is_lead": is_lead, "lead_reason": lead_reason, "distance": distance,
+            "media_type": media_type, "path": path}
+
+
 def root_detail_stage2_rich() -> dict:
     """iPhone parked at stage 2 with a RICH `stage2` bundle (§8 B item-3 metrics).
 
@@ -290,9 +304,8 @@ def root_detail_stage2_rich() -> dict:
     from ..review_stats import stage2_stats
 
     def perc(g, ext, lead, reason, dist, mt="photo"):
-        return {"kind": "perceptual", "group_no": g, "is_external": ext, "is_lead": lead,
-                "lead_reason": reason, "distance": dist, "media_type": mt,
-                "path": (r"\\nas\x" if ext else "C:\\x")}
+        return perceptual_action(g, is_external=ext, is_lead=lead, lead_reason=reason,
+                                 distance=dist, media_type=mt)
 
     rows = []
     for i in range(18):

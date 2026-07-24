@@ -75,11 +75,6 @@ _STAGE_LABEL = {
 #: staging code and `--keep-suggested` confirm key off this, so keep them in sync.
 _SUGGESTED_MARK = "_suggested"
 
-#: Text width the stage-2 stats block is laid out to in the CLI staging log. The daemon
-#: streams logs to whatever client is attached (no known terminal size), so it uses the
-#: TUI reference frame's text width rather than reflowing to a live terminal.
-_CLI_STATS_WIDTH = 92
-
 
 # ---------------------------------------------------------------------------
 # lazy DB cleanup (a plain delete is not trash, §4/§6) — see jobs._dbops.
@@ -1028,6 +1023,11 @@ def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
         return
     m = ctx.config.match
     thresholds = dict(t_rec=m.t_photo_recompress, t_edit=m.t_photo_edit, t_video=m.t_match_video)
+    # Lay the block out to the SAME width the Review box feeds the shared builder at the
+    # reference geometry (review_stats.REFERENCE_TEXT_WIDTH): the daemon streams logs to
+    # whatever client is attached (no known terminal size), so it renders to that reference
+    # rather than reflowing — and matching the box's builder width keeps the two identical.
+    width = review_stats.REFERENCE_TEXT_WIDTH
     if stage == STAGE_EXACT:
         for ln in review_stats.stage1_lines(review_stats.stage1_split(actions)):
             ctx.log(ln)
@@ -1035,14 +1035,13 @@ def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
         bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path, **thresholds)
         # keep_suggested=False: the CLI prints its OWN `--confirm --keep-suggested` tip
         # (below, in _report_staged), so suppress the box's `[b]` tip here — `[b]` is a
-        # TUI-only key and would duplicate the CLI tip. Width = the reference frame's text
-        # width; the daemon has no client terminal size, so the log isn't reflowed to it.
-        for ln in review_stats.stage2_lines(bundle, _CLI_STATS_WIDTH, keep_suggested=False):
+        # TUI-only key and would duplicate the CLI tip.
+        for ln in review_stats.stage2_lines(bundle, width, keep_suggested=False):
             ctx.log(f"  {ln}")
     elif stage == STAGE_EDIT:
         bundle = review_stats.stage2_stats(actions, stage=3, is_network=fsutil.is_network_path,
                                            **thresholds)
-        for ln in review_stats.stage3_lines(bundle, _CLI_STATS_WIDTH):
+        for ln in review_stats.stage3_lines(bundle, width):
             ctx.log(f"  {ln}")
 
 

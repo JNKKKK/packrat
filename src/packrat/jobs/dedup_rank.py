@@ -67,31 +67,30 @@ _PREFERENCE_TIEBREAK = "internal/external preference"
 _PATH_TIEBREAK = "path tiebreak (identical rank)"
 
 
-def ordered_lead_levels() -> list[str]:
-    """Canonical best-first display order of the keep-lead decision levels (§8 B).
+#: Canonical best-first display order of the keep-lead decision levels (§8 B) — the single
+#: source of truth for how the stage-2 lead-pick stats are ordered, used by BOTH the CLI
+#: staging log and the TUI Review box so the two can't drift when a level is added/reworded.
+#: Photo then video (they share the ``resolution`` / path labels; a homogeneous group only
+#: ever uses one family, so the shared labels dedup), then the preference tiebreak, then the
+#: bare path tiebreak. Constant — its inputs are all frozen at import.
+_ORDERED_LEAD_LEVELS = list(dict.fromkeys(
+    (*_PHOTO_LEAD_LEVELS, *_VIDEO_LEAD_LEVELS, _PREFERENCE_TIEBREAK, _PATH_TIEBREAK)))
 
-    The single source of truth for how the stage-2 lead-pick stats are ordered — used by
-    BOTH the CLI staging log (``dedup._report_lead_stats``) and the TUI Review box so the
-    two can't drift when a level is added/reworded. Photo then video (they share the
-    ``resolution`` / path labels; a homogeneous group only ever uses one family), then the
-    preference tiebreak, then the bare path tiebreak.
-    """
-    seen: dict[str, None] = {}
-    for lvl in (*_PHOTO_LEAD_LEVELS, *_VIDEO_LEAD_LEVELS, _PREFERENCE_TIEBREAK, _PATH_TIEBREAK):
-        seen.setdefault(lvl, None)
-    return list(seen)
+
+def ordered_lead_levels() -> list[str]:
+    """The canonical best-first keep-lead decision-level order (§8 B); see
+    :data:`_ORDERED_LEAD_LEVELS`."""
+    return _ORDERED_LEAD_LEVELS
 
 
 def _pref_rank(is_external: bool, prefer_internal: bool) -> int:
     """Keep-preference rank (higher = preferred to KEEP) for a full-key tie (§8 B).
 
     Default: external is the master, so an external copy outranks an internal one.
-    ``--prefer-internal`` flips it. Only meaningful inside a mixed group; homogeneous
-    groups all share one rank, so it is a no-op and the path tiebreak decides.
+    ``--prefer-internal`` flips it (an XOR of the two flags). Only meaningful inside a mixed
+    group; homogeneous groups all share one rank, so it is a no-op and the path decides.
     """
-    if prefer_internal:
-        return 0 if is_external else 1
-    return 1 if is_external else 0
+    return int(is_external != prefer_internal)
 
 
 def _photo_format_rank(path: str) -> int:
