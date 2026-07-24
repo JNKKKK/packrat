@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from packrat import db
 from packrat.config import Config, ScheduleConfig
+from packrat.jobs import scheduler as sched_mod
 from packrat.jobs.scheduler import (
-    PERIODIC_TASKS, PROBE_ALL_TASK, PeriodicScheduler, PeriodicTask, submit_probe_all,
+    PERIODIC_TASKS, PROBE_ALL_TASK, PeriodicScheduler, PeriodicTask, _probe_trigger,
+    submit_probe_all,
 )
-from packrat.roots import register
+from packrat.roots import enabled_library_root_ids, register
 
 
 class _SpyQueue:
@@ -134,6 +136,92 @@ def test_scheduler_task_error_does_not_propagate(packrat_home):
             sched.shutdown()
     finally:
         d.close()
+
+
+def test_scheduler_start_swallows_a_bad_trigger(packrat_home):
+    """A task whose trigger(config) raises must NOT propagate out of start() (which runs
+    in the FastAPI startup hook — a raise there crashes daemon boot). Regression: only
+    _make_scheduler() was guarded; arming ran unguarded."""
+    d = _db(packrat_home)
+    try:
+        def _bad_trigger(config):
+            raise ValueError("bad cadence")
+
+        task = PeriodicTask(name="boom-trigger", submit=submit_probe_all,
+                            trigger=_bad_trigger)
+        sched = PeriodicScheduler(_SpyQueue(), d, Config(), tasks=[task])
+        sched.start()      # must NOT raise
+        try:
+            # The bad task is skipped, but the scheduler still started up.
+            assert sched._scheduler is not None
+            assert sched._scheduler.get_job("boom-trigger") is None
+        finally:
+            sched.shutdown()
+    finally:
+        d.close()
+
+
+def test_scheduler_start_skips_one_bad_task_but_arms_the_rest(packrat_home, tmp_path):
+    """One task that fails to arm must not drop a healthy sibling (independent guards)."""
+    d = _db(packrat_home)
+    try:
+        lib = tmp_path / "lib"
+        lib.mkdir()
+        register(d, str(lib))
+
+        def _bad_enabled(config):
+            raise RuntimeError("gate blew up")
+
+        bad = PeriodicTask(name="bad", submit=submit_probe_all,
+                           trigger=PROBE_ALL_TASK.trigger, enabled=_bad_enabled)
+        sched = PeriodicScheduler(_SpyQueue(), d, Config(), tasks=[bad, PROBE_ALL_TASK])
+        sched.start()      # must NOT raise
+        try:
+            assert sched._scheduler.get_job("bad") is None        # skipped
+            assert sched._scheduler.get_job("probe-all") is not None  # sibling still armed
+        finally:
+            sched.shutdown()
+    finally:
+        d.close()
+
+
+def test_probe_all_uses_the_shared_sweep_set(packrat_home, tmp_path):
+    """The scheduler fan-out targets EXACTLY roots.enabled_library_root_ids — the same set
+    the daemon's /probe --all endpoint uses (§8 A2b), so scheduled + manual sweeps can't
+    drift. Asserts the thunk's submitted ids equal the shared helper's output."""
+    d = _db(packrat_home)
+    try:
+        for n in ("a", "b"):
+            p = tmp_path / n
+            p.mkdir()
+            register(d, str(p))
+        trash = tmp_path / "t"
+        trash.mkdir()
+        register(d, str(trash), kind="trash")     # excluded by the shared helper
+        spy = _SpyQueue()
+        submit_probe_all(spy, d)
+        assert [c[1]["root_id"] for c in spy.calls] == enabled_library_root_ids(d)
+    finally:
+        d.close()
+
+
+def test_probe_trigger_floors_near_zero_interval():
+    """A misconfigured near-zero probe_interval_hours (0 meant as 'off') is clamped to the
+    minimum interval, so it can't fire a fan-out every few seconds (§6 footgun fix)."""
+    cfg = Config(schedule=ScheduleConfig(probe_interval_hours=0.0))
+    trig = _probe_trigger(cfg)
+    # IntervalTrigger stores its period as a timedelta; assert it hit the floor.
+    assert trig.interval.total_seconds() == sched_mod._MIN_INTERVAL_S
+    # And the jitter never exceeds the (clamped) interval — no window overrun.
+    assert trig.jitter <= sched_mod._MIN_INTERVAL_S
+
+
+def test_probe_trigger_respects_a_sane_interval():
+    """A normal cadence passes through as configured (hours → seconds), jitter uncapped."""
+    cfg = Config(schedule=ScheduleConfig(probe_interval_hours=24.0))
+    trig = _probe_trigger(cfg)
+    assert trig.interval.total_seconds() == 24 * 3600
+    assert trig.jitter == sched_mod._JITTER_S
 
 
 def test_probe_all_is_the_registered_task():

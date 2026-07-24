@@ -126,6 +126,22 @@ def middle_elide(text: str, width: int, ellipsis: str = ELLIPSIS) -> str:
     return cell_truncate(text, head) + ellipsis + (_tail_by_cells(text, tail) if tail else "")
 
 
+def end_elide(text: str, width: int, ellipsis: str = ELLIPSIS) -> str:
+    """Shrink ``text`` from the END to ≤ ``width`` display cells (``head…``; CJK-aware).
+
+    The ``elide='end'`` cell rule (keep the drive/start, drop the tail), exposed so a
+    post-layout pass can reproduce EXACTLY what a fixed-width :class:`Cell` renders for
+    over-width text (e.g. a long root NAME the colorizer must re-locate in the frame) —
+    one source of truth, so the display form and the match form can never drift."""
+    if width <= 0:
+        return ""
+    if cell_width(text) <= width:
+        return text
+    if width <= cell_width(ellipsis):
+        return cell_truncate(ellipsis, width)
+    return cell_truncate(text, width - cell_width(ellipsis)) + ellipsis
+
+
 def _elide(text: str, width: int, mode: str) -> str:
     """Shrink ``text`` to ≤ ``width`` display cells per ``mode`` (used within a cell)."""
     if width <= 0:
@@ -136,10 +152,7 @@ def _elide(text: str, width: int, mode: str) -> str:
         return middle_elide(text, width)
     if mode == "none":
         return cell_truncate(text, width)        # hard cut, no ellipsis
-    # 'end' (default): trailing ellipsis, drive/start kept
-    if width <= cell_width(ELLIPSIS):
-        return cell_truncate(ELLIPSIS, width)
-    return cell_truncate(text, width - cell_width(ELLIPSIS)) + ELLIPSIS
+    return end_elide(text, width)                # 'end' (default): trailing ellipsis
 
 
 def _align(text: str, width: int, align: str) -> str:

@@ -156,6 +156,66 @@ def test_scan_fast_path_skips(queue_and_db, tiny_photos):
     assert c["assets"] == 2 and c["instances"] == 3
 
 
+def test_scan_sets_needs_dedup_only_when_it_indexes_new_content(queue_and_db, tiny_photos):
+    """The §12 dedup-dirty signal: a scan that indexes NEW content marks the root
+    needs_dedup=1; a no-op re-scan (all fast-path skips) leaves the flag untouched. This
+    is the fix for "a routine re-scan flipped a fully-deduped root back to ◉ yellow"."""
+    q, database = queue_and_db
+    root = register(database, str(tiny_photos))
+    _run_scan(q, database, root["id"])                 # first scan indexes 2 new assets
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 1
+    # Simulate a completed dedup consuming the signal.
+    database.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))
+    # A no-op re-scan (everything fast-path-skips) must NOT re-dirty the root.
+    _run_scan(q, database, root["id"])
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0, "no-op re-scan must stay clean"
+    # But a genuinely new file re-dirties it.
+    import numpy as np
+    from PIL import Image
+    arr = np.random.default_rng(7).integers(0, 256, (32, 32, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(tiny_photos / "fresh.png")
+    _run_scan(q, database, root["id"])
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 1
+
+
+def test_scan_reappearing_trash_does_not_dirty_root(queue_and_db, tiny_photos):
+    """A byte-identical TRASH re-appearance (matches_trashed) is NOT new dedup-able content
+    — dedup ignores trashed assets — so it must not set needs_dedup (§12 rung 3). Covers
+    both the plain-attach and the backfill (perceptual-refill of a trashed asset) variants."""
+    q, database = queue_and_db
+    root = register(database, str(tiny_photos))
+    _run_scan(q, database, root["id"])
+    # Trash b.png's asset, drop its perceptual rows AND its instances so the on-disk file
+    # re-appears and takes the backfill branch on the trashed asset (matches_trashed).
+    a = database.query_one(
+        "SELECT a.id FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
+        "WHERE fi.filename='b.png' LIMIT 1")
+    database.execute("UPDATE assets SET status='trashed' WHERE id=?", (a["id"],))
+    database.execute("DELETE FROM phash WHERE asset_id=?", (a["id"],))
+    database.execute("DELETE FROM file_instances WHERE asset_id=?", (a["id"],))
+    database.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))  # start clean
+    _run_scan(q, database, root["id"])                 # b.png hits the trashed asset
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0, "reappearing trash must not dirty"
+
+
+def test_scan_undecodable_only_does_not_dirty_root(queue_and_db, tmp_path):
+    """A scan that indexes ONLY an undecodable file gains no phash → nothing dedup-able →
+    needs_dedup stays 0 (§12 rung 3). An undecodable asset is hash-only, never a near-dup."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "broken.png").write_bytes(b"not a real png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    assert database.query_one("SELECT COUNT(*) c FROM assets WHERE undecodable=1")["c"] == 1
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0
+
+
 def test_scan_deletion_detection_forgets_asset(queue_and_db, tiny_photos):
     q, database = queue_and_db
     root = register(database, str(tiny_photos))

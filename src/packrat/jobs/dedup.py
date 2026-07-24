@@ -209,6 +209,9 @@ def _analyze(ctx: JobContext) -> None:
                 "created_at, confirmed_at) VALUES (?, 'dedup', 'completed', 1, 'applied', ?, ?)",
                 (root_id, now_iso(), now_iso()),
             )
+            # Dedup reached `completed` (already-clean path) ⇒ consume the dedup-dirty
+            # signal so the §12 dot moves to ◉ green (the root has no actionable dups now).
+            conn.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root_id,))
         ctx.log("already clean: no exact duplicates or near-dup groups to review.")
         return
 
@@ -1011,6 +1014,9 @@ def _finalize_completed(ctx, root, run_id) -> None:
     with db.transaction() as conn:
         conn.execute("UPDATE review_runs SET status='completed', confirmed_at=? WHERE id=?",
                      (now_iso(), run_id))
+        # Dedup reached `completed` (all stages reviewed) ⇒ consume the dedup-dirty signal
+        # so the §12 dot moves to ◉ green (§12 rung 3 → rung 4). Paired with last_dedup_at.
+        conn.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))
     ctx.log(f"dedup complete for {root['name']}: all stages reviewed.")
 
 

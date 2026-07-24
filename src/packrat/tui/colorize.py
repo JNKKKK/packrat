@@ -175,9 +175,13 @@ def recolor_root_dots(text: Text, frame: str, roots: list[dict],
         glyph, role = render.root_dot_pair(r)
         if not glyph.strip():          # blank (shouldn't happen for library) → nothing to color
             continue
-        name = r.get("name")
-        if not name:
+        if not r.get("name"):
             continue
+        # Anchor on the name AS THE ROW RENDERS IT — a name wider than NAME_W is
+        # end-elided to `head…` in the row, so matching the raw name would miss it and
+        # leave a long-named root's dot mis-colored (the glyph pass's default). Both come
+        # from render.root_name_display, so the display + match forms can't drift.
+        name = render.root_name_display(r)
         for i, ln in enumerate(lines):
             npos = ln.find(name)
             # Anchor on the row's NAME CELL, matching the WHOLE name, not a prefix:

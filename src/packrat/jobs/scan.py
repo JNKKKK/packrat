@@ -338,11 +338,25 @@ def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_
         if created:
             _insert_perceptual(conn, asset_id, fp)
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
+        # A genuinely new, DECODABLE asset is new dedup-able content in this root → mark it
+        # dedup-dirty (§12 rung 3 ◉ yellow) in the SAME transaction as the asset write, so
+        # it is crash-atomic: an interrupted scan that commits the asset can't leave the
+        # signal unset (a resume then fast-path-skips the asset → the end-of-loop write
+        # would never re-set it → the root would wrongly read ◉ green). A new UNDECODABLE
+        # asset gains no phash and is the first of its hash (no dup yet), so it doesn't; a
+        # race-lost insert (created=False) is an exact dup, also not new dedup-able content.
+        if created and not fp.undecodable:
+            conn.execute("UPDATE roots SET needs_dedup=1 WHERE id=?", (root_id,))
     return created
 
 
-def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_at: str) -> None:
-    """Update an existing asset in place with freshly-computed perceptual data (§8 A2 step 6 backfill)."""
+def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: media.Fingerprint,
+                      seen_at: str, *, asset_status: str = "active") -> None:
+    """Update an existing asset in place with freshly-computed perceptual data (§8 A2 step 6 backfill).
+
+    ``asset_status`` is the pre-backfill ``assets.status`` — it gates the dedup-dirty
+    signal (a TRASHED asset's backfill is not new *active* dedup-able content: dedup only
+    considers active assets, so it must not turn the root ◉ yellow)."""
     with db.transaction() as conn:
         conn.execute(
             "UPDATE assets SET size=?, width=?, height=?, duration_s=?, captured_at=?, "
@@ -354,6 +368,13 @@ def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: medi
         conn.execute("DELETE FROM vphash WHERE asset_id=?", (asset_id,))
         _insert_perceptual(conn, asset_id, fp)
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
+        # A backfill fills in an ACTIVE asset's previously-missing perceptual rows → it is
+        # now dedup-able where it wasn't → mark the root dedup-dirty, in-transaction (§12
+        # rung 3; crash-atomic, same rationale as _persist_new — a resume fast-path-skips
+        # the now-fingerprinted asset). Excluded: an UNDECODABLE fill (gains no phash) and a
+        # TRASHED asset (dedup ignores trash — a reappearing trash file is not new work).
+        if not fp.undecodable and asset_status != "trashed":
+            conn.execute("UPDATE roots SET needs_dedup=1 WHERE id=?", (root_id,))
 
 
 def _attach_instance(db, asset_id: int, root_id: int, cand: Candidate, seen_at: str) -> None:
@@ -408,7 +429,8 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
     if ((not asset["undecodable"]) and not complete) or (bool(asset["undecodable"]) and full):
         fp = decode()
         with profiler.timer("shared", "db"):
-            _persist_backfill(db, asset_id, root_id, cand, fp, seen_at)
+            _persist_backfill(db, asset_id, root_id, cand, fp, seen_at,
+                              asset_status=asset["status"])
         profiler.file_done(medium)
         if fp.undecodable:
             _note_undecodable(fp)
@@ -817,6 +839,12 @@ def _run_scan(ctx: JobContext) -> None:
         # offline (§8 A2b). (Before the offline guard, `--full` stamped last_full_scan_at on
         # a root whose enumeration failed, recording a full scan that never happened.)
         if not dry_run and not rep.get("root_offline"):
+            # NB: the dedup-dirty signal (roots.needs_dedup) is NOT set here — it is set
+            # per-file, in the SAME transaction as each new/backfilled asset write
+            # (_persist_new / _persist_backfill), so an interrupted scan that committed new
+            # content can't leave it unset (§12 rung 3; a resume fast-path-skips the asset,
+            # so an end-of-loop write would miss it). Here we only clear the probe signal +
+            # stamp the full-scan timestamp.
             if full:
                 # --full: stamp the integrity-pass timestamp AND consume the probe signal.
                 db.execute(
@@ -824,8 +852,8 @@ def _run_scan(ctx: JobContext) -> None:
                     (seen_at, root_row["id"]),
                 )
             else:
-                # Incremental: just consume the probe signal (the news are now fingerprinted,
-                # so the §12 dot moves off "new files probed" onto its scan/dedup rungs).
+                # Incremental: consume the probe signal (the news are now fingerprinted, so
+                # the §12 dot moves off "new files probed" onto its scan/dedup rungs).
                 db.execute("UPDATE roots SET probe_new_count=0 WHERE id=?", (root_row["id"],))
         reports.append(rep)
 

@@ -71,6 +71,42 @@ def test_init_db_is_idempotent(packrat_home, tmp_path):
         c2.close()
 
 
+def test_added_columns_retrofit_onto_legacy_roots(packrat_home, tmp_path):
+    """The pre-release live-DB patch (§4, no migration runner): init_db `ALTER TABLE …
+    ADD COLUMN`s the additive roots columns (last_probe_at, probe_new_count, needs_dedup)
+    onto a DB whose roots table predates them, defaulting existing rows to current
+    behavior (counts/flags 0). Simulates the real upgrade path a live catalog takes."""
+    from packrat.db.connection import _ADDED_COLUMNS, _ensure_added_columns
+
+    dbfile = tmp_path / "legacy.db"
+    c = sqlite3.connect(dbfile)
+    c.row_factory = sqlite3.Row
+    # A minimal "old" roots table — the columns that predate the probe/dedup signals.
+    c.execute(
+        "CREATE TABLE roots (id INTEGER PRIMARY KEY, path TEXT, name TEXT, kind TEXT, "
+        "enabled INTEGER NOT NULL DEFAULT 1, last_full_scan_at TEXT)"
+    )
+    c.execute("INSERT INTO roots(path,name,kind) VALUES ('X:/p','p','library')")
+    c.commit()
+    cols_before = {r["name"] for r in c.execute("PRAGMA table_info(roots)")}
+    for _tbl, col, _ddl in _ADDED_COLUMNS:
+        assert col not in cols_before          # precondition: legacy table lacks them
+
+    _ensure_added_columns(c)
+    c.commit()
+
+    cols_after = {r["name"] for r in c.execute("PRAGMA table_info(roots)")}
+    for _tbl, col, _ddl in _ADDED_COLUMNS:
+        assert col in cols_after               # each additive column retrofitted
+    # The existing row gained the columns with current-behavior defaults (NULL / 0).
+    row = c.execute("SELECT last_probe_at, probe_new_count, needs_dedup FROM roots").fetchone()
+    assert row["last_probe_at"] is None
+    assert row["probe_new_count"] == 0 and row["needs_dedup"] == 0
+    # Idempotent: a second pass adds nothing and does not raise.
+    _ensure_added_columns(c)
+    c.close()
+
+
 def test_nested_execute_inside_transaction_is_atomic(conn):
     """A db.execute() nested inside `with db.transaction()` must NOT commit early —
     a later exception rolls the WHOLE unit back (regression: execute auto-committed,

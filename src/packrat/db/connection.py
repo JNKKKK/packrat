@@ -57,10 +57,12 @@ def connect(
 class Database:
     """The daemon's single write connection, guarded by a lock (§3 single writer).
 
-    Both the API thread (creating a ``jobs`` row on submit) and the worker thread
-    (progress + op writes) go through this. Read-only snapshot queries
-    (``status``/``roots``) should instead open their own short-lived read-only
-    connection via :func:`connect` so they never contend with the writer.
+    Three daemon threads go through this, all serialized by :attr:`lock`: the **API
+    thread** (creating a ``jobs`` row on submit), the **worker thread** (progress + op
+    writes), and the **periodic-scheduler thread** (:class:`packrat.jobs.scheduler.\
+PeriodicScheduler`, which enqueues via ``queue.submit`` → a ``jobs`` insert). Read-only
+    snapshot queries (``status``/``roots``) should instead open their own short-lived
+    read-only connection via :func:`connect` so they never contend with the writer.
     """
 
     def __init__(self, conn: sqlite3.Connection):
@@ -217,6 +219,10 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # (table, column, DDL) — the roots probe-signal columns (§8 A2b / §12 dot).
     ("roots", "last_probe_at", "TEXT"),
     ("roots", "probe_new_count", "INTEGER NOT NULL DEFAULT 0"),
+    # the dedup-dirty signal (§12 ◉ yellow): 1 ⇒ scanned content awaiting (re-)dedup.
+    # Defaults to 0 on a retrofit; self-heals on the next scan/dedup (a still-yellow root
+    # whose last_dedup_at IS NULL is ALSO caught by the ladder's "never deduped" rung).
+    ("roots", "needs_dedup", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

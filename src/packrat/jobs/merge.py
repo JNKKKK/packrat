@@ -167,6 +167,13 @@ def _merge(ctx: JobContext) -> None:
     db.backup_labeled(f"premerge-{root_id}")
     out = _copy_and_register(ctx, run, root, run["dest_path"])
 
+    # Merge introduced dedup-able content ⇒ mark the dest root dedup-dirty (§12 rung 3 ◉
+    # yellow), so the dot flips to "need dedup". Only REGISTERED files count: `new` totals
+    # registered + copied-unindexed, and an unindexed file never enters the catalog, so it
+    # is not dedup-able. Mirrors scan's new-content gate; cleared by the next dedup.
+    if out["new"] - out["unindexed"] > 0:
+        db.execute("UPDATE roots SET needs_dedup=1 WHERE id=?", (root_id,))
+
     # Finalize (§8 C Safety & resume) — retained as queryable merge history (§14 #5).
     db.execute("UPDATE merge_runs SET status='done', finished_at=? WHERE id=?", (now_iso(), run["id"]))
     _report(ctx, root, source, out, dry_run=False)

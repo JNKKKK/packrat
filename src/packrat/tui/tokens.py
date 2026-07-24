@@ -153,27 +153,36 @@ GEM_GRADIENT = (
 )
 
 
-def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at) -> tuple[str, str]:
+def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at,
+               needs_dedup=None) -> tuple[str, str]:
     """The 4-state freshness dot for a root as a ``(glyph, role)`` pair (§12 / TODO Part C).
 
     Color, not just shape, carries meaning: ``◉`` is BOTH green (deduped) and yellow
     (need-dedup), so this returns the semantic **role** the colorizer paints, not a bare
     glyph. The precedence ladder — get the order right, it's the subtle part:
 
-    1. ``probe_new_count > 0``          → ``◐`` grey  — new files probed, unscanned files
-       waiting. **Checked FIRST, above `never`**: a freshly-registered root's first probe
-       finds every file new (count>0) with ``last_scan_at=NULL``; it must read "new files
-       probed", not "never". "Has unscanned files" outranks ALL scan/dedup states.
-    2. no ``last_scan_at``              → ``○`` grey  — never scanned.
-    3. ``last_dedup_at > last_scan_at`` → ``◉`` green — deduped AFTER the latest scan
-       (recency-relative: a scan after the last dedup drops it to yellow — a timestamp
-       comparison, not a truthiness check).
-    4. else (scanned)                   → ``◉`` yellow — scanned, not (re-)deduped since.
+    1. ``probe_new_count > 0``   → ``◐`` grey  — new files probed, unscanned files waiting.
+       **Checked FIRST, above `never`**: a freshly-registered root's first probe finds every
+       file new (count>0) with ``last_scan_at=NULL``; it must read "new files probed", not
+       "never". "Has unscanned files" outranks ALL scan/dedup states.
+    2. no ``last_scan_at``       → ``○`` grey  — never scanned.
+    3. ``needs_dedup`` OR no ``last_dedup_at`` → ``◉`` yellow — has scanned content awaiting
+       a (re-)dedup, or was never deduped at all.
+    4. else                      → ``◉`` green — scanned AND deduped, nothing dirty since.
 
-    A found-nothing probe (``count == 0``) skips rung 1 and falls through to the
-    never/scan/dedup rungs — which read only the probe-untouched timestamps — so it is
-    inherently a dot no-op (never→never, green→green, yellow→yellow). A completed scan
-    zeroes ``probe_new_count``, so a scan-latest root skips rung 1 too.
+    **Why an event flag, not a recency test.** Rung 3 keys off the ``needs_dedup`` signal
+    (set when a scan/merge indexes NEW content, cleared when a dedup completes — §12 /
+    ``roots.needs_dedup``), NOT the old ``last_dedup_at > last_scan_at`` comparison. That
+    comparison was wrong: ``last_scan_at = MAX(file_instances.last_seen_at)`` bumps on EVERY
+    walked file, so a no-op re-scan (found nothing new) flipped a fully-deduped root back to
+    yellow. With the flag, a no-op scan doesn't set it, so green→green holds; a scan that
+    finds new content sets it → yellow, until the next dedup clears it. ``last_dedup_at``
+    now only gates "ever deduped?" (rung 3's OR), which also makes the ``needs_dedup=0``
+    retrofit default self-correct: a scanned-but-never-deduped legacy root still reads yellow.
+
+    A found-nothing probe (``count == 0``) skips rung 1; a completed scan zeroes
+    ``probe_new_count`` (also skipping rung 1). ``needs_dedup`` defaults to ``None`` for
+    callers/tests that don't thread it (treated as 0 — falls to the ``last_dedup_at`` gate).
 
     Trash roots return a blank glyph (they render "(trash)", never a dot); the role is
     irrelevant there.
@@ -184,6 +193,6 @@ def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at) -> tuple
         return DOT_PROBED, "dim"            # ◐ grey — outranks EVERY other state
     if not last_scan_at:
         return DOT_NEVER, "dim"             # ○ grey
-    if last_dedup_at and last_dedup_at > last_scan_at:
-        return DOT_DEDUPED, "success"       # ◉ green
-    return DOT_NEEDS_DEDUP, "warn"          # ◉ yellow
+    if (needs_dedup or 0) > 0 or not last_dedup_at:
+        return DOT_NEEDS_DEDUP, "warn"      # ◉ yellow — dirty, or never deduped
+    return DOT_DEDUPED, "success"           # ◉ green — scanned + deduped, nothing dirty

@@ -148,9 +148,31 @@ def test_merge_copies_new_files(queue_and_db, tmp_path):
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == 2
     # Merge-created assets are un-perceptual (no phash yet — a later scan backfills).
     assert database.query_one("SELECT COUNT(*) c FROM phash")["c"] == 0
+    # A merge that registered new content marks the dest root dedup-dirty (§12 rung 3 ◉ yellow).
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 1
     # merge_runs finalized as history.
     mr = database.query_one("SELECT status FROM merge_runs")
     assert mr["status"] == "done"
+
+
+def test_merge_all_ignored_does_not_dirty_dest(queue_and_db, tmp_path):
+    """A merge that registers NOTHING (every file lands on an ignored dest path →
+    copied-unindexed) must NOT mark the dest root dedup-dirty — nothing enters the
+    catalog, so there is nothing to dedup (§12 rung 3)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    root = register(database, str(lib), ignore_globs=["Screenshots/"])
+    src = tmp_path / "src"
+    _png(src / "Screenshots" / "a.png", 1)
+    _png(src / "Screenshots" / "b.png", 2)     # both under the ignored subtree
+
+    _merge_job(q, database, src, root)
+    # Copied to disk but never catalogued → no dedup-able content → not dirty.
+    assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == 0
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0
 
 
 def test_merge_mirrors_structure(queue_and_db, tmp_path):

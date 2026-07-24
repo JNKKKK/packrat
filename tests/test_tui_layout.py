@@ -203,48 +203,63 @@ def test_fit_width_hard_truncates():
 
 
 # --- status_dot: the 4-state ladder (§12 / TODO Part C) --------------------
-# Signature: status_dot(kind, probe_new_count, last_scan_at, last_dedup_at) -> (glyph, role).
+# Signature: status_dot(kind, probe_new_count, last_scan_at, last_dedup_at, needs_dedup)
+#   -> (glyph, role). Green/yellow now key off the needs_dedup event flag (set by a scan/
+#   merge that indexed new content, cleared by a completed dedup), NOT a scan-vs-dedup
+#   recency compare — so a no-op re-scan can't flip a deduped root back to yellow.
 def test_status_dot_trash_blank():
-    assert tokens.status_dot("trash", 0, "2024", "2024") == (tokens.DOT_TRASH, "dim")
+    assert tokens.status_dot("trash", 0, "2024", "2024", 0) == (tokens.DOT_TRASH, "dim")
 
 
 def test_status_dot_deduped_is_green():
-    # dedup NEWER than the latest scan → ◉ green (recency-relative).
-    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01") == (
+    # deduped (last_dedup_at set) and NOT dirty (needs_dedup=0) → ◉ green.
+    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01", 0) == (
         tokens.DOT_DEDUPED, "success")
 
 
 def test_status_dot_need_dedup_is_yellow():
-    # scanned, never deduped → ◉ yellow.
-    assert tokens.status_dot("library", 0, "2024-01-01", None) == (
+    # scanned, never deduped (last_dedup_at None) → ◉ yellow (ladder's "never deduped" OR).
+    assert tokens.status_dot("library", 0, "2024-01-01", None, 0) == (
         tokens.DOT_NEEDS_DEDUP, "warn")
 
 
-def test_status_dot_scan_after_dedup_drops_to_yellow():
-    # a scan AFTER the last dedup → dedup no longer newest → ◉ yellow (need re-dedup).
-    assert tokens.status_dot("library", 0, "2024-03-01", "2024-02-01") == (
+def test_status_dot_dirty_flag_forces_yellow():
+    # deduped BUT flagged dirty (a scan/merge indexed new content since) → ◉ yellow.
+    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01", 1) == (
         tokens.DOT_NEEDS_DEDUP, "warn")
+
+
+def test_status_dot_noop_rescan_after_dedup_stays_green():
+    # THE FIX (§12): a scan LATER than the last dedup but that indexed nothing new
+    # (needs_dedup=0) must STAY ◉ green — the old recency rule wrongly flipped it yellow.
+    assert tokens.status_dot("library", 0, "2024-03-01", "2024-02-01", 0) == (
+        tokens.DOT_DEDUPED, "success")
 
 
 def test_status_dot_never_is_grey_hollow():
-    assert tokens.status_dot("library", 0, None, None) == (tokens.DOT_NEVER, "dim")
+    assert tokens.status_dot("library", 0, None, None, 0) == (tokens.DOT_NEVER, "dim")
 
 
 def test_status_dot_probe_new_outranks_every_state():
     # probe_new_count>0 → ◐ grey, from ANY prior state incl. never (rung 1, above `never`).
-    assert tokens.status_dot("library", 5, None, None) == (tokens.DOT_PROBED, "dim")      # never
-    assert tokens.status_dot("library", 5, "2024-01-01", "2024-02-01") == (
+    assert tokens.status_dot("library", 5, None, None, 0) == (tokens.DOT_PROBED, "dim")   # never
+    assert tokens.status_dot("library", 5, "2024-01-01", "2024-02-01", 0) == (
         tokens.DOT_PROBED, "dim")                                                        # was green
-    assert tokens.status_dot("library", 5, "2024-02-01", "2024-01-01") == (
+    assert tokens.status_dot("library", 5, "2024-02-01", "2024-01-01", 1) == (
         tokens.DOT_PROBED, "dim")                                                        # was yellow
 
 
 def test_status_dot_count_zero_probe_is_a_noop():
     # A found-nothing probe (count 0) leaves the dot at its scan/dedup rung: never→never,
     # green→green, yellow→yellow (the count is the whole self-clearing signal).
-    assert tokens.status_dot("library", 0, None, None)[0] == tokens.DOT_NEVER
+    assert tokens.status_dot("library", 0, None, None, 0)[0] == tokens.DOT_NEVER
+    assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01", 0)[0] == tokens.DOT_DEDUPED
+    assert tokens.status_dot("library", 0, "2024-02-01", None, 0)[0] == tokens.DOT_NEEDS_DEDUP
+
+
+def test_status_dot_needs_dedup_defaults_to_off():
+    # The needs_dedup arg is optional (callers/tests that don't thread it) → treated as 0.
     assert tokens.status_dot("library", 0, "2024-01-01", "2024-02-01")[0] == tokens.DOT_DEDUPED
-    assert tokens.status_dot("library", 0, "2024-02-01", None)[0] == tokens.DOT_NEEDS_DEDUP
 
 
 # --- token derivations -----------------------------------------------------

@@ -179,7 +179,7 @@ def roots_snapshot() -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT r.id, r.name, r.path, r.kind, r.enabled, r.last_full_scan_at, "
-            "  r.last_probe_at, r.probe_new_count, "
+            "  r.last_probe_at, r.probe_new_count, r.needs_dedup, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
             "   WHERE fi.root_id = r.id) AS asset_count, "
             "  (SELECT COUNT(DISTINCT fi.asset_id) FROM file_instances fi "
@@ -307,6 +307,8 @@ def root_detail(root_arg: str) -> dict | None:
             # driver — >0 means unscanned files await a scan; §12 rung 1).
             "last_probe_at": match["last_probe_at"],
             "probe_new_count": match["probe_new_count"],
+            # Dedup-dirty signal (§12 rung 3): 1 ⇒ scanned content awaiting a (re-)dedup.
+            "needs_dedup": match["needs_dedup"],
             "last_scan_at": last_scan_at,
             "photos": photos, "videos": videos, "instances": instances,
             "size_bytes": size_bytes,             # total on-disk bytes of this root's files

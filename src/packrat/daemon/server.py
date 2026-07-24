@@ -37,7 +37,8 @@ import queue as _queue
 #: liveness checks; also the max lag before a dropped sentinel is noticed.
 _SSE_HEARTBEAT_S = 15.0
 
-from .. import __version__, build as build_mod, config as config_mod, db as db_mod, paths, queries
+from .. import (__version__, build as build_mod, config as config_mod, db as db_mod, paths,
+                queries, roots as roots_mod)
 from ..jobs import JobQueue
 from ..jobs.reconcile import reconcile_on_startup
 from ..util import now_iso
@@ -346,10 +347,10 @@ def build_app(token: str, *, db_file=None, config_path=None):
         deduped ids may repeat a still-queued probe). A trash root is rejected (400).
         """
         if bool(body.get("all")):
-            rows = database.query(
-                "SELECT id FROM roots WHERE enabled=1 AND kind='library' ORDER BY id"
-            )
-            job_ids = [queue.submit("probe", {"root_id": r["id"]}) for r in rows]
+            # One probe per enabled library root — the single definition of the sweep set
+            # (shared with the scheduler's probe-all task, §8 A2b) so the two can't drift.
+            job_ids = [queue.submit("probe", {"root_id": rid})
+                       for rid in roots_mod.enabled_library_root_ids(database)]
             return {"job_ids": job_ids}
         arg = body.get("root")
         if not arg:

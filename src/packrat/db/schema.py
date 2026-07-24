@@ -40,12 +40,21 @@ CREATE TABLE IF NOT EXISTS roots (
     ignore_globs       TEXT,                 -- JSON array of per-root --ignore patterns
     last_full_scan_at  TEXT,
     last_probe_at      TEXT,                 -- when `probe` last completed on this root (§8 A2b)
-    probe_new_count    INTEGER NOT NULL DEFAULT 0
+    probe_new_count    INTEGER NOT NULL DEFAULT 0,
     -- new/changed files probe last saw awaiting a scan. Set by a completed probe; CLEARED
     -- to 0 by a completed scan of the root. This ONE field carries the whole dot-precedence
     -- signal (§12): because a completed scan always resets it to 0, `count > 0` means exactly
     -- "a probe found unscanned files and no scan has consumed them yet" — no separate
     -- `last_activity` column is needed. Offline probe writes nothing (never reads as "clean").
+    needs_dedup        INTEGER NOT NULL DEFAULT 0
+    -- 1 ⇒ this root has scanned content awaiting a (re-)dedup (§12 ◉ yellow). SET by the
+    -- events that introduce dedup-able content — a scan that indexed ≥1 genuinely new/
+    -- changed asset, or a merge that registered ≥1 new instance — and CLEARED to 0 when a
+    -- dedup run reaches `completed` (incl. the already-clean path). This is an EVENT signal,
+    -- not a timestamp: a no-op re-scan (0 new) leaves it untouched, so a fully-deduped root
+    -- stays ◉ green across routine scans instead of flipping yellow — which a `last_dedup_at
+    -- > last_scan_at` recency test could NOT express (last_scan_at = MAX(last_seen_at) bumps
+    -- on every walked file). Mirrors probe_new_count's set-by-producer/clear-by-consumer shape.
 );
 
 -- ---------------------------------------------------------------------------

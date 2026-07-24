@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from . import tokens
 from .data import fmt_eta, reltime, same_day
-from .layout import Cell, middle_elide, row
+from .layout import Cell, end_elide, middle_elide, row
 from .tokens import BAR_EMPTY, BAR_FILL, CURSOR, RUNNING
 
 
@@ -155,6 +155,17 @@ def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None
 NAME_W = 24
 
 
+def root_name_display(r: dict) -> str:
+    """The root NAME exactly as its fixed-width row cell renders it (end-elided to NAME_W).
+
+    A name wider than :data:`NAME_W` shows as ``head…`` in the row — so the post-layout
+    dot recolorizer (:func:`packrat.tui.colorize.recolor_root_dots`) must anchor on THIS
+    form, not the raw name, or a long-named root's dot never gets found + recolored. Both
+    the row builders and the recolor pass call this, so the display + match forms can't
+    drift (via :func:`layout.end_elide`, the same rule the ``Cell`` applies)."""
+    return end_elide(r["name"], NAME_W)
+
+
 def root_dot(r: dict) -> str:
     """The freshness-dot GLYPH for a root row (◉/◐/○, or blank for trash).
 
@@ -167,11 +178,13 @@ def root_dot(r: dict) -> str:
 def root_dot_pair(r: dict) -> tuple[str, str]:
     """The freshness dot as ``(glyph, role)`` (§12 4-state ladder — TODO Part C).
 
-    Reads ``probe_new_count`` + ``last_scan_at`` + ``last_dedup_at`` off the query row
-    and delegates to :func:`tokens.status_dot`. The role is what a row Cell carries (so
-    the theme colorizes ◉ green vs. yellow correctly), NOT a glyph the colorizer guesses."""
+    Reads ``probe_new_count`` + ``last_scan_at`` + ``last_dedup_at`` + ``needs_dedup`` off
+    the query row and delegates to :func:`tokens.status_dot`. The role is what a row Cell
+    carries (so the theme colorizes ◉ green vs. yellow correctly), NOT a glyph the colorizer
+    guesses."""
     return tokens.status_dot(
-        r["kind"], r.get("probe_new_count"), r.get("last_scan_at"), r.get("last_dedup_at")
+        r["kind"], r.get("probe_new_count"), r.get("last_scan_at"), r.get("last_dedup_at"),
+        r.get("needs_dedup"),
     )
 
 
@@ -190,7 +203,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str
         width,
         [
             Cell(cur, width=1, style="highlighted" if selected else None),
-            Cell(r["name"], width=NAME_W),
+            Cell(root_name_display(r), width=NAME_W),
             Cell(r["path"], grow=1, elide="middle"),   # absorbs the middle
             Cell(dot, width=1, style=dot_role),
             Cell(count, width=7, align="right", style="dim" if r["kind"] == "trash" else None),
@@ -224,7 +237,7 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
         width,
         [
             Cell(cur, width=1, style="highlighted" if selected else None),
-            Cell(r["name"], width=NAME_W),
+            Cell(root_name_display(r), width=NAME_W),
             Cell(r["path"], grow=1, elide="middle"),    # absorbs the middle
             dot_cell,
             count_cell,

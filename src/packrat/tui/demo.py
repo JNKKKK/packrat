@@ -110,11 +110,17 @@ def _root(spec) -> dict:
     # size column shows varied realistic values; trash roots are empty.
     size_bytes = 0 if kind == "trash" else photos * 4_000_000 + videos * 60_000_000
     probe_new = 0 if kind == "trash" else _PROBE_NEW.get(rid, 0)
+    # Dedup-dirty flag (§12 rung 3): the spec's scan/dedup timestamps used to encode the
+    # green/yellow split via a recency compare; the ladder now uses this event flag, so
+    # derive it from the SAME relationship to preserve the demo's dot variety — a root
+    # scanned AFTER its last dedup is dirty (needs_dedup=1). A never-deduped root falls to
+    # yellow via the ladder's "never deduped" branch regardless, so its flag stays 0.
+    needs_dedup = 1 if (dedup and scan and scan > dedup) else 0
     return {
         "id": rid, "name": name, "path": path, "kind": kind, "enabled": 1,
         "last_full_scan_at": full,
         "last_probe_at": None if kind == "trash" else "2026-07-15T12:45:00",
-        "probe_new_count": probe_new,
+        "probe_new_count": probe_new, "needs_dedup": needs_dedup,
         "asset_count": photos + videos, "photos": photos, "videos": videos,
         "instance_count": photos + videos, "size_bytes": size_bytes,
         "last_scan_at": scan, "last_dedup_at": dedup,
@@ -384,6 +390,7 @@ def root_detail(name: str) -> dict | None:
         "id": r["id"], "name": r["name"], "path": r["path"], "kind": r["kind"],
         "enabled": 1, "last_full_scan_at": r["last_full_scan_at"],
         "last_probe_at": r.get("last_probe_at"), "probe_new_count": r.get("probe_new_count", 0),
+        "needs_dedup": r.get("needs_dedup", 0),
         "last_scan_at": r["last_scan_at"],
         "photos": r["photos"], "videos": r["videos"], "instances": r["instance_count"],
         "size_bytes": r["size_bytes"],

@@ -44,6 +44,11 @@ _MISFIRE_GRACE_S = 3600
 #: Small per-job jitter (seconds) so a fan-out doesn't thundering-herd the queue at
 #: the exact same instant — matters once many roots each enqueue a probe.
 _JITTER_S = 300
+#: Floor on a periodic interval (seconds). A misconfigured near-zero
+#: ``probe_interval_hours`` (e.g. 0, meant as "off") would otherwise fire a fan-out every
+#: few seconds; clamp it here (the intended off-switch is ``probe_enabled=false``). 15 min
+#: is far below any sane real cadence yet still bounds the runaway.
+_MIN_INTERVAL_S = 900
 
 
 @dataclass(frozen=True)
@@ -68,23 +73,31 @@ class PeriodicTask:
 def submit_probe_all(queue, db) -> None:
     """Fan-out: submit one ``probe <root>`` per enabled **library** root (§8 A2b).
 
-    Skips ``kind='trash'`` roots (scan/probe never touch trash — §6.1). Each submission
-    gets its own queue entry + dequeue gate; the queue's submit-dedup collapses a
-    re-fire before the previous batch drained to a no-op (one queued probe per root).
-    A plain function ``(queue, db) -> None`` so it is unit-testable without APScheduler.
-    """
-    rows = db.query("SELECT id, name FROM roots WHERE enabled=1 AND kind='library' ORDER BY id")
-    for r in rows:
-        queue.submit("probe", {"root_id": r["id"]})
-    log.info("scheduled probe sweep: submitted %d per-root probe(s)", len(rows))
+    Uses :func:`packrat.roots.enabled_library_root_ids` — the SAME sweep-set definition the
+    daemon's ``/probe --all`` endpoint uses (trash + disabled roots excluded, §6.1), so the
+    scheduled and manual sweeps can't drift. Each submission gets its own queue entry +
+    dequeue gate; the queue's submit-dedup collapses a re-fire before the previous batch
+    drained to a no-op (one queued probe per root). A plain ``(queue, db) -> None`` so it is
+    unit-testable without APScheduler."""
+    from .. import roots
+    root_ids = roots.enabled_library_root_ids(db)
+    for rid in root_ids:
+        queue.submit("probe", {"root_id": rid})
+    log.info("scheduled probe sweep: submitted %d per-root probe(s)", len(root_ids))
 
 
 def _probe_trigger(config: Config):
-    """An ``IntervalTrigger`` at ``schedule.probe_interval_hours`` (+ jitter), from config."""
+    """An ``IntervalTrigger`` at ``schedule.probe_interval_hours`` (+ jitter), from config.
+
+    The interval is clamped to :data:`_MIN_INTERVAL_S` so a misconfigured near-zero value
+    (0 is meant as "off" — that is ``probe_enabled=false``) can't fire a fan-out every few
+    seconds. The jitter is capped to below the (clamped) interval, so the +jitter window
+    can never overrun a whole period (a fixed 300 s jitter on a 3.6 s interval would)."""
     from apscheduler.triggers.interval import IntervalTrigger
 
-    hours = max(0.001, float(config.schedule.probe_interval_hours))
-    return IntervalTrigger(hours=hours, jitter=_JITTER_S)
+    seconds = max(_MIN_INTERVAL_S, float(config.schedule.probe_interval_hours) * 3600.0)
+    jitter = min(_JITTER_S, seconds / 2.0)
+    return IntervalTrigger(seconds=seconds, jitter=jitter)
 
 
 PROBE_ALL_TASK = PeriodicTask(
@@ -139,8 +152,12 @@ class PeriodicScheduler:
         """Register each enabled task + start the background scheduler (§3 startup hook).
 
         A task whose ``enabled(config)`` is false is simply not registered (its
-        off-switch). Safe if APScheduler is unavailable — logs and no-ops rather than
-        blocking daemon startup."""
+        off-switch). **Never blocks daemon startup**: building the scheduler, arming
+        each individual task (``enabled``/``trigger``/``add_job``), and starting the
+        background thread are ALL guarded — a failure is logged and skipped rather than
+        propagated out of the FastAPI startup hook. One bad task is skipped without
+        dropping the others; a build/start failure disables periodic jobs but leaves the
+        daemon up (durability lives in the job queue, not the schedule — §3)."""
         try:
             self._scheduler = self._make_scheduler()
         except Exception:  # noqa: BLE001 - never block daemon startup on the scheduler
@@ -149,15 +166,23 @@ class PeriodicScheduler:
             return
         armed = 0
         for task in self._tasks:
-            if not task.enabled(self._config):
-                log.info("periodic task %r disabled by config — not scheduled", task.name)
-                continue
-            self._scheduler.add_job(
-                self._run_task, trigger=task.trigger(self._config),
-                args=(task,), id=task.name, replace_existing=True,
-            )
-            armed += 1
-        self._scheduler.start()
+            try:
+                if not task.enabled(self._config):
+                    log.info("periodic task %r disabled by config — not scheduled", task.name)
+                    continue
+                self._scheduler.add_job(
+                    self._run_task, trigger=task.trigger(self._config),
+                    args=(task,), id=task.name, replace_existing=True,
+                )
+                armed += 1
+            except Exception:  # noqa: BLE001 - a bad task must not drop the others or block startup
+                log.exception("could not arm periodic task %r — skipped", task.name)
+        try:
+            self._scheduler.start()
+        except Exception:  # noqa: BLE001 - never block daemon startup on the scheduler
+            log.exception("could not start the periodic scheduler; periodic jobs disabled")
+            self._scheduler = None
+            return
         log.info("periodic scheduler started (%d task(s) armed)", armed)
 
     def shutdown(self) -> None:

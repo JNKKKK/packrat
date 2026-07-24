@@ -120,6 +120,19 @@ def ignore_globs_of(row) -> list[str]:
         return []
 
 
+def enabled_library_root_ids(db: Database) -> list[int]:
+    """The ids of every enabled **library** root, in registration order (§8 A2b).
+
+    The single definition of "which roots a `probe --all` sweep covers" — trash roots
+    (never scanned/probed, §6.1) and disabled roots are excluded. Shared by the daemon's
+    ``/probe --all`` endpoint and the periodic ``probe-all`` scheduler task so the manual
+    and scheduled sweeps can never target different sets."""
+    rows = db.query(
+        "SELECT id FROM roots WHERE enabled=1 AND kind='library' ORDER BY id"
+    )
+    return [int(r["id"]) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # resolution (§11): path first, then --name handle
 # ---------------------------------------------------------------------------

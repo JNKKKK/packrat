@@ -180,6 +180,9 @@ def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
     _scan_root(q, database, root["id"])
 
     assert queries.root_detail(str(lib))["last_dedup_at"] is None  # never deduped yet
+    # The scan marked the root dedup-dirty (indexed new content) — §12 rung 3.
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 1
     _run(q, database, "dedup", root_id=root["id"])                 # already clean → completed
     # A completed dedup run with confirmed_at exists, and status <root> surfaces it.
     row = database.query_one(
@@ -188,6 +191,9 @@ def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
     )
     assert row["status"] == "completed" and row["confirmed_at"] is not None
     assert queries.root_detail(str(lib))["last_dedup_at"] == row["confirmed_at"]
+    # An already-clean dedup completes → it CONSUMES the dedup-dirty signal (→ ◉ green).
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0
 
 
 def test_dedup_cancel_does_not_count_as_deduped(queue_and_db, tmp_path):
@@ -266,6 +272,9 @@ def test_dedup_stage1_exact_then_advances_to_stage2(queue_and_db, tmp_path):
         (root["id"],),
     )
     assert run_final["status"] == "completed"
+    # The full 3-stage completion consumes the dedup-dirty signal (→ ◉ green; §12 rung 3).
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0
     # Went through all stages → recorded as the last successful dedup (§11).
     from packrat import queries
     assert queries.root_detail(str(lib))["last_dedup_at"] == run_final["confirmed_at"]

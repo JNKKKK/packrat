@@ -306,12 +306,14 @@ def _dot_color(text, frame, roots, target_name):
     from packrat.tui import render
     r = next(x for x in roots if x["name"] == target_name)
     glyph, _ = render.root_dot_pair(r)
+    # Match the DISPLAYED (end-elided) name, exactly as recolor_root_dots does.
+    display_name = render.root_name_display(r)
     prefix = "│┃ " + tokens.CURSOR
     for i, ln in enumerate(frame.split("\n")):
-        npos = ln.find(target_name)
+        npos = ln.find(display_name)
         if npos == -1 or not all(c in prefix for c in ln[:npos]):
             continue
-        after = npos + len(target_name)
+        after = npos + len(display_name)
         if after < len(ln) and ln[after] != " ":
             continue
         dpos = ln.find(glyph, after)
@@ -362,6 +364,27 @@ def test_recolor_root_dots_ignores_name_prefix_and_path_collisions():
     assert _dot_color(text, frame, roots, "Photo") == T.color("success")
     assert _dot_color(text, frame, roots, "Photos") == T.color("warn")
     assert _dot_color(text, frame, roots, "Camera") == T.color("dim")
+
+
+def test_recolor_root_dots_colors_long_elided_name_row():
+    """A root NAME wider than NAME_W renders end-elided (`head…`); the dot recolorizer
+    must still find + recolor its row (regression: it matched the raw name → miss →
+    the ◉ kept the glyph pass's default green instead of its true role)."""
+    from packrat.tui import render
+    from packrat.tui.colorize import recolor_root_dots
+    from packrat.tui.screens.roots import roots_body
+    from packrat.tui.framing import screen
+    long_name = "Screenshots_and_Memes_2026"       # 26 > NAME_W (24) → elided in the row
+    assert len(long_name) > render.NAME_W
+    roots = [
+        # scanned, never deduped → ◉ YELLOW (need dedup); would wrongly read green if unfound
+        _mk_root(1, long_name, r"D:\a", "2024-02-01", None, 0),
+    ]
+    frame = screen("x", roots_body(roots, now="2026-07-15T00:00:00"), "up", footer="f")
+    assert long_name not in frame                   # the raw name is NOT in the frame (elided)
+    assert render.root_name_display(roots[0]) in frame
+    text = recolor_root_dots(colorize(frame), frame, roots)
+    assert _dot_color(text, frame, roots, long_name) == T.color("warn")
 
 
 def test_recolor_dot_legend_makes_need_dedup_yellow():
