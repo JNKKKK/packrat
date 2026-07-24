@@ -615,7 +615,7 @@ file I/O.
 
   | Param | Default | Meaning |
   |---|---|---|
-  | `video.sample_frames` | **12** | Frames sampled per video, at the **midpoints of N equal segments**: `t_k = duration·(k+0.5)/N`, `k=0..N-1`. Proportional positions ⇒ same-content clips align frame-to-frame. Short clips (e.g. a 3 s Live-Photo `.MOV`) still get all 12. |
+  | `video.sample_frames` | **12** | Frames sampled per video, at the **midpoints of N equal segments**: `t_k = duration·(k+0.5)/N`, `k=0..N-1` (offset by the stream's `start_time`, which transport streams commonly make non-zero). Proportional positions ⇒ same-content clips align frame-to-frame. Short clips (e.g. a 3 s Live-Photo `.MOV`) still get all 12. **Transport streams (`.ts`/`.m2ts`/`.mts`)** need two robustness fallbacks the mp4/mov path doesn't: (a) they often report **no duration** → recovered by a demux-only last-packet-timestamp pass; (b) they often **break mid-file seeking** (a seek to a non-zero target silently returns nothing) → sampling falls back from per-target seeks to one sequential decode pass picking the nearest frame to each target. Both engage only when the seek path under-delivers, so well-behaved containers keep the cheap seek. |
   | `video.duration_tol_s` | **1.0 s** | Absolute floor of the duration pre-filter. |
   | `video.duration_tol_pct` | **5.0 %** | Relative part. Two videos pass the pre-filter iff `|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min(d₁,d₂))` — so a 3 s clip tolerates ~1 s drift, a 2 h movie ~6 min. |
   | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoffs `t_photo_recompress`/`t_photo_edit`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) A video near-dup is a single frame-vote match — it is **not** banded into recompress/edit stages; all video matches go to dedup stage 2 (§8 B). |
@@ -1028,7 +1028,7 @@ hashed, fingerprinted, or turned into assets). It has two parts:
 - **Media extension allowlist** — only these become assets. The **default** is a fixed, closed
   set (case-insensitive), defined once here and reused everywhere:
   - **Photo:** `jpg jpeg jfif png gif bmp tif tiff webp avif heic heif`
-  - **Video:** `mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts 3gp`
+  - **Video:** `mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts ts 3gp`
 
   Anything else (`.txt`, `.zip`, `.pdf`, sidecars like `.aae`, etc.) is ignored. The set lives
   in config and can be edited, but the shipped default is exactly the two lists above — no

@@ -35,7 +35,7 @@ PHOTO_EXTS = frozenset(
     "jpg jpeg jfif png gif bmp tif tiff webp avif heic heif".split()
 )
 VIDEO_EXTS = frozenset(
-    "mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts 3gp".split()
+    "mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts ts 3gp".split()
 )
 RAW_EXTS = frozenset("dng cr2 cr3 nef arw raf orf rw2 pef srw".split())
 

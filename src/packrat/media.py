@@ -7,6 +7,11 @@ This module turns one file on disk into the values ``scan`` persists:
 - **perceptual signature** (M2, §5.3) — photo: one 256-bit PDQ + quality; video:
   duration + per-frame PDQ (+ quality) at ``video.sample_frames`` timeline
   midpoints. Both gate on a decoded RGB array (§9.1 "decode is the gate").
+  **Transport streams (.ts/.m2ts/.mts)** need two extra robustness steps the plain
+  mp4/mov path doesn't: they often report no container/stream duration (recovered by
+  a demux-only ``_duration_by_demux`` pass) and often break mid-file seeking (so
+  sampling falls back from ``_sample_by_seek`` to a single-pass ``_sample_sequential``
+  decode). Both only engage when the fast path under-delivers, so mp4/mov are unaffected.
 
 **Graceful failure is mandatory (§9.1).** Bytes hash first, so a file that won't
 decode still gets identity; the caller records it ``undecodable=1`` with a
@@ -299,49 +304,171 @@ def _probe_video(
         width = vs.codec_context.width or None
         height = vs.codec_context.height or None
         codec = (vs.codec_context.name or None) if vs.codec_context else None
-        if vs.duration and tb:
-            duration_s = float(vs.duration * tb)
-        elif container.duration:
-            duration_s = container.duration / av.time_base
-        else:
-            duration_s = None
+        # Transport streams (.ts/.m2ts/.mts) and other header-less muxes routinely report NO
+        # stream/container duration. Without a timeline we'd fall through to a single frame
+        # below → too few comparable frames to ever match (§5.3 min_comparable_frames), so the
+        # clip is catalogued but invisible to dedup. `_video_duration_s` prefers the stream
+        # duration, then the container's, then a demux-only fallback (packet headers, not
+        # pixels) — the fallback only runs when neither native source exists.
+        with profiler.timer("video", "decode"):
+            duration_s = _video_duration_s(
+                vs.duration, tb, container.duration, av.time_base,
+                demux_dur=lambda: _duration_by_demux(container, vs, tb))
+        if duration_s and tb:
+            try:
+                container.seek(0, stream=vs)         # rewind after any demux pass, before sampling
+            except Exception:  # noqa: BLE001 - per-k seeks are absolute, so this is belt-and-braces
+                pass
 
         captured_at = _video_capture_time(container)
         frames: list[FrameSig] = []
-        if not duration_s or not tb:
-            # No timeline to sample across — decode the first frame only.
+        if duration_s and tb:
+            # Presentation timestamps don't necessarily start at 0 — transport streams commonly
+            # carry a non-zero start_time (PCR offset), so seek targets must be measured FROM it.
+            start = vs.start_time or 0
+            targets = [start + int(duration_s * (k + 0.5) / n / tb) for k in range(n)]
+            # Seek-based sampling is cheap on well-behaved containers (mp4/mov): jump to each
+            # target's keyframe, decode forward a little. Try it first.
+            frames = _sample_by_seek(container, vs, tb, targets, max_edge=max_edge,
+                                     profiler=profiler)
+            # Transport streams frequently BREAK mid-file seeking (a seek to a non-zero target
+            # returns zero frames — measured), collapsing the sample set. When seeking yields
+            # well under the target count, fall back to a single sequential decode pass that
+            # picks the frame nearest each target — O(clip) but reliable, and it only runs when
+            # seeking under-delivered. min_comparable_frames is the floor that makes a clip
+            # dedup-able (§5.3), so recover at least that many before giving up on the timeline.
+            if len(frames) < min(n, cfg.min_comparable_frames):
+                seq = _sample_sequential(container, vs, tb, targets, max_edge=max_edge,
+                                         profiler=profiler)
+                if len(seq) > len(frames):
+                    frames = seq
+
+        # Guarantee ≥1 frame so the asset is "fully fingerprinted" (§8 A2 — a vphash row must
+        # exist, else every scan re-decodes it). Covers a still-unknown duration AND a clip that
+        # is decodable but yielded nothing above: decode the first frame from the start. Such a
+        # clip still won't have enough comparable frames to dedup, but it's catalogued once and
+        # skipped by the fast-path (a truly undecodable file yields nothing → undecodable, §9.1).
+        if not frames:
             with profiler.timer("video", "decode"):
+                try:
+                    container.seek(0, stream=vs)
+                except Exception:  # noqa: BLE001
+                    pass
                 arr = next(
                     (f.to_ndarray(format="rgb24") for f in container.decode(vs)), None
                 )
             if arr is not None:
                 bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
                 frames.append(FrameSig(0, 0.0, bits, q))
-            return duration_s, width, height, captured_at, codec, frames
-
-        for k in range(n):
-            t = duration_s * (k + 0.5) / n
-            target = int(t / tb)
-            with profiler.timer("video", "decode"):
-                try:
-                    container.seek(target, stream=vs)
-                except Exception:  # noqa: BLE001 - some containers dislike seeking; skip k
-                    continue
-                picked = None
-                for frame in container.decode(vs):
-                    if frame.pts is None:
-                        continue
-                    picked = frame
-                    if frame.pts >= target:
-                        break
-                arr = picked.to_ndarray(format="rgb24") if picked is not None else None
-            if arr is None:
-                continue
-            bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
-            frames.append(FrameSig(k, float(picked.pts * tb), bits, q))
         return duration_s, width, height, captured_at, codec, frames
     finally:
         container.close()
+
+
+def _sample_by_seek(container, vs, tb, targets, *, max_edge, profiler) -> list[FrameSig]:
+    """Sample one frame per target pts by seeking to each (cheap on seekable containers).
+
+    For each target: seek to the preceding keyframe, decode forward to the first frame
+    at/after the target. Skips a target whose seek raises or whose decode yields nothing
+    (a transport stream may do either) — the caller detects the shortfall and falls back."""
+    frames: list[FrameSig] = []
+    for k, target in enumerate(targets):
+        with profiler.timer("video", "decode"):
+            try:
+                container.seek(target, stream=vs)
+            except Exception:  # noqa: BLE001 - some containers dislike seeking; skip k
+                continue
+            picked = None
+            for frame in container.decode(vs):
+                if frame.pts is None:
+                    continue
+                picked = frame
+                if frame.pts >= target:
+                    break
+            arr = picked.to_ndarray(format="rgb24") if picked is not None else None
+        if arr is None:
+            continue
+        bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
+        frames.append(FrameSig(k, float(picked.pts * tb), bits, q))
+    return frames
+
+
+def _sample_sequential(container, vs, tb, targets, *, max_edge, profiler) -> list[FrameSig]:
+    """Sample the frame nearest each target in ONE forward decode pass (no per-target seek).
+
+    The reliable fallback for streams where mid-file seeking is broken (transport streams):
+    decode from the start once, and for each ascending target keep the first frame whose pts
+    is at/after it. O(clip) rather than O(keyframe) but correct where seeking silently
+    returns nothing. Rewinds to the start first; ``targets`` must be ascending (they are —
+    segment midpoints)."""
+    frames: list[FrameSig] = []
+    with profiler.timer("video", "decode"):
+        try:
+            container.seek(0, stream=vs)
+        except Exception:  # noqa: BLE001
+            pass
+        ti = 0
+        for frame in container.decode(vs):
+            if ti >= len(targets):
+                break
+            if frame.pts is None:
+                continue
+            # Advance past any targets this frame satisfies (handles sparse/low-fps clips
+            # where one decoded frame is the nearest to several targets — take it once).
+            if frame.pts >= targets[ti]:
+                arr = frame.to_ndarray(format="rgb24")
+                bits, q = _pdq(arr, max_edge=max_edge, medium="video", profiler=profiler)
+                frames.append(FrameSig(ti, float(frame.pts * tb), bits, q))
+                ti += 1
+                while ti < len(targets) and frame.pts >= targets[ti]:
+                    ti += 1                          # this frame is also nearest later targets
+    return frames
+
+
+def _video_duration_s(stream_dur, tb, container_dur, container_tb, *, demux_dur) -> float | None:
+    """Pick a video's duration (seconds) from the available sources, best-first (§5.3).
+
+    Order: the video **stream** duration (``stream_dur`` in ``tb`` units) → the **container**
+    duration (``container_dur`` in ``container_tb`` units, i.e. ``av.time_base``) → the
+    **demux fallback** (``demux_dur()``, called ONLY when neither native source exists, so
+    the extra packet-scan hits just the header-less .ts/.m2ts case). Returns ``None`` when no
+    source yields a timeline (the caller then keeps the single-frame path). Pure except for
+    the injected ``demux_dur`` thunk, so the source-selection ladder is unit-testable without
+    a real container.
+    """
+    if stream_dur and tb:
+        return float(stream_dur * tb)
+    if container_dur:
+        return container_dur / container_tb
+    if tb:
+        return demux_dur()
+    return None
+
+
+def _duration_by_demux(container, vs, tb) -> float | None:
+    """Estimate a video's duration from its last packet's timestamp (§5.3 fallback).
+
+    For containers that report no stream/container duration (transport streams, truncated
+    captures), demux the video stream WITHOUT decoding — cheap relative to a full decode,
+    since it reads packet headers, not pixels — and take the greatest presentation end
+    (``pts + packet.duration``). Falls back to ``dts`` when ``pts`` is absent. Returns
+    ``None`` if the stream carries no timestamps at all (the caller then keeps the
+    single-frame path). Never raises — a demux error just means "no better estimate".
+    """
+    if not tb:
+        return None
+    last = None
+    try:
+        for packet in container.demux(vs):
+            ts = packet.pts if packet.pts is not None else packet.dts
+            if ts is None:
+                continue
+            end = ts + (packet.duration or 0)
+            if last is None or end > last:
+                last = end
+    except Exception:  # noqa: BLE001 - unreadable tail → best-effort None
+        return None
+    return float(last * tb) if last else None
 
 
 def _video_capture_time(container) -> str | None:
@@ -414,10 +541,12 @@ def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
                 fp.width = vs.codec_context.width or None
                 fp.height = vs.codec_context.height or None
                 fp.codec = (vs.codec_context.name or None) if vs.codec_context else None
-                if vs.duration and tb:
-                    fp.duration_s = float(vs.duration * tb)
-                elif container.duration:
-                    fp.duration_s = container.duration / av.time_base
+                # Same duration-source ladder as _probe_video (incl. the .ts demux fallback),
+                # so a merged transport stream gets a real duration in its display column
+                # rather than NULL — one seam, consistent across both probe paths (§5.3).
+                fp.duration_s = _video_duration_s(
+                    vs.duration, tb, container.duration, av.time_base,
+                    demux_dur=lambda: _duration_by_demux(container, vs, tb))
                 fp.captured_at = _video_capture_time(container)
             finally:
                 container.close()
