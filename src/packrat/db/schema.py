@@ -150,6 +150,11 @@ CREATE TABLE IF NOT EXISTS review_runs (
                                                -- copy on exact-match survivor + keep-lead ties
                                                -- (default 0 = external is master). Locked at
                                                -- analyze; carries across every --confirm (§8 B).
+    t_photo_recompress INTEGER,  -- PDQ thresholds snapshotted at analyze (§8 B): the bands the
+    t_photo_edit       INTEGER,  -- run's stages + histogram bins are derived from, so the log and
+    t_match_video      INTEGER,  -- box read ONE source and can't drift from a later config edit.
+                                 -- Nullable: a row predating these columns reads NULL → callers
+                                 -- fall back to review_stats._T_* defaults (thresholds_from_row).
     deleted_count INTEGER NOT NULL DEFAULT 0,  -- files recycled but NOT YET reported into
                                                -- result_json.deleted: bumped at each stage's
                                                -- apply, drained (→0) when a confirm job records

@@ -5,13 +5,19 @@ breakdown surface in TWO faces: the ``packrat dedup`` staging log (jobs layer) a
 root-detail Review box (TUI layer). Neither layer may import the other, so the pure
 logic lives here — a neutral, dependency-free module both import.
 
-- :func:`stage1_split` / :func:`stage2_stats` compute a plain dict "bundle" from a list
+- :func:`stage1_split` / :func:`perceptual_stats` compute a plain dict "bundle" from a list
   of ``review_actions`` row-dicts (works on the in-memory action dicts the job builds
   *and* on DB rows the TUI queries — the field names match). Network classification is
   injected as an ``is_network`` callable so this module does no I/O and stays unit-testable.
-- :func:`stage1_lines` / :func:`stage2_lines` turn a bundle into display ``list[str]`` of
-  a given width. The TUI wraps them in its Review box; the CLI logs them indented. Same
-  text by construction, so the log and the box can't drift.
+- :func:`stage1_lines` / :func:`stage2_lines` / :func:`stage3_lines` turn a bundle into
+  display ``list[str]`` of a given width. The TUI wraps them in its Review box; the CLI
+  logs them indented. Same text by construction, so the log and the box can't drift.
+- :func:`stats_for_stage` / :func:`lines_for_stage` are the **dispatch** — the ONE place
+  the ``stage → which compute`` and ``stage → which line-builder`` maps live, so a new
+  stage (or a changed ``stage=`` arg) is a one-place edit rather than three hand-written
+  ladders across ``queries``/``dedup``/``rootdetail`` (§8 B). Each face calls one entry
+  point; :func:`thresholds_from_row` is the seam both feed the run's analyze-time snapshot
+  through (see [[review-stats-shared-renderer]]).
 """
 
 from __future__ import annotations
@@ -20,11 +26,37 @@ from collections.abc import Callable, Iterable
 
 from .jobs.dedup_rank import ordered_lead_levels
 
-#: PDQ threshold defaults (mirror config.MatchConfig; §5.3) — used for the histogram bin
-#: boundaries when a caller doesn't pass live thresholds (the read-only TUI poll doesn't
-#: re-read config; the CLI job path passes ctx.config's values).
+#: PDQ threshold defaults (mirror config.MatchConfig; §5.3) — the fallback histogram bin
+#: boundaries when a run predates the analyze-time snapshot columns (§8 B) so its
+#: ``review_runs`` row reads NULL. Both faces normally feed the run's OWN snapshotted
+#: thresholds through :func:`thresholds_from_row`; these only cover the pre-snapshot rows.
 _T_RECOMPRESS, _T_EDIT, _T_MATCH_VIDEO = 10, 32, 90
 _OPEN = 10 ** 9   # open-ended top-bin upper bound
+
+
+def thresholds_from_row(row) -> dict:
+    """PDQ histogram thresholds for a run, from its analyze-time snapshot (§8 B).
+
+    ``row`` is the run's ``review_runs`` row (any mapping with the three columns, or
+    ``None``). Each snapshotted column that is present feeds the matching bin boundary;
+    a NULL / missing one falls back to the :data:`_T_*` default (a run analyzed before the
+    columns existed). This is the single seam BOTH faces feed the snapshot through, so the
+    CLI staging log and the TUI poll derive identical bins for the same run — config edits
+    after analyze can't retroactively rewrite an old run's histogram (the dual-source drift
+    the columns close). Keyword names match :func:`perceptual_stats`' threshold params, so
+    the result splats straight in: ``perceptual_stats(rows, **thresholds_from_row(run))``.
+    """
+    def _pick(key, default):
+        if row is None:
+            return default
+        try:
+            val = row[key]
+        except (KeyError, IndexError, TypeError):
+            return default
+        return default if val is None else int(val)
+    return {"t_rec": _pick("t_photo_recompress", _T_RECOMPRESS),
+            "t_edit": _pick("t_photo_edit", _T_EDIT),
+            "t_video": _pick("t_match_video", _T_MATCH_VIDEO)}
 
 #: The text width the line-builders receive at the TUI's reference geometry — the SAME
 #: value the Review box passes them there (``_review_text_w(REFERENCE) − 2`` for the 2-space
@@ -113,10 +145,10 @@ def stage1_split(rows: Iterable[dict]) -> dict:
             "groups_internal_only": internal_only, "groups_mixed": mixed}
 
 
-def stage2_stats(rows: Iterable[dict], *, stage: int = 2,
-                 t_rec: int = _T_RECOMPRESS, t_edit: int = _T_EDIT,
-                 t_video: int = _T_MATCH_VIDEO,
-                 is_network: Callable[[str], bool] = lambda _p: False) -> dict:
+def perceptual_stats(rows: Iterable[dict], *, stage: int = 2,
+                     t_rec: int = _T_RECOMPRESS, t_edit: int = _T_EDIT,
+                     t_video: int = _T_MATCH_VIDEO,
+                     is_network: Callable[[str], bool] = lambda _p: False) -> dict:
     """Compute the perceptual (stage-2 or stage-3) review bundle from ``review_actions`` (§8 B).
 
     Returns groups/members, a PDQ-distance histogram (bins derived from the thresholds for
@@ -346,3 +378,40 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
             f"{bundle['keep_suggested_delete']} non-leads{net_note}"
         )
     return body
+
+
+# ---------------------------------------------------------------------------
+# stage dispatch (the ONE stage→compute / stage→build map; §8 B) — each face calls
+# these two entry points instead of hand-writing the ladder (queries poll, dedup
+# staging log, rootdetail render). A new stage 4 is then a one-place edit here.
+# ---------------------------------------------------------------------------
+def stats_for_stage(rows: Iterable[dict], stage: int, *, thresholds: dict | None = None,
+                    is_network: Callable[[str], bool] = lambda _p: False) -> dict:
+    """``stage → the right bundle`` — the ONE place the stage→compute map lives (§8 B).
+
+    Stage 1 is the exact-delete split (no thresholds/network band there); stages 2 & 3 are
+    the perceptual bundle, PDQ-banded by the run's ``thresholds`` (a dict as produced by
+    :func:`thresholds_from_row`; ``None`` → the ``_T_*`` defaults). ``is_network`` marks a
+    path as a non-recyclable share (injected; no I/O here). Callers pass the run's
+    analyze-time snapshot so the log and the poll derive identical bins for the same run.
+    """
+    if stage == 1:
+        return stage1_split(rows)
+    return perceptual_stats(rows, stage=stage, is_network=is_network, **(thresholds or {}))
+
+
+def lines_for_stage(bundle: dict, stage: int, width: int, *,
+                    keep_suggested: bool = True) -> list[str]:
+    """``stage → the right line list``, from a bundle :func:`stats_for_stage` produced (§8 B).
+
+    Every returned line carries the shared 2-space indent (stage 1 bakes it in; stages 2/3
+    get it here), so both faces consume the list verbatim — the CLI ``ctx.log(ln)`` and the
+    TUI Review box ``detail = [...]`` — with no per-stage indent ladder. ``width`` is the
+    text cells the perceptual body lays out to (stage 1 is width-agnostic); ``keep_suggested``
+    toggles stage 2's bulk keep-suggested tip (the CLI prints its own, so it passes False).
+    """
+    if stage == 1:
+        return stage1_lines(bundle)
+    if stage == 2:
+        return [f"  {ln}" for ln in stage2_lines(bundle, width, keep_suggested=keep_suggested)]
+    return [f"  {ln}" for ln in stage3_lines(bundle, width)]

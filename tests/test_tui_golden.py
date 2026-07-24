@@ -207,7 +207,7 @@ def test_root_detail_stage2_rich_review_renders_and_scrolls():
 def test_root_detail_stage3_review_shows_histogram_and_makeup():
     """Stage 3 (minor edits): no exact facet (that's stage 1), but a PDQ histogram +
     group make-up like stage 2. Regression: showed a misleading '0 to delete (exact)'."""
-    from packrat.review_stats import stage2_stats
+    from packrat.review_stats import perceptual_stats
     from packrat.tui.geometry import Geometry
 
     def perc(g, ext, dist):
@@ -216,7 +216,7 @@ def test_root_detail_stage3_review_shows_histogram_and_makeup():
     for i in range(6):
         rows += [perc(i, 0, 12 + i * 3), perc(i, 0, 12 + i * 3)]
     rows += [perc(90, 1, 28), perc(90, 0, 28)]        # a mixed group
-    bundle = stage2_stats(rows, stage=3)
+    bundle = perceptual_stats(rows, stage=3)
     d = fixtures.root_detail_pending()
     d["pending_review"] = {"id": 78, "run_type": "dedup", "stage": 3,
                            "created_at": "2026-07-15T11:31:00",

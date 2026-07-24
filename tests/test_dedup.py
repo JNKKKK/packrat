@@ -398,6 +398,37 @@ def test_dedup_keep_suggested_rejected_on_non_stage2(queue_and_db, tmp_path):
     assert _run_row(database, root["id"]) is not None  # still pending, nothing applied
 
 
+def test_dedup_analyze_snapshots_match_thresholds_on_run(packrat_home, tmp_path):
+    """Analyze snapshots the config's PDQ thresholds onto the review_runs row (§8 B
+    follow-up), so the CLI log and the TUI poll both read ONE analyze-time source and a
+    later config edit can't retroactively rewrite the run's histogram bands. Driven under a
+    NON-default config to prove the values are config-derived, not hardcoded."""
+    import dataclasses
+
+    from packrat.config import Config, MatchConfig
+
+    db.init_db().close()
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    custom = dataclasses.replace(
+        Config(), match=dataclasses.replace(MatchConfig(), t_photo_recompress=7,
+                                            t_photo_edit=44, t_match_video=110))
+    q = JobQueue(database, config_loader=lambda: custom)
+    try:
+        lib = tmp_path / "lib"
+        lib.mkdir()
+        _photo(lib / "master.png", 5, kind="PNG")
+        _photo(lib / "export.jpg", 5, kind="JPEG", quality=80)   # a stage-2 near-dup
+        root = register(database, str(lib))
+        _scan_root(q, database, root["id"])
+        _run(q, database, "dedup", root_id=root["id"])
+        run = _run_row(database, root["id"])
+        assert (run["t_photo_recompress"], run["t_photo_edit"], run["t_match_video"]) == (7, 44, 110)
+    finally:
+        q.shutdown()
+        database.close()
+
+
 def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     """Analyze logs the keep-lead breakdown (the shared review_stats block: photo column
     + format decision) — the same text the TUI Review box renders (§8 B)."""

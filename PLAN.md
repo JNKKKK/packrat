@@ -369,6 +369,12 @@ review_runs(   -- one stateful review lifecycle (dedup OR perceptual-cleanup) pe
                       this row by every --confirm (a bare confirm stages stage 2 and must apply the
                       same policy stage 1 used) — NOT re-passed per command like --keep-suggested.
                       A conflicting flag on a later --confirm is rejected (§8 B). */,
+  t_photo_recompress, t_photo_edit, t_match_video /* PDQ thresholds SNAPSHOTTED at analyze (§8 B),
+                      same lock-at-analyze pattern as prefer_internal: the run's stage bands + the
+                      review histogram bins derive from these, so the CLI log and the TUI poll read
+                      ONE source (review_stats.thresholds_from_row) and a later config.toml edit can't
+                      retroactively rewrite an old run's bands. Nullable — a row predating the columns
+                      reads NULL → callers fall back to review_stats._T_* defaults (no migration). */,
   created_at, confirmed_at )
   -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder.
   --   ONE row spans dedup's whole 3-stage sequence; `stage`/`stage_phase` track progress within it,
@@ -2627,9 +2633,12 @@ screen over a shared `frames.base`, each paired with its `screens/*` builder of 
 plain strings; the Textual screens each display one pre-composed frame and own only key routing / focus
 / liveness (a light poll timer + the running job's SSE stream — the app drives fetch/subscribe directly,
 no separate subscription object). One pure builder lives **outside** `tui/`: `packrat/review_stats.py`
-(dedup stage-1/2/3 review stats — compute + line-builders) is shared by the TUI Review box AND the CLI
-`dedup` staging log, so it sits at the top level where both the jobs layer and the TUI can import it
-without either depending on the other ([[review-stats-shared-renderer]]).
+(dedup stage-1/2/3 review stats — compute + line-builders, plus the `stats_for_stage` /
+`lines_for_stage` **dispatch** that is the single `stage → compute / stage → builder` map both faces
+call, and `thresholds_from_row`, the seam through which both feed a run's analyze-time PDQ-threshold
+snapshot) is shared by the TUI Review box AND the CLI `dedup` staging log, so it sits at the top level
+where both the jobs layer and the TUI can import it without either depending on the other
+([[review-stats-shared-renderer]]).
 
 **Key invariants:**
 - **Full-terminal responsive layout.** The frame fills the whole terminal and reflows via a **surplus

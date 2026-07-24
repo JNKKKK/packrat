@@ -344,22 +344,14 @@ def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[
         header = f"{WARN} cleanup — awaiting review (perceptual)"
         detail = [(f"  {c.get('exact', 0)} exact-trash (will delete) · "
                    f"{c.get('perceptual', 0)} perceptual candidate(s) (delete-default)")]
-    elif stage == 2 and c.get("stage2"):
-        # Rich stage-2 breakdown (keep-lead columns + PDQ histogram + make-up + suggestion
-        # split), built by the SHARED review_stats line-builder the CLI log also uses.
-        from ...review_stats import stage2_lines
-        header = f"{WARN} {run} — awaiting review (stage 2 of 3)"
-        detail = [f"  {ln}" for ln in stage2_lines(c["stage2"], _review_text_w(geo) - 2)]
-    elif stage == 1 and c.get("stage1"):
-        from ...review_stats import stage1_lines
-        header = f"{WARN} {run} — awaiting review (stage 1 of 3)"
-        detail = stage1_lines(c["stage1"])
-    elif stage == 3 and c.get("stage3"):
-        # Stage 3 (minor edits): near-dup groups only — no exact deletions and (unranked)
-        # no keep-lead, but a PDQ histogram + group make-up like stage 2 (§8 B).
-        from ...review_stats import stage3_lines
-        header = f"{WARN} {run} — awaiting review (stage 3 of 3)"
-        detail = [f"  {ln}" for ln in stage3_lines(c["stage3"], _review_text_w(geo) - 2)]
+    elif c.get(f"stage{stage}"):
+        # Rich per-stage breakdown from the SHARED review_stats dispatch (the CLI log renders
+        # the same bundle the same way): stage 1 = delete split + make-up; stage 2 = keep-lead
+        # columns + PDQ histograms + make-up + suggestion split; stage 3 = histogram + make-up
+        # (unranked, no keep-lead). One lines_for_stage call — no per-stage builder ladder (§8 B).
+        from ...review_stats import lines_for_stage
+        header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
+        detail = lines_for_stage(c[f"stage{stage}"], stage, _review_text_w(geo) - 2)
     else:
         header = f"{WARN} {run} — awaiting review (stage {stage} of 3)"
         detail = [(f"  {c.get('to_delete_exact', 0)} to delete (exact) · "

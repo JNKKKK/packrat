@@ -301,7 +301,7 @@ def root_detail_stage2_rich() -> dict:
     Review box's responsive cap at the reference size — so it exercises the scroll path
     and the two-column keep-lead + histogram layout."""
     d = root_detail_pending()
-    from ..review_stats import stage2_stats
+    from ..review_stats import perceptual_stats
 
     def perc(g, ext, lead, reason, dist, mt="photo"):
         return perceptual_action(g, is_external=ext, is_lead=lead, lead_reason=reason,
@@ -318,7 +318,7 @@ def root_detail_stage2_rich() -> dict:
     for i in range(2):
         rows += [perc(300 + i, 1, 1, "internal/external preference", 2),
                  perc(300 + i, 0, 0, None, 2)]
-    bundle = stage2_stats(rows, is_network=lambda p: p.startswith("\\\\"))
+    bundle = perceptual_stats(rows, is_network=lambda p: p.startswith("\\\\"))
     d["pending_review"]["counts"] = {
         "to_delete_exact": 0, "groups": bundle["groups"], "members": bundle["members"],
         "network": 0, "stage2": bundle,

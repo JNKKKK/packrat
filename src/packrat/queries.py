@@ -64,14 +64,15 @@ def status_snapshot() -> dict:
         # `status`/TUI show the same reasons the live queue enforces at dequeue.
         queued = _queued_with_reasons(conn)
         pending_reviews = conn.execute(
-            "SELECT rr.id, rr.root_id, rr.run_type, rr.stage, rr.created_at, r.name root_name "
+            "SELECT rr.id, rr.root_id, rr.run_type, rr.stage, rr.created_at, "
+            "  rr.t_photo_recompress, rr.t_photo_edit, rr.t_match_video, r.name root_name "
             "FROM review_runs rr JOIN roots r ON r.id = rr.root_id "
             "WHERE rr.status='pending'"
         ).fetchall()
         pending_list = []
         for r in pending_reviews:
             d = dict(r)
-            d["counts"] = _review_counts(conn, r["id"], r["run_type"], r["stage"])
+            d["counts"] = _review_counts(conn, r)
             pending_list.append(d)
         return {
             "assets": assets,
@@ -235,16 +236,15 @@ def root_detail(root_arg: str) -> dict | None:
         ).fetchone()
         instances, last_scan_at, size_bytes = row["c"], row["last_scan_at"], row["size_bytes"]
         pending = conn.execute(
-            "SELECT id, run_type, stage, created_at FROM review_runs "
+            "SELECT id, run_type, stage, created_at, "
+            "  t_photo_recompress, t_photo_edit, t_match_video FROM review_runs "
             "WHERE root_id=? AND status='pending'",
             (rid,),
         ).fetchone()
         pending_dict = None
         if pending is not None:
             pending_dict = dict(pending)
-            pending_dict["counts"] = _review_counts(
-                conn, pending["id"], pending["run_type"], pending["stage"]
-            )
+            pending_dict["counts"] = _review_counts(conn, pending)
         # Recency of the last SUCCESSFUL review per type (§11 "deduped/cleaned <age>"):
         # the newest `completed` run's confirmed_at. A dedup run is `completed` only after
         # it went through ALL stages (or was already clean — both land status='completed'
@@ -386,12 +386,13 @@ def _last_completed_at(conn, root_id: int, run_type: str) -> str | None:
     return row["confirmed_at"] if row is not None else None
 
 
-def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
+def _review_counts(conn, run) -> dict:
     """Actionable count breakdown for a pending review run's *current* stage (§11).
 
-    Scoped to ``stage`` (the run's cursor) so the numbers reflect what is **still
-    pending**, not the whole run's history — a dedup run mid-sequence keeps its
-    already-confirmed earlier-stage ``review_actions`` rows (dedup never deletes
+    ``run`` is the run's ``review_runs`` row (id, run_type, stage, + the analyze-time PDQ
+    threshold snapshot columns). Scoped to ``stage`` (the run's cursor) so the numbers
+    reflect what is **still pending**, not the whole run's history — a dedup run mid-sequence
+    keeps its already-confirmed earlier-stage ``review_actions`` rows (dedup never deletes
     them), so counting all rows would report already-deleted exact dups as still
     "to delete". Cleanup is single-stage (``stage=1``) so the filter is a no-op there.
 
@@ -419,6 +420,7 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
     a lower bound on what a confirm might delete; the authoritative, shortcut-accurate
     warning is the confirm job.)
     """
+    run_id, run_type, stage = run["id"], run["run_type"], run["stage"]
     # media_type comes from the asset (review_actions has none); a pending stage-2 review
     # hasn't deleted its members, so the JOIN resolves. LEFT JOIN keeps a row even if the
     # asset was forgotten mid-flight (media_type → NULL, treated as photo downstream).
@@ -446,20 +448,22 @@ def _review_counts(conn, run_id: int, run_type: str, stage: int | None) -> dict:
         members = sum(1 for r in rows if r["kind"] == "perceptual")
         out = {"to_delete_exact": exact, "groups": len(groups), "members": members,
                "network": network}
-        # Rich per-stage breakdowns for the Review box + CLI log (§8 B, review_stats):
-        # stage 1 = delete split + group make-up; stage 2 = keep-lead / PDQ / make-up;
-        # stage 3 = group make-up + PDQ histogram (unranked, so no keep-lead). The poll is
-        # read-only and must not re-read config, so the histogram bins use the default PDQ
-        # thresholds (bin boundaries are cosmetic; the CLI job path passes live thresholds).
+        # Rich per-stage breakdown for the Review box + CLI log (§8 B, review_stats): the
+        # shared stats_for_stage dispatch picks the compute (stage 1 = delete split; stages
+        # 2/3 = perceptual bundle), stashed under the stageN key rootdetail's lines_for_stage
+        # reads. The histogram bins come from the run's ANALYZE-TIME threshold snapshot
+        # (thresholds_from_row), NOT config — the poll is read-only and never re-reads config,
+        # and the CLI reads the same snapshot, so the log and the box can't drift. A run
+        # predating the snapshot columns reads NULL → the _T_* defaults (current behavior).
+        # (t_photo_recompress also BANDS which photos enter a stage — _plan_perceptual — so
+        # the bins are load-bearing, not cosmetic.)
         from . import review_stats
-        row_dicts = [dict(r) for r in rows]
-        if stage == 1:
-            out["stage1"] = review_stats.stage1_split(row_dicts)
-        elif stage == 2:
-            out["stage2"] = review_stats.stage2_stats(row_dicts, is_network=fsutil.is_network_path)
-        elif stage == 3:
-            out["stage3"] = review_stats.stage2_stats(row_dicts, stage=3,
-                                                       is_network=fsutil.is_network_path)
+        if stage in (1, 2, 3):
+            row_dicts = [dict(r) for r in rows]
+            bundle = review_stats.stats_for_stage(
+                row_dicts, stage, thresholds=review_stats.thresholds_from_row(run),
+                is_network=fsutil.is_network_path)
+            out[f"stage{stage}"] = bundle
         return out
     exact = sum(1 for r in rows if r["kind"] == "exact")
     perceptual = sum(1 for r in rows if r["kind"] == "perceptual")

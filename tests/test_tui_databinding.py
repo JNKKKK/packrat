@@ -325,6 +325,55 @@ def test_review_counts_stage2_bundle(seeded):
         database.close()
 
 
+def test_review_counts_histogram_uses_analyze_time_threshold_snapshot(seeded):
+    """The poll's PDQ bins come from the run's ANALYZE-TIME threshold snapshot on
+    review_runs, not live/default config — so the CLI log (which reads the same snapshot via
+    review_stats.thresholds_from_row) and the TUI poll can't drift, and a config edit after
+    analyze can't retroactively rewrite an old run's histogram (§8 B follow-up)."""
+    from packrat import review_stats
+
+    conn = db.connect(check_same_thread=False)
+    database = db.Database(conn)
+    try:
+        rid = queries.roots_snapshot()[0]["id"]
+        # A stage-3 run analyzed under WIDENED thresholds (t_edit 50, not the default 32).
+        snap = {"t_photo_recompress": 10, "t_photo_edit": 50, "t_match_video": 90}
+        run_id = database.execute(
+            "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, "
+            "t_photo_recompress, t_photo_edit, t_match_video, created_at) "
+            "VALUES (?, 'dedup', 'pending', 3, 'staged', ?, ?, ?, '2026-07-20T00:00:00')",
+            (rid, snap["t_photo_recompress"], snap["t_photo_edit"], snap["t_match_video"]),
+        ).lastrowid
+        dists = [11, 20, 30, 40, 49]
+        for i, d in enumerate(dists):
+            database.execute(
+                "INSERT INTO review_actions(run_id, stage, folder, kind, reason, "
+                "default_action, asset_id, instance_id, path, group_no, member_no, distance, "
+                "shortcut_name) VALUES (?, 3, 'with_minor_edits', 'perceptual', 'perceptual', "
+                "'keep', 1, 1, ?, ?, 1, ?, ?)",
+                (run_id, rf"C:\e{i}.jpg", i, d, f"group0001_{i:04d}.lnk"),
+            )
+        b = queries.root_detail(queries.roots_snapshot()[0]["name"])["pending_review"]["counts"]["stage3"]
+        # The bins are the thirds of 11..50 (the snapshot band), NOT the default 11..32 — so
+        # d=40/49 land in real high bars instead of overflowing a default top bin.
+        expected = review_stats.perceptual_stats(
+            [{"kind": "perceptual", "group_no": 1, "distance": d, "is_external": 0,
+              "is_lead": 0, "media_type": "photo", "path": rf"C:\e{i}.jpg"}
+             for i, d in enumerate(dists)],
+            stage=3, **review_stats.thresholds_from_row(snap))["pdq_photo"]
+        assert b["pdq_photo"] == expected
+        assert sum(b["pdq_photo"].values()) == len(dists)     # every distance binned (nothing dropped)
+        # A DEFAULT-threshold render would bin these differently → proves the snapshot is used.
+        default_bins = review_stats.perceptual_stats(
+            [{"kind": "perceptual", "group_no": 1, "distance": d, "is_external": 0,
+              "is_lead": 0, "media_type": "photo", "path": rf"C:\e{i}.jpg"}
+             for i, d in enumerate(dists)],
+            stage=3, **review_stats.thresholds_from_row(None))["pdq_photo"]
+        assert b["pdq_photo"] != default_bins
+    finally:
+        database.close()
+
+
 def test_review_counts_network_zero_when_stage_defaults_to_keep(seeded):
     """A default-KEEP stage (dedup stage 2/3, near-dups) reports network=0 when the user
     changes nothing — the permanent-delete warning must NOT fire over files that are kept

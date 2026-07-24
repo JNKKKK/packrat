@@ -42,7 +42,7 @@ def test_stage1_lines_renders_split_and_makeup():
 def test_stage2_groups_and_members():
     rows = [_perc(1, is_lead=1, lead_reason="resolution"), _perc(1),
             _perc(2, is_lead=1, lead_reason="resolution"), _perc(2)]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     assert b["groups"] == 2 and b["members"] == 4
 
 
@@ -52,7 +52,7 @@ def test_stage2_lead_tally_split_by_medium():
         _perc(2, is_lead=1, lead_reason="resolution + format", media_type="photo"), _perc(2),
         _perc(3, is_lead=1, lead_reason="resolution", media_type="video"), _perc(3, media_type="video"),
     ]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     # "resolution" appears for BOTH media but must NOT be merged — keyed by (medium, label).
     assert b["lead_by_medium"]["photo"] == {"resolution": 1, "resolution + format": 1}
     assert b["lead_by_medium"]["video"] == {"resolution": 1}
@@ -65,7 +65,7 @@ def test_stage2_pdq_histograms_split_by_medium():
     # not a photo bin — the partition is by media_type, not by distance range.
     photos = [_perc(i, distance=d) for i, d in enumerate([0, 2, 5, 8, 10])]
     videos = [_perc(100 + i, distance=d, media_type="video") for i, d in enumerate([5, 40, 90, 120])]
-    b = rs.stage2_stats(photos + videos, stage=2, t_rec=10, t_edit=32, t_video=90)
+    b = rs.perceptual_stats(photos + videos, stage=2, t_rec=10, t_edit=32, t_video=90)
     assert b["pdq_photo"] == {"0–2": 2, "3–6": 1, "7–10": 2}
     assert b["pdq_video"] == {"0–29": 1, "30–59": 1, "60–90": 1, "91+": 1}
     assert sum(b["pdq_photo"].values()) == len(photos)
@@ -78,7 +78,7 @@ def test_stage3_pdq_histogram_bins_threshold_derived():
     # Stage 3 is photo-only → pdq_video is empty.
     dists = [11, 15, 18, 24, 25, 32]
     rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
-    b = rs.stage2_stats(rows, stage=3, t_rec=10, t_edit=32)
+    b = rs.perceptual_stats(rows, stage=3, t_rec=10, t_edit=32)
     assert b["pdq_photo"] == {"11–17": 2, "18–24": 2, "25–32": 2}
     assert b["pdq_video"] == {}
     assert sum(b["pdq_photo"].values()) == len(rows)
@@ -93,7 +93,7 @@ def test_stage2_group_makeup_and_suggestion_split():
         # mixed group suggesting the internal copy
         _perc(3, is_external=1), _perc(3, is_lead=1, lead_reason="internal/external preference"),
     ]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     assert b["groups_all_internal"] == 1
     assert b["groups_mixed"] == 2
     assert b["mixed_suggest_external"] == 1
@@ -106,7 +106,7 @@ def test_stage2_all_external_group_not_counted_as_all_internal():
     mislabeled. Regression: the else-branch counted all-external as all-internal."""
     rows = [_perc(1, is_external=1, is_lead=1, lead_reason="resolution"),
             _perc(1, is_external=1)]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     assert b["groups"] == 1
     assert b["groups_all_internal"] == 0     # NOT 1 — no internal member
     assert b["groups_mixed"] == 0            # has_int is False → not mixed either
@@ -118,18 +118,18 @@ def test_stage2_keep_suggested_delete_and_network():
         _perc(1, path="C:/local_drop.jpg"),      # non-lead, local
         _perc(1, path="Z:/nas_drop.jpg"),        # non-lead, network
     ]
-    b = rs.stage2_stats(rows, is_network=lambda p: p.startswith("Z:"))
+    b = rs.perceptual_stats(rows, is_network=lambda p: p.startswith("Z:"))
     assert b["keep_suggested_delete"] == 2       # both non-leads
     assert b["keep_suggested_network"] == 1      # only the Z: one
 
 
 def test_stage2_lines_omit_empty_medium_column():
     # all-photo → no "videos (" header; all-video → no "photos (".
-    photo = rs.stage2_stats([_perc(1, is_lead=1, lead_reason="resolution"), _perc(1)])
+    photo = rs.perceptual_stats([_perc(1, is_lead=1, lead_reason="resolution"), _perc(1)])
     text = "\n".join(rs.stage2_lines(photo, 90))
     assert "photos (" in text and "videos (" not in text
 
-    video = rs.stage2_stats([_perc(1, is_lead=1, lead_reason="resolution", media_type="video"),
+    video = rs.perceptual_stats([_perc(1, is_lead=1, lead_reason="resolution", media_type="video"),
                              _perc(1, media_type="video")])
     text = "\n".join(rs.stage2_lines(video, 90))
     assert "videos (" in text and "photos (" not in text
@@ -137,7 +137,7 @@ def test_stage2_lines_omit_empty_medium_column():
 
 def test_stage2_lines_keep_suggested_tip_network_note():
     rows = [_perc(1, is_lead=1, path="C:/k.jpg"), _perc(1, path="Z:/d.jpg")]
-    b = rs.stage2_stats(rows, is_network=lambda p: p.startswith("Z:"))
+    b = rs.perceptual_stats(rows, is_network=lambda p: p.startswith("Z:"))
     text = "\n".join(rs.stage2_lines(b, 90))
     assert "keep suggested" in text and "1 non-leads" in text and "on network" in text
 
@@ -146,7 +146,7 @@ def test_stage2_lines_keep_suggested_false_suppresses_tip():
     """The CLI passes keep_suggested=False (it prints its own tip); the box's keep-suggested
     tip must then be absent. Regression: the CLI log emitted a duplicate tip."""
     rows = [_perc(1, is_lead=1, path="C:/k.jpg"), _perc(1, path="C:/d.jpg")]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     assert not any("keep suggested" in ln for ln in rs.stage2_lines(b, 90, keep_suggested=False))
     assert any("keep suggested" in ln for ln in rs.stage2_lines(b, 90))   # default still shows it
 
@@ -155,5 +155,61 @@ def test_stage2_stats_ignores_exact_rows():
     # A mixed row set (leftover stage-1 exact + stage-2 perceptual) counts only perceptual.
     rows = [{"kind": "exact", "is_external": 1, "path": "C:/x"},
             _perc(1, is_lead=1, lead_reason="resolution"), _perc(1)]
-    b = rs.stage2_stats(rows)
+    b = rs.perceptual_stats(rows)
     assert b["members"] == 2 and b["groups"] == 1
+
+
+# --- dispatch: stats_for_stage / lines_for_stage (the ONE stage→compute/build map) ------
+def test_stats_for_stage_dispatches_to_the_right_compute():
+    """stats_for_stage(stage) == the per-stage compute it fronts — the dispatch is the ONLY
+    stage→compute ladder now, so the three faces can't pick a different builder per stage."""
+    exact = [{"kind": "exact", "asset_id": 1, "is_external": 0, "reason": "exact-internal"}]
+    assert rs.stats_for_stage(exact, 1) == rs.stage1_split(exact)
+
+    perc = [_perc(1, is_lead=1, lead_reason="resolution", distance=5), _perc(1, distance=5)]
+    th = dict(t_rec=10, t_edit=32, t_video=90)
+    assert rs.stats_for_stage(perc, 2, thresholds=th) == rs.perceptual_stats(perc, stage=2, **th)
+    assert rs.stats_for_stage(perc, 3, thresholds=th) == rs.perceptual_stats(perc, stage=3, **th)
+
+
+def test_lines_for_stage_matches_per_stage_builders_and_indents():
+    """lines_for_stage(bundle, stage) == the per-stage line-builder, with the shared 2-space
+    indent applied uniformly (stage 1 bakes it in; stages 2/3 get it here)."""
+    s1 = rs.stage1_split([{"kind": "exact", "asset_id": 1, "is_external": 0,
+                           "reason": "exact-internal"}])
+    assert rs.lines_for_stage(s1, 1, 90) == rs.stage1_lines(s1)
+
+    b2 = rs.perceptual_stats([_perc(1, is_lead=1, lead_reason="resolution"), _perc(1)])
+    assert rs.lines_for_stage(b2, 2, 90, keep_suggested=False) == \
+        [f"  {ln}" for ln in rs.stage2_lines(b2, 90, keep_suggested=False)]
+
+    b3 = rs.perceptual_stats([_perc(1, distance=12), _perc(1, distance=12)], stage=3)
+    assert rs.lines_for_stage(b3, 3, 90) == [f"  {ln}" for ln in rs.stage3_lines(b3, 90)]
+
+
+def test_thresholds_from_row_reads_snapshot_and_falls_back_on_null():
+    """thresholds_from_row reads a run's analyze-time snapshot; a NULL / absent column (a
+    run predating the columns) falls back to the _T_* default — the single seam both faces
+    feed the snapshot through, so their bins can't diverge for the same run."""
+    snap = rs.thresholds_from_row({"t_photo_recompress": 8, "t_photo_edit": 40,
+                                   "t_match_video": 100})
+    assert snap == {"t_rec": 8, "t_edit": 40, "t_video": 100}
+    # A NULL column → its default; a wholly-missing row (None) → all defaults.
+    partial = rs.thresholds_from_row({"t_photo_recompress": None, "t_photo_edit": 40,
+                                      "t_match_video": None})
+    assert partial == {"t_rec": rs._T_RECOMPRESS, "t_edit": 40, "t_video": rs._T_MATCH_VIDEO}
+    assert rs.thresholds_from_row(None) == {"t_rec": rs._T_RECOMPRESS, "t_edit": rs._T_EDIT,
+                                            "t_video": rs._T_MATCH_VIDEO}
+
+
+def test_snapshot_thresholds_band_the_histogram_bins():
+    """The snapshot's t_rec/t_edit actually move the stage-3 bins (they're load-bearing, not
+    cosmetic): the same distances band differently under a non-default snapshot vs the
+    default, so a config edit after analyze can't silently rewrite an old run's histogram."""
+    dists = [11, 15, 18, 24, 25, 32]
+    rows = [_perc(i, distance=d) for i, d in enumerate(dists)]
+    default = rs.stats_for_stage(rows, 3, thresholds=rs.thresholds_from_row(None))
+    widened = rs.stats_for_stage(rows, 3, thresholds=rs.thresholds_from_row(
+        {"t_photo_recompress": 10, "t_photo_edit": 50, "t_match_video": 90}))
+    assert default["pdq_photo"] != widened["pdq_photo"]        # different bands → different bins
+    assert sum(default["pdq_photo"].values()) == len(rows)     # every distance still binned

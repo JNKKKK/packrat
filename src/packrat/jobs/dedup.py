@@ -215,12 +215,18 @@ def _analyze(ctx: JobContext) -> None:
     # Open the run (owns the root until confirmed/cancelled). prefer_internal is stored
     # here ONCE and read from the run row by every later --confirm — the policy is locked
     # for the whole 3-stage sequence, since a bare confirm stages stage 2 and must apply
-    # the same preference stage 1 used (§8 B; see the run-scoped design note).
+    # the same preference stage 1 used (§8 B; see the run-scoped design note). The PDQ
+    # thresholds are snapshotted here too (same lock-at-analyze pattern): the run's stages
+    # and histogram bins derive from these values, so a later config edit can't retroactively
+    # rewrite an old run's bands — both faces read this row, not live config (§8 B).
+    m = ctx.config.match
     with db.transaction() as conn:
         cur = conn.execute(
             "INSERT INTO review_runs(root_id, run_type, status, stage, stage_phase, "
-            "prefer_internal, created_at) VALUES (?, 'dedup', 'pending', ?, 'staged', ?, ?)",
-            (root_id, probe["stage"], 1 if prefer_internal else 0, now_iso()),
+            "prefer_internal, t_photo_recompress, t_photo_edit, t_match_video, created_at) "
+            "VALUES (?, 'dedup', 'pending', ?, 'staged', ?, ?, ?, ?, ?)",
+            (root_id, probe["stage"], 1 if prefer_internal else 0,
+             m.t_photo_recompress, m.t_photo_edit, m.t_match_video, now_iso()),
         )
         run_id = int(cur.lastrowid)
     audit_dir = review.audit_run_dir("dedup", root["name"], run_id)
@@ -1003,46 +1009,43 @@ def _report_staged(ctx, root, run_id, stage, staged, skipped, plan, *, advancing
         ctx.log("  default KEEP — remove a shortcut to DELETE that file.")
     if skipped:
         ctx.log(f"  {skipped} candidate(s) skipped at staging (already gone / promoted).")
-    _report_review_stats(ctx, stage, plan.get("actions") or [])
+    _report_review_stats(ctx, run_id, stage, plan.get("actions") or [])
     if stage == STAGE_RECOMPRESS:
         ctx.log(f"  tip: `packrat dedup {root['name']} --confirm --keep-suggested` keeps only the "
                 f"suggested lead per group (ignores your shortcut edits this stage).")
     ctx.log(f"review in Explorer, then: `packrat dedup {root['name']} --confirm` (or --cancel).")
 
 
-def _report_review_stats(ctx, stage, actions: list[dict]) -> None:
+def _report_review_stats(ctx, run_id, stage, actions: list[dict]) -> None:
     """Log the per-stage review breakdown — the SAME text the TUI Review box shows.
 
-    Both faces render :mod:`packrat.review_stats` line-builders over the same
-    ``review_actions`` shape, so the CLI staging log and the box can't drift (§8 B). Silent
-    on empty stages. Unlike the read-only TUI poll, the CLI runs inside the job, so it
-    passes the run's LIVE PDQ thresholds (``ctx.config.match``) for the histogram bins.
+    Both faces route through :mod:`packrat.review_stats`' ``stats_for_stage`` +
+    ``lines_for_stage`` dispatch over the same ``review_actions`` shape, so the CLI staging
+    log and the box can't drift — neither the text NOR the stage→builder choice (§8 B). Silent
+    on empty stages. Thresholds come from the run's ANALYZE-TIME snapshot on ``review_runs``
+    (``thresholds_from_row``), NOT live config, so a confirm after a config edit still reports
+    the bands the run was analyzed under (the same snapshot the read-only poll reads).
     """
     from .. import review_stats
     if not actions:
         return
-    m = ctx.config.match
-    thresholds = dict(t_rec=m.t_photo_recompress, t_edit=m.t_photo_edit, t_video=m.t_match_video)
+    run = ctx.db.query_one(
+        "SELECT t_photo_recompress, t_photo_edit, t_match_video FROM review_runs WHERE id=?",
+        (run_id,),
+    )
+    thresholds = review_stats.thresholds_from_row(run)
     # Lay the block out to the SAME width the Review box feeds the shared builder at the
     # reference geometry (review_stats.REFERENCE_TEXT_WIDTH): the daemon streams logs to
     # whatever client is attached (no known terminal size), so it renders to that reference
     # rather than reflowing — and matching the box's builder width keeps the two identical.
     width = review_stats.REFERENCE_TEXT_WIDTH
-    if stage == STAGE_EXACT:
-        for ln in review_stats.stage1_lines(review_stats.stage1_split(actions)):
-            ctx.log(ln)
-    elif stage == STAGE_RECOMPRESS:
-        bundle = review_stats.stage2_stats(actions, is_network=fsutil.is_network_path, **thresholds)
-        # keep_suggested=False: the CLI prints its OWN `--confirm --keep-suggested` tip
-        # (below, in _report_staged), so suppress the box's `[b]` tip here — `[b]` is a
-        # TUI-only key and would duplicate the CLI tip.
-        for ln in review_stats.stage2_lines(bundle, width, keep_suggested=False):
-            ctx.log(f"  {ln}")
-    elif stage == STAGE_EDIT:
-        bundle = review_stats.stage2_stats(actions, stage=3, is_network=fsutil.is_network_path,
-                                           **thresholds)
-        for ln in review_stats.stage3_lines(bundle, width):
-            ctx.log(f"  {ln}")
+    bundle = review_stats.stats_for_stage(actions, stage, thresholds=thresholds,
+                                          is_network=fsutil.is_network_path)
+    # keep_suggested=False: the CLI prints its OWN `--confirm --keep-suggested` tip (below,
+    # in _report_staged), so suppress the box's `[b]` tip here — `[b]` is a TUI-only key
+    # and would duplicate the CLI tip. Stage 1 ignores the flag (no keep-suggested there).
+    for ln in review_stats.lines_for_stage(bundle, stage, width, keep_suggested=False):
+        ctx.log(ln)
 
 
 def _report_stage_confirm(ctx, stage, out) -> None:
