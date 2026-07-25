@@ -256,7 +256,13 @@ def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
     must also be fully fingerprinted (:func:`_asset_fully_fingerprinted`). This is the ONE
     skip predicate: ``scan`` uses it to skip re-fingerprinting (behind its ``--full``
     bypass), and ``probe`` uses its negation to decide *new/changed*, so "probe says N" ⇒
-    "scan would fingerprint ≥ N" holds by construction — no second copy of the rule.
+    "scan touches ≥ N files" holds by construction — no second copy of the rule.
+
+    NB the bound is on *files touched*, not *bytes hashed*: a moved file fails this
+    predicate (its new path has no row), so probe counts it new/changed, but scan may
+    then relink it with **zero** byte work (:func:`plan_moves`, §8 A2 step 4a). Probe
+    firing is still correct — a move genuinely needs a scan to fix the stored path — it
+    just no longer lower-bounds re-fingerprinting.
     """
     return (
         rec is not None
@@ -267,6 +273,81 @@ def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
             rec["undecodable"], rec["media_type"], rec["has_phash"], rec["has_vphash"]
         )
     )
+
+
+def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
+               en: "Enumeration", tol: float) -> dict[str, dict]:
+    r"""Classify path-absent candidates that are safe **moves** (§8 A2 step 4a).
+
+    A moved file fails :func:`is_fastpath_hit` (its new path has no DB row), so the plain
+    pipeline would re-hash it over the network just to rediscover a known asset. When we
+    can prove a candidate is a rename/relocation of a *gone* instance we skip that byte
+    work and merely repoint the row's ``path``. Returns ``{normcase(cand.path): origin}``
+    — the ``existing`` record each safe-move candidate relinks to.
+
+    This is a metadata-only assertion of content identity, so it fires **only** when the
+    ``(filename, size)`` pair is unambiguous on *both* sides and mtime corroborates. A
+    candidate ``C`` (path absent from the DB) is a move of ``origin`` iff **all** hold:
+
+    1. **Bucket unique in the DB.** ``C``'s ``(normcase filename, size)`` bucket holds
+       exactly ONE ``file_instances`` row. (≥2 → the pair doesn't identify content in this
+       root; 0 → genuinely new.) This subsumes the "no live instance shares the key" guard:
+       if the sole holder is still on disk this pass it's rejected by (2), and any *second*
+       holder — live or gone — makes the bucket non-unique here.
+    2. **The sole holder is gone, not merely unreadable.** ``origin``'s path was NOT
+       enumerated this pass (so it's a deletion candidate) AND is not under a suppressed
+       (errored/ignored) subtree (§10.1) — an unreadable origin's file may still exist, so
+       repointing it would relocate a row whose bytes are still on disk.
+    3. **mtime corroborates** within ``tol`` (the same tolerant window as the fast-path).
+    4. **The origin asset is fully fingerprinted** — else fall through so the miss path
+       decodes + backfills its perceptual data (a merge-created / undecodable-retry asset).
+    5. **Bucket unique among candidates.** Exactly ONE path-absent candidate shares the
+       bucket (``C`` itself) — if a file was copied into two new spots only one can be the
+       move, so hash them all rather than pick arbitrarily.
+
+    Every rejection falls through to the ordinary hash path, which is always correct — so
+    this only ever *removes* byte work in the provable case, never changes an outcome. NOT
+    consulted under ``--full`` (the caller passes only when re-hashing is not forced).
+    """
+    from collections import defaultdict
+
+    enumerated = {os.path.normcase(c.path) for c in candidates}
+
+    def _bucket(name: str, size: int) -> tuple[str, int]:
+        return (os.path.normcase(name), size)
+
+    db_by_ns: dict[tuple, list[dict]] = defaultdict(list)
+    for rec in existing.values():
+        db_by_ns[_bucket(os.path.basename(rec["path"]), rec["size"])].append(rec)
+
+    # Only path-absent candidates compete to be "the move" (5); one at a known path is a
+    # fast-path hit or an in-place edit, staying at its own path.
+    absent_by_ns: dict[tuple, list["Candidate"]] = defaultdict(list)
+    for c in candidates:
+        if os.path.normcase(c.path) not in existing:
+            absent_by_ns[_bucket(os.path.basename(c.path), c.size)].append(c)
+
+    moves: dict[str, dict] = {}
+    for key, cands in absent_by_ns.items():
+        if len(cands) != 1:                                   # (5) candidate-side ambiguity
+            continue
+        db_matches = db_by_ns.get(key, [])
+        if len(db_matches) != 1:                              # (1) 0 = new, ≥2 = ambiguous
+            continue
+        origin = db_matches[0]
+        if os.path.normcase(origin["path"]) in enumerated:    # (2) sole holder is LIVE → copy
+            continue
+        if en.is_suppressed(origin["path"]):                  # (2) gone only because unreadable
+            continue
+        cand = cands[0]
+        if origin["mtime"] is None or abs(origin["mtime"] - cand.mtime) > tol:   # (3)
+            continue
+        if not _asset_fully_fingerprinted(                    # (4) not-yet-fp → hash+backfill
+            origin["undecodable"], origin["media_type"], origin["has_phash"], origin["has_vphash"]
+        ):
+            continue
+        moves[os.path.normcase(cand.path)] = origin
+    return moves
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +461,21 @@ def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: medi
 def _attach_instance(db, asset_id: int, root_id: int, cand: Candidate, seen_at: str) -> None:
     with db.transaction() as conn:
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
+
+
+def _repoint_moved(db, fid: int, cand: Candidate, seen_at: str) -> None:
+    r"""Relink a *moved* file's existing instance row to its new path (§8 A2 step 4a).
+
+    The origin instance ``fid`` was proven a move of ``cand`` by :func:`plan_moves`, so we
+    update the SAME row in place — new ``path``/``filename``, bumped ``last_seen_at`` — with
+    NO byte work: the asset (hash + perceptual) is unchanged, only its location moved.
+    ``size``/``mtime`` are left as stored (as the same-path fast-path does; a move preserves
+    both within tolerance). Deliberately does NOT touch ``roots.needs_dedup``: a move adds no
+    new dedup-able content (same asset), so a fully-deduped root stays ◉ green (§12)."""
+    db.execute(
+        "UPDATE file_instances SET path=?, filename=?, last_seen_at=? WHERE id=?",
+        (cand.path, os.path.basename(cand.path), seen_at, fid),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +616,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     report = {
         "root_id": root_id, "name": root_row["name"], "path": root_row["path"],
         "candidates": len(en.candidates), "new": 0, "exact_dup": 0, "matches_trashed": 0,
-        "backfilled": 0, "undecodable": 0, "errors": 0, "skipped_fastpath": 0,
+        "backfilled": 0, "undecodable": 0, "errors": 0, "skipped_fastpath": 0, "moved": 0,
         "deleted_instances": 0, "forgotten_assets": 0, "root_offline": en.root_offline,
     }
 
@@ -532,14 +628,27 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     fastpath_fids: list[int] = []
     tol = ctx.config.fastpath.mtime_tolerance_s
 
+    # Move detection (§8 A2 step 4a): a path-absent candidate that provably relocates a
+    # gone instance is repointed (no re-hash). Skipped under --full (re-hash is forced).
+    # Keyed by normcase(new path) → the origin `existing` record.
+    moves = {} if full else plan_moves(en.candidates, existing, en, tol)
+    moved: list[tuple[Candidate, dict]] = []
+
     for cand in en.candidates:
-        rec = existing.get(os.path.normcase(cand.path))
+        ncase = os.path.normcase(cand.path)
+        rec = existing.get(ncase)
         # The shared skip predicate (`is_fastpath_hit`) is the SAME one probe reads —
         # scan skips a hit (behind --full), probe counts a miss as new/changed.
         if not full and is_fastpath_hit(rec, cand, tol):
             seen_fids.add(rec["fid"])
             fastpath_fids.append(rec["fid"])
             report["skipped_fastpath"] += 1
+        elif (origin := moves.get(ncase)) is not None:
+            # A proven move: repoint the origin row (below), no byte work. The origin's
+            # fid counts as seen so deletion-detection won't then forget the relinked row.
+            seen_fids.add(origin["fid"])
+            moved.append((cand, origin))
+            report["moved"] += 1
         else:
             to_process.append(cand)
             if rec is not None:
@@ -560,6 +669,15 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     done += report["skipped_fastpath"]
     if report["skipped_fastpath"]:
         ctx.progress(done, message=f"{report['skipped_fastpath']} unchanged")
+
+    # Repoint moved files (metadata-only, §8 A2 step 4a) — also advances progress with no
+    # byte work, on the main thread before the worker pools spin up.
+    with profiler.timer("shared", "db"):
+        for cand, origin in moved:
+            _repoint_moved(db, origin["fid"], cand, seen_at)
+    done += report["moved"]
+    if report["moved"]:
+        ctx.progress(done, message=f"{report['moved']} moved")
 
     # Split the worklist: photos small enough to buffer go through the
     # producer/consumer pipeline (I/O ‖ CPU decoupled, read-once); videos and
@@ -913,16 +1031,16 @@ def _persist_scan_result(ctx, reports, *, full, embed, profiler, collector, crea
                     "INSERT INTO scan_results("
                     "job_id, root_id, root_name, full, embed, profiled, candidates, new, "
                     "exact_dup, backfilled, matches_trashed, skipped_fastpath, undecodable, "
-                    "errors, deleted_instances, forgotten_assets, root_offline, profile_json, "
-                    "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "errors, deleted_instances, forgotten_assets, moved, root_offline, "
+                    "profile_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (ctx.job_id, root_id, rep["name"], 1 if full else 0,
                      1 if embed else 0, 1 if profiler.enabled else 0,
                      rep.get("candidates", 0), rep.get("new", 0), rep.get("exact_dup", 0),
                      rep.get("backfilled", 0), rep.get("matches_trashed", 0),
                      rep.get("skipped_fastpath", 0), undecodable_count,
                      rep.get("errors", 0), rep.get("deleted_instances", 0),
-                     rep.get("forgotten_assets", 0), 1 if rep.get("root_offline") else 0,
-                     profile_json, created_at),
+                     rep.get("forgotten_assets", 0), rep.get("moved", 0),
+                     1 if rep.get("root_offline") else 0, profile_json, created_at),
                 )
                 for r in undec_rows:
                     conn.execute(
@@ -949,7 +1067,7 @@ def _persist_scan_result(ctx, reports, *, full, embed, profiler, collector, crea
 
 def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embed) -> None:
     agg = {k: 0 for k in ("new", "exact_dup", "matches_trashed", "backfilled",
-                          "undecodable", "errors", "skipped_fastpath",
+                          "undecodable", "errors", "skipped_fastpath", "moved",
                           "deleted_instances", "forgotten_assets", "candidates")}
     for rep in reports:
         for k in agg:
@@ -961,9 +1079,9 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
         ctx.log(
             f"scan done: {agg['new']} new · {agg['exact_dup']} exact-dup instances · "
             f"{agg['backfilled']} filled in missing fingerprints · {agg['matches_trashed']} identified trash · "
-            f"{agg['skipped_fastpath']} skipped (fast-path) · {agg['undecodable']} undecodable · "
-            f"{agg['errors']} errors · {agg['deleted_instances']} instances gone "
-            f"({agg['forgotten_assets']} assets forgotten)."
+            f"{agg['moved']} moved · {agg['skipped_fastpath']} skipped (fast-path) · "
+            f"{agg['undecodable']} undecodable · {agg['errors']} errors · "
+            f"{agg['deleted_instances']} instances gone ({agg['forgotten_assets']} assets forgotten)."
         )
         # The persisted report lists the root's *current* undecodables (re-derived
         # from the catalog, so a resume/re-run stays accurate) plus this pass's
@@ -986,8 +1104,15 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
         would = sum(r.get("would_index", 0) for r in reports)
         summary = f"dry-run: {agg['candidates']} candidates, {would} would be (re)fingerprinted"
     else:
-        summary = (f"{agg['new']} new · {agg['exact_dup']} exact-dup · "
-                   f"{agg['undecodable']} undecodable · {agg['errors']} errors")
+        # Selective: show only the metrics that actually happened (>0), in a fixed order
+        # (new · exact-dup · undecodable · errors · gone · moved). A no-op re-scan (all
+        # fast-path-skipped) shows "no changes" so the row/card is never blank (§12).
+        parts = [
+            (agg["new"], "new"), (agg["exact_dup"], "exact-dup"),
+            (agg["undecodable"], "undecodable"), (agg["errors"], "errors"),
+            (agg["deleted_instances"], "gone"), (agg["moved"], "moved"),
+        ]
+        summary = " · ".join(f"{n:,} {label}" for n, label in parts if n) or "no changes"
     ctx.set_result({
         "op": "scan", "dry_run": dry_run, "full": full, "embed": embed,
         "roots_scanned": len(reports), "roots_skipped": len(skipped_roots),

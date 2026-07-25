@@ -285,6 +285,200 @@ def test_scan_deletion_keeps_asset_with_other_instance(queue_and_db, tiny_photos
     assert c["instances"] == 2
 
 
+# --- move detection (§8 A2 step 4a) ----------------------------------------
+def _one_png(path, seed=1):
+    import numpy as np
+    from PIL import Image
+    arr = np.random.default_rng(seed).integers(0, 256, (32, 32, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(path, format="PNG")
+
+
+def _moved_count(database, job_id):
+    return database.query_one("SELECT moved FROM scan_results WHERE job_id=?", (job_id,))["moved"]
+
+
+def test_scan_relinks_moved_file_without_rehash(queue_and_db, tmp_path):
+    """A file moved to a new dir (same name/size/mtime, its bucket unambiguous) is
+    RELINKED — the SAME file_instances row is repointed, no new asset/hash (§8 A2 4a)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    before = database.query_one("SELECT id, asset_id FROM file_instances WHERE filename='a.png'")
+    # Move (rename preserves mtime) into sub/, keeping the filename.
+    (lib / "sub").mkdir()
+    (lib / "a.png").rename(lib / "sub" / "a.png")
+    jid = _run_scan(q, database, root["id"])
+    after = database.query_one("SELECT id, asset_id, path FROM file_instances WHERE filename='a.png'")
+    # Same instance row (repointed, not delete+recreate) + same asset (no re-hash).
+    assert after["id"] == before["id"]
+    assert after["asset_id"] == before["asset_id"]
+    assert after["path"].endswith(os.path.join("sub", "a.png"))
+    c = _counts(database)
+    assert c["assets"] == 1 and c["instances"] == 1
+    assert _moved_count(database, jid) == 1
+
+
+def test_scan_move_is_dedup_neutral(queue_and_db, tmp_path):
+    """A relinked move adds no new dedup-able content → must NOT set needs_dedup (§12)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    database.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))  # simulate a dedup
+    (lib / "sub").mkdir()
+    (lib / "a.png").rename(lib / "sub" / "a.png")
+    _run_scan(q, database, root["id"])
+    assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
+                              (root["id"],))["needs_dedup"] == 0
+
+
+def test_scan_copy_is_not_a_move(queue_and_db, tmp_path):
+    """A byte-copy (origin still present) is NOT a move — the origin is live, so the new
+    file is hashed and attaches as a second instance; moved stays 0."""
+    q, database = queue_and_db
+    import shutil
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    (lib / "sub").mkdir()
+    shutil.copy(lib / "a.png", lib / "sub" / "a.png")   # both present, same name
+    jid = _run_scan(q, database, root["id"])
+    c = _counts(database)
+    assert c["assets"] == 1 and c["instances"] == 2      # one asset, two instances
+    assert _moved_count(database, jid) == 0
+
+
+def test_scan_two_move_candidates_are_hashed_not_relinked(queue_and_db, tmp_path):
+    """A file relocated into TWO new spots (two path-absent candidates sharing the
+    bucket) is ambiguous — only one could be the move, so BOTH are hashed (moved=0) and
+    resolve correctly via content hash to one asset (§8 A2 4a condition v)."""
+    q, database = queue_and_db
+    import shutil
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    (lib / "x").mkdir(); (lib / "y").mkdir()
+    shutil.copy(lib / "a.png", lib / "x" / "a.png")
+    shutil.copy(lib / "a.png", lib / "y" / "a.png")
+    (lib / "a.png").unlink()                             # origin gone; 2 new same-name candidates
+    jid = _run_scan(q, database, root["id"])
+    c = _counts(database)
+    assert c["assets"] == 1 and c["instances"] == 2
+    assert _moved_count(database, jid) == 0
+
+
+def test_scan_full_disables_move_detection(queue_and_db, tmp_path):
+    """--full forces re-hashing, so move detection is skipped (moved=0); the moved file
+    still resolves via the hash path (new instance row, old one forgotten)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    before = database.query_one("SELECT id FROM file_instances WHERE filename='a.png'")
+    (lib / "sub").mkdir()
+    (lib / "a.png").rename(lib / "sub" / "a.png")
+    jid = _run_scan(q, database, root["id"], full=True)
+    after = database.query_one("SELECT id FROM file_instances WHERE filename='a.png'")
+    assert _moved_count(database, jid) == 0
+    assert after["id"] != before["id"]                   # hash path made a NEW row, not a relink
+    c = _counts(database)
+    assert c["assets"] == 1 and c["instances"] == 1
+
+
+# --- plan_moves guards (pure unit tests) -----------------------------------
+def _rec(fid, path, size, mtime, *, undecodable=0, media_type="photo",
+         has_phash=1, has_vphash=0):
+    return {"fid": fid, "path": path, "size": size, "mtime": mtime, "asset_id": fid * 10,
+            "undecodable": undecodable, "media_type": media_type,
+            "has_phash": has_phash, "has_vphash": has_vphash}
+
+
+def _existing(*recs):
+    return {os.path.normcase(r["path"]): r for r in recs}
+
+
+def _P(*parts):
+    return os.path.join(os.sep + "lib", *parts)
+
+
+def test_plan_moves_happy_path():
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("a.png"), 100, 1000.0))          # origin (will be gone)
+    cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.5)
+    moves = plan_moves([cand], existing, Enumeration(), 2.0)
+    assert moves.get(os.path.normcase(cand.path))["fid"] == 1
+
+
+def test_plan_moves_live_origin_vetoes():
+    """The sole bucket holder is still on disk this pass → a copy, not a move."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("a.png"), 100, 1000.0))
+    live = Candidate(path=_P("a.png"), rel="a.png", size=100, mtime=1000.0)      # origin present
+    copy = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.0)
+    assert plan_moves([live, copy], existing, Enumeration(), 2.0) == {}
+
+
+def test_plan_moves_suppressed_origin_vetoes():
+    """A gone-looking origin under a suppressed (errored/ignored) subtree may still exist
+    on disk (§10.1) → never relink it."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("subx", "a.png"), 100, 1000.0))
+    en = Enumeration(suppressed={os.path.normcase(_P("subx"))})
+    cand = Candidate(path=_P("a.png"), rel="a.png", size=100, mtime=1000.0)
+    assert plan_moves([cand], existing, en, 2.0) == {}
+
+
+def test_plan_moves_not_fully_fingerprinted_vetoes():
+    """A not-yet-fingerprinted origin (e.g. merge-created, no phash) must fall through so
+    the miss/backfill path decodes it."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("a.png"), 100, 1000.0, has_phash=0))
+    cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.0)
+    assert plan_moves([cand], existing, Enumeration(), 2.0) == {}
+
+
+def test_plan_moves_mtime_out_of_tolerance_vetoes():
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("a.png"), 100, 1000.0))
+    cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1005.0)
+    assert plan_moves([cand], existing, Enumeration(), 2.0) == {}
+
+
+def test_plan_moves_ambiguous_db_bucket_vetoes():
+    """Two DB instances share the (filename,size) bucket → the pair doesn't identify
+    content in this root → hash rather than guess the origin."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(
+        _rec(1, _P("p", "a.png"), 100, 1000.0),
+        _rec(2, _P("q", "a.png"), 100, 1000.0),
+    )
+    cand = Candidate(path=_P("r", "a.png"), rel="r/a.png", size=100, mtime=1000.0)
+    assert plan_moves([cand], existing, Enumeration(), 2.0) == {}
+
+
+def test_plan_moves_gone_origin_with_live_bucket_collision_vetoes():
+    """The crux of the live+gone rule: a gone origin AND a SEPARATE still-present file
+    share the (filename,size) bucket. The bucket is non-unique in the DB, so even though
+    exactly one match is *gone*, the tuple no longer identifies content → hash the
+    candidate (a live collision must veto regardless of its mtime)."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    gone = _rec(1, _P("p", "a.png"), 100, 1000.0)         # this pass won't enumerate it
+    live = _rec(2, _P("q", "a.png"), 100, 3000.0)         # different mtime, still on disk
+    existing = _existing(gone, live)
+    en = Enumeration()
+    # The live file is enumerated this pass (at its own path); the new candidate is a
+    # third same-bucket path. `live` present + `gone` absent = 2 DB matches → veto.
+    live_cand = Candidate(path=_P("q", "a.png"), rel="q/a.png", size=100, mtime=3000.0)
+    new_cand = Candidate(path=_P("r", "a.png"), rel="r/a.png", size=100, mtime=1000.0)
+    assert plan_moves([live_cand, new_cand], existing, en, 2.0) == {}
+
+
 def test_scan_undecodable_kept_with_hash(queue_and_db, tiny_photos):
     q, database = queue_and_db
     (tiny_photos / "broken.png").write_bytes(b"not a real png")

@@ -68,7 +68,9 @@ uv run packrat jobs                                       # list recent job runs
 
 A scan streams its progress live; Ctrl-C detaches the view but the job keeps
 running in the daemon (`packrat cancel` stops it). Re-running a scan is cheap —
-the fast-path skips files whose path+size+mtime are unchanged.
+the fast-path skips files whose path+size+mtime are unchanged, and a moved/renamed
+file is relinked to its new path without re-hashing (reported as `moved`). Pass
+`--full` to re-hash everything (the integrity backstop).
 
 ## Development
 

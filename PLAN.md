@@ -1157,6 +1157,38 @@ For every candidate file:
      mtime also lands within tolerance is skipped and its stored fingerprint goes stale. This is
      rare for media and is the reason the periodic **`--full` scan** (which re-hashes everything)
      exists as the backstop. Setting `mtime_tolerance_s=0` restores strict `path+size+mtime`.
+4a. **Moved-file relink (metadata-only, no re-hash).** A file that was *moved/renamed* within the
+   root fails step 4 — its **new** path has no `file_instances` row — so the naïve path re-hashes
+   it over the network only to rediscover a known asset (step 6 hit → new instance; the old path's
+   row is then forgotten by deletion-detection, step 11). This is already *correct*, just wasteful.
+   When a candidate can be **proven** a relocation of a now-gone instance we skip the byte work and
+   simply **update that row's `path`** (+ `filename`, `last_seen_at`), leaving `size`/`mtime`/the
+   asset untouched. Because this asserts content identity from **metadata alone**, it fires only
+   when the `(filename, size)` pair is unambiguous on *both* sides and mtime corroborates — a
+   candidate `C` whose path is absent from the DB is a move of instance `O` iff **all** hold:
+   - **(i) `C`'s `(normcase filename, exact size)` bucket holds exactly ONE DB instance** in this
+     root (0 → genuinely new; ≥2 → the pair doesn't identify content here → hash it);
+   - **(ii) that sole instance `O` is *gone*, not merely unreadable** — its path was **not**
+     enumerated this pass **and** is not under a **suppressed** (errored/ignored) subtree (§10.1).
+     A still-present sole match means `C` is a **copy**, not a move (→ hash it); a suppressed origin
+     may still exist on disk, so relinking it would relocate a live row's path;
+   - **(iii) mtime corroborates** — `|O.mtime − C.mtime| ≤ mtime_tolerance_s` (same tolerant window
+     as step 4; a rename preserves mtime, a cross-fs move may round it);
+   - **(iv) `O`'s asset is *fully fingerprinted*** (step-4 predicate) — else fall through so the
+     step-6 miss/backfill path decodes its perceptual data (a merge-created / undecodable asset);
+   - **(v) exactly ONE path-absent candidate shares the bucket** (`C` itself) — a file copied into
+     two new spots gives two candidates; only one can be the move, so hash them all.
+   Every failed condition **falls through to the ordinary hash path (steps 5–9), which is always
+   correct** — so 4a only ever *removes* byte work in the provable case and never changes an
+   outcome. The `(filename,size)` bucketing lets a tolerant-mtime match use a hashable key; the
+   live-side ambiguity check (i–ii) is bucket-level (no mtime filter) because tolerance isn't
+   transitive, so a live collision must veto regardless of its exact mtime. **`--full` disables 4a**
+   (re-hashing is forced). Same **residual blind spot** as step 4 — two distinct files sharing
+   filename+size+mtime-in-tolerance — with the same `--full` backstop; the move key is *stronger*
+   evidence than the same-path skip (it adds filename equality + a gone origin), but it is a genuinely
+   new cross-path identity assertion, hence the strict two-sided uniqueness guard. A relinked move is
+   **dedup-neutral** (same asset, no new content) so it does **not** set `roots.needs_dedup` (§12).
+   → **write** `file_instances.path`/`filename`/`last_seen_at` for `O`; counted `moved` in the report.
 5. **Content hash** — BLAKE3, streamed. → no write yet (value held for step 6).
 6. **Exact-dup resolution.** Look up `assets.content_hash`.
    - **Hit** → this is another copy of a known asset: **upsert** a `file_instances` row

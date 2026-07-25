@@ -987,6 +987,7 @@ def _print_last_scan(d: dict) -> None:
         f"  last scan result ({_short_ts(ls.get('created_at'))}{flags}): "
         f"{ls.get('new', 0)} new · {ls.get('exact_dup', 0)} exact-dup · "
         f"{ls.get('backfilled', 0)} filled-in · {ls.get('matches_trashed', 0)} identified-trash · "
+        f"{ls.get('moved') or 0} moved · "
         f"{undec} undecodable (now) · {ls.get('errors', 0)} errors"
     )
     problems = d.get("problem_files", [])

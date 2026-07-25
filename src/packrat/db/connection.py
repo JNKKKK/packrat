@@ -223,6 +223,10 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     # Defaults to 0 on a retrofit; self-heals on the next scan/dedup (a still-yellow root
     # whose last_dedup_at IS NULL is ALSO caught by the ladder's "never deduped" rung).
     ("roots", "needs_dedup", "INTEGER NOT NULL DEFAULT 0"),
+    # per-scan count of files relinked to a new path without re-hashing (§8 A2 step 4a).
+    # Nullable → an old scan_results row predating move detection reads NULL (= "not
+    # tracked"), which the renderers show as 0.
+    ("scan_results", "moved", "INTEGER"),
 ]
 
 

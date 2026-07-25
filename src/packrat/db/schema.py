@@ -304,6 +304,7 @@ CREATE TABLE IF NOT EXISTS scan_results (
     candidates        INTEGER, new INTEGER, exact_dup INTEGER, backfilled INTEGER,
     matches_trashed   INTEGER, skipped_fastpath INTEGER, undecodable INTEGER,
     errors            INTEGER, deleted_instances INTEGER, forgotten_assets INTEGER,
+    moved             INTEGER,   -- files relinked to a new path without re-hashing (§8 A2 step 4a)
     root_offline      INTEGER NOT NULL DEFAULT 0,
     profile_json      TEXT,     -- ScanProfiler.snapshot_json(), NULL unless --profile
     created_at        TEXT,

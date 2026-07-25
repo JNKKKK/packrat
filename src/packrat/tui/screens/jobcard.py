@@ -112,7 +112,8 @@ def _scan_body(job: dict, problem_files: list[dict], scroll: int,
         f"{r.get('new', 0):>5,}  new assets       {r.get('exact_dup', 0):>5,}  exact-dup instances",
         f"{r.get('backfilled', 0):>5,}  filled-in fp     {r.get('matches_trashed', 0):>5,}  identified as trash",
         f"{r.get('undecodable', 0):>5,}  undecodable      {r.get('read_errors', 0):>5,}  read errors",
-        f"{r.get('skipped_fastpath', 0):>5,}  skipped (fast)   {r.get('deleted_instances', 0):>5,}  instances gone",
+        f"{r.get('skipped_fastpath', 0):>5,}  skipped (fast)   {r.get('moved') or 0:>5,}  moved (relinked)",
+        f"{r.get('deleted_instances', 0):>5,}  instances gone   {r.get('forgotten_assets', 0):>5,}  assets forgotten",
         "",
         r.get("summary", ""),
     ]
@@ -124,13 +125,13 @@ def _scan_body(job: dict, problem_files: list[dict], scroll: int,
 def problem_budget(job: dict, problem_files: list[dict], geo: Geometry) -> int:
     """Rows the scrollable problem-file window gets (drives the screen's ↑/↓ clamp).
 
-    The card's fixed portion is the count summary (8 lines) + the problem-section
-    header (1); the rest of the content region is the scrollable window. Mirrors the
-    budget :func:`_problem_section` fits into, so the screen clamps scroll to the
-    same number of rows the body actually shows."""
+    The card's fixed portion is the count summary (9 lines: title + rule + 5 count
+    lines + blank + summary) + the problem-section header (1); the rest of the content
+    region is the scrollable window. Mirrors the budget :func:`_problem_section` fits
+    into, so the screen clamps scroll to the same number of rows the body actually shows."""
     if not problem_files:
         return 0
-    return max(1, geo.content_rows - 9)
+    return max(1, geo.content_rows - 10)
 
 
 def _problem_section(problem_files: list[dict], scroll: int,
@@ -142,7 +143,7 @@ def _problem_section(problem_files: list[dict], scroll: int,
     legible. Each row middle-elides its path and dims its reason to the right."""
     w = geo.content_w
     n = len(problem_files)
-    budget = max(1, geo.content_rows - 9)
+    budget = max(1, geo.content_rows - 10)
     start = max(0, min(scroll, max(0, n - budget)))
     window = problem_files[start:start + budget]
     rows = [_problem_row(pf, w) for pf in window]

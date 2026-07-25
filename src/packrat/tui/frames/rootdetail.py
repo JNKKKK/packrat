@@ -252,10 +252,31 @@ class RootDetailScreen(FrameScreen):
 
     # -- per-root ops (§3): each maps to a CLI verb (§1.6), submitted for real
     #    online via the daemon client; offline shows the "would run" notice.
+
+    #: [s] scan-type prompt. Cursor 0 = Normal (fast-path skip), so a plain [Enter]
+    #: keeps the incremental default; option 1 maps to `scan --full` (§8 A2 step 4).
+    SCAN_TYPE_OPTIONS = [
+        "Normal  (fast-path skip — only new / changed / moved files)",
+        "Full  (re-hash every file; also retries undecodables)",
+    ]
+
     def action_scan(self) -> None:
+        if not self.is_active:
+            return
         root = self.root_name
-        self.app.run_verb(f"packrat scan {root}",
-                          submit=lambda: self.app.client.submit_scan(root))
+
+        def after(idx):
+            if idx is None:                      # Esc → don't submit anything
+                return
+            full = idx == 1
+            cmd = f"packrat scan {root}" + (" --full" if full else "")
+            self.app.run_verb(cmd, title="scan",
+                              submit=lambda: self.app.client.submit_scan(root, full=full))
+
+        self.app.push_screen(
+            ChoiceModal(self.SCAN_TYPE_OPTIONS, title="scan — which type?",
+                        prompt="How should packrat scan this root?"),
+            after)
 
     #: [d] dedup master-preference prompt (§8 B --prefer-internal). Cursor 0 = default
     #: (external is the master), so a plain [Enter] keeps today's behavior.

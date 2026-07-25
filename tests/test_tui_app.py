@@ -428,9 +428,12 @@ def test_root_detail_scan_submits_online():
         async def scenario(app, pilot):
             await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
             assert _screen(app) == "RootDetailScreen"
-            await pilot.press("s")                 # [s] scan → real submit
+            await pilot.press("s")                 # [s] scan → scan-type prompt
             await pilot.pause()
-            # no-confirm action → a toast, NOT a modal popup (still on the detail)
+            assert _screen(app) == "ChoiceModal"   # picks Normal/Full first
+            await pilot.press("enter")             # cursor 0 = Normal → real submit
+            await pilot.pause()
+            # after the pick, back on the detail with an info toast (no confirm gate)
             assert _screen(app) == "RootDetailScreen"
             t = _last_toast(app)
             assert t and t.severity == "information" and "job #901" in t.message
@@ -519,6 +522,8 @@ def test_online_submit_error_shows_red_toast_not_crash():
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("enter")     # pick Normal from the scan-type prompt → submit
         await pilot.pause()
         # a submit exception surfaces as a RED (error) toast, not a crash / modal
         assert _screen(app) == "RootDetailScreen"        # app alive, no popup

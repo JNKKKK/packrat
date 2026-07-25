@@ -117,9 +117,9 @@ SCAN_DONE = _job(
         "op": "scan", "dry_run": False, "full": False, "embed": False,
         "roots_scanned": 1, "roots_skipped": 0, "new": 412, "exact_dup": 0,
         "backfilled": 0, "matches_trashed": 17, "undecodable": 3, "errors": 0,
-        "read_errors": 0, "skipped_fastpath": 8912, "deleted_instances": 2,
+        "read_errors": 0, "skipped_fastpath": 8912, "moved": 5, "deleted_instances": 2,
         "forgotten_assets": 1, "candidates": 13204,
-        "summary": "+412 new · 3 undecodable",
+        "summary": "412 new · 3 undecodable · 2 gone · 5 moved",
     }),
 )
 
@@ -277,7 +277,7 @@ def root_detail_pending() -> dict:
         "last_scan": {
             "job_id": 418, "root_id": 1, "root_name": "iPhone", "full": 0, "embed": 0,
             "profiled": 0, "candidates": 13204, "new": 412, "exact_dup": 0,
-            "backfilled": 0, "matches_trashed": 17, "skipped_fastpath": 8912,
+            "backfilled": 0, "matches_trashed": 17, "skipped_fastpath": 8912, "moved": 5,
             "undecodable": 3, "errors": 0, "deleted_instances": 2, "forgotten_assets": 1,
             "root_offline": 0, "profile_json": None, "created_at": "2026-07-15T09:04:00",
         },
@@ -354,7 +354,7 @@ def root_detail_clean() -> dict:
         "last_scan": {
             "job_id": 415, "root_id": 2, "root_name": "Camera", "full": 0, "embed": 0,
             "profiled": 0, "candidates": 26150, "new": 26, "exact_dup": 0,
-            "backfilled": 0, "matches_trashed": 0, "skipped_fastpath": 26124,
+            "backfilled": 0, "matches_trashed": 0, "skipped_fastpath": 26124, "moved": 0,
             "undecodable": 0, "errors": 0, "deleted_instances": 0, "forgotten_assets": 0,
             "root_offline": 0, "profile_json": None, "created_at": "2026-07-15T09:31:00",
         },

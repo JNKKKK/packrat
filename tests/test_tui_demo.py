@@ -555,9 +555,12 @@ def test_root_detail_scan_dedup_merge_verbs():
         await pilot.press("r")
         await pilot.press("r")
         await pilot.press("enter")
-        # [s] is a no-confirm action → its verb surfaces as a TOAST (offline), NOT a modal;
-        # the screen stays on the detail.
+        # [s] opens the scan-type picker (Normal/Full); [Enter] takes the default (Normal)
+        # and surfaces the scan verb toast (offline), returning to the detail.
         await pilot.press("s")
+        await pilot.pause()
+        assert _scr(app) == "ChoiceModal", _scr(app)
+        await pilot.press("enter")
         await pilot.pause()
         assert _scr(app) == "RootDetailScreen", _scr(app)
         assert "packrat scan" in _toast_text(app), _toast_text(app)
