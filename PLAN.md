@@ -1177,7 +1177,12 @@ For every candidate file:
    - **(iv) `O`'s asset is *fully fingerprinted*** (step-4 predicate) — else fall through so the
      step-6 miss/backfill path decodes its perceptual data (a merge-created / undecodable asset);
    - **(v) exactly ONE path-absent candidate shares the bucket** (`C` itself) — a file copied into
-     two new spots gives two candidates; only one can be the move, so hash them all.
+     two new spots gives two candidates; only one can be the move, so hash them all;
+   - **(vi) the origin asset is `active`, not `trashed`** — a moved file of a trashed asset is a
+     trash re-appearance the banner must count as `matches-trashed` (Phase 4); a metadata-only
+     relink would silently drop that signal, so a trashed origin falls through to the hash path
+     (which hits the trashed asset and counts it). Trashed origins are rare/short-lived, so the
+     re-hash costs almost nothing.
    Every failed condition **falls through to the ordinary hash path (steps 5–9), which is always
    correct** — so 4a only ever *removes* byte work in the provable case and never changes an
    outcome. The `(filename,size)` bucketing lets a tolerant-mtime match use a hashable key; the

@@ -119,7 +119,7 @@ SCAN_DONE = _job(
         "backfilled": 0, "matches_trashed": 17, "undecodable": 3, "errors": 0,
         "read_errors": 0, "skipped_fastpath": 8912, "moved": 5, "deleted_instances": 2,
         "forgotten_assets": 1, "candidates": 13204,
-        "summary": "412 new · 3 undecodable · 2 gone · 5 moved",
+        "summary": "412 new · 17 identified-trash · 3 undecodable · 2 gone · 5 moved",
     }),
 )
 

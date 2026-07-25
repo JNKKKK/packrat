@@ -237,7 +237,7 @@ def load_existing_instances(db, root_id: int, profiler=NULL_PROFILER) -> dict[st
     with profiler.timer("shared", "db"):
         rows = db.query(
             "SELECT fi.id fid, fi.path, fi.size, fi.mtime, fi.asset_id, "
-            "a.undecodable, a.media_type, "
+            "a.undecodable, a.media_type, a.status, "
             "EXISTS(SELECT 1 FROM phash p WHERE p.asset_id=a.id) has_phash, "
             "EXISTS(SELECT 1 FROM vphash v WHERE v.asset_id=a.id) has_vphash "
             "FROM file_instances fi JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=?",
@@ -304,6 +304,11 @@ def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
     5. **Bucket unique among candidates.** Exactly ONE path-absent candidate shares the
        bucket (``C`` itself) — if a file was copied into two new spots only one can be the
        move, so hash them all rather than pick arbitrarily.
+    6. **The origin asset is `active`, not `trashed`.** A moved file of a *trashed* asset
+       is a trash re-appearance the banner must report as ``matches_trashed`` (§8 A2 Phase
+       4) — a metadata-only relink would silently drop that signal. Trashed origins are
+       rare (short-lived until a `cleanup`), so falling through to the hash path (which
+       hits the trashed asset and counts it correctly) costs almost nothing.
 
     Every rejection falls through to the ordinary hash path, which is always correct — so
     this only ever *removes* byte work in the provable case, never changes an outcome. NOT
@@ -311,21 +316,24 @@ def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
     """
     from collections import defaultdict
 
-    enumerated = {os.path.normcase(c.path) for c in candidates}
-
     def _bucket(name: str, size: int) -> tuple[str, int]:
         return (os.path.normcase(name), size)
 
-    db_by_ns: dict[tuple, list[dict]] = defaultdict(list)
-    for rec in existing.values():
-        db_by_ns[_bucket(os.path.basename(rec["path"]), rec["size"])].append(rec)
-
     # Only path-absent candidates compete to be "the move" (5); one at a known path is a
-    # fast-path hit or an in-place edit, staying at its own path.
+    # fast-path hit or an in-place edit, staying at its own path. Build this FIRST — on a
+    # steady-state re-scan every candidate path is already known, so this is empty and no
+    # move can fire; return before allocating the (potentially 100K-entry) DB index below.
     absent_by_ns: dict[tuple, list["Candidate"]] = defaultdict(list)
     for c in candidates:
         if os.path.normcase(c.path) not in existing:
             absent_by_ns[_bucket(os.path.basename(c.path), c.size)].append(c)
+    if not absent_by_ns:
+        return {}
+
+    enumerated = {os.path.normcase(c.path) for c in candidates}
+    db_by_ns: dict[tuple, list[dict]] = defaultdict(list)
+    for rec in existing.values():
+        db_by_ns[_bucket(os.path.basename(rec["path"]), rec["size"])].append(rec)
 
     moves: dict[str, dict] = {}
     for key, cands in absent_by_ns.items():
@@ -335,6 +343,8 @@ def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
         if len(db_matches) != 1:                              # (1) 0 = new, ≥2 = ambiguous
             continue
         origin = db_matches[0]
+        if origin["status"] != "active":                      # (6) trashed → let hash path count it
+            continue
         if os.path.normcase(origin["path"]) in enumerated:    # (2) sole holder is LIVE → copy
             continue
         if en.is_suppressed(origin["path"]):                  # (2) gone only because unreadable
@@ -463,7 +473,7 @@ def _attach_instance(db, asset_id: int, root_id: int, cand: Candidate, seen_at: 
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
 
 
-def _repoint_moved(db, fid: int, cand: Candidate, seen_at: str) -> None:
+def _repoint_moved(conn, fid: int, cand: Candidate, seen_at: str) -> None:
     r"""Relink a *moved* file's existing instance row to its new path (§8 A2 step 4a).
 
     The origin instance ``fid`` was proven a move of ``cand`` by :func:`plan_moves`, so we
@@ -471,8 +481,11 @@ def _repoint_moved(db, fid: int, cand: Candidate, seen_at: str) -> None:
     NO byte work: the asset (hash + perceptual) is unchanged, only its location moved.
     ``size``/``mtime`` are left as stored (as the same-path fast-path does; a move preserves
     both within tolerance). Deliberately does NOT touch ``roots.needs_dedup``: a move adds no
-    new dedup-able content (same asset), so a fully-deduped root stays ◉ green (§12)."""
-    db.execute(
+    new dedup-able content (same asset), so a fully-deduped root stays ◉ green (§12).
+
+    Takes a raw ``conn`` (not the ``Database`` wrapper) so the caller can batch every
+    relink into ONE transaction — one commit for the whole move set, not per row."""
+    conn.execute(
         "UPDATE file_instances SET path=?, filename=?, last_seen_at=? WHERE id=?",
         (cand.path, os.path.basename(cand.path), seen_at, fid),
     )
@@ -671,10 +684,13 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
         ctx.progress(done, message=f"{report['skipped_fastpath']} unchanged")
 
     # Repoint moved files (metadata-only, §8 A2 step 4a) — also advances progress with no
-    # byte work, on the main thread before the worker pools spin up.
-    with profiler.timer("shared", "db"):
-        for cand, origin in moved:
-            _repoint_moved(db, origin["fid"], cand, seen_at)
+    # byte work, on the main thread before the worker pools spin up. One transaction for
+    # the whole batch (like the fast-path bump's chunked UPDATE above), so a large
+    # reorganization is ~1 commit, not one fsync per relinked file.
+    if moved:
+        with profiler.timer("shared", "db"), db.transaction() as conn:
+            for cand, origin in moved:
+                _repoint_moved(conn, origin["fid"], cand, seen_at)
     done += report["moved"]
     if report["moved"]:
         ctx.progress(done, message=f"{report['moved']} moved")
@@ -1074,7 +1090,9 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
             agg[k] += rep.get(k, 0)
     if dry_run:
         would = sum(r.get("would_index", 0) for r in reports)
-        ctx.log(f"dry-run: {agg['candidates']} candidate file(s), {would} would be (re)fingerprinted.")
+        moved = f" · {agg['moved']} would be relinked (moved)" if agg["moved"] else ""
+        ctx.log(f"dry-run: {agg['candidates']} candidate file(s), "
+                f"{would} would be (re)fingerprinted{moved}.")
     else:
         ctx.log(
             f"scan done: {agg['new']} new · {agg['exact_dup']} exact-dup instances · "
@@ -1102,13 +1120,16 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
     n_read_err = sum(1 for p in collector.problems() if p.problem == "read-error")
     if dry_run:
         would = sum(r.get("would_index", 0) for r in reports)
-        summary = f"dry-run: {agg['candidates']} candidates, {would} would be (re)fingerprinted"
+        moved = f", {agg['moved']} relinked" if agg["moved"] else ""
+        summary = f"dry-run: {agg['candidates']} candidates, {would} would be (re)fingerprinted{moved}"
     else:
-        # Selective: show only the metrics that actually happened (>0), in a fixed order
-        # (new · exact-dup · undecodable · errors · gone · moved). A no-op re-scan (all
-        # fast-path-skipped) shows "no changes" so the row/card is never blank (§12).
+        # Selective: show only the metrics that actually happened (>0), in a fixed order.
+        # Includes backfilled + matches_trashed so a backfill-only (post-merge) or
+        # trash-absorb-only pass reads honestly rather than "no changes" (which is reserved
+        # for a genuine no-op re-scan, all fast-path-skipped — never blank, §12).
         parts = [
             (agg["new"], "new"), (agg["exact_dup"], "exact-dup"),
+            (agg["backfilled"], "filled-in"), (agg["matches_trashed"], "identified-trash"),
             (agg["undecodable"], "undecodable"), (agg["errors"], "errors"),
             (agg["deleted_instances"], "gone"), (agg["moved"], "moved"),
         ]

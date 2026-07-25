@@ -321,7 +321,10 @@ def test_scan_relinks_moved_file_without_rehash(queue_and_db, tmp_path):
 
 
 def test_scan_move_is_dedup_neutral(queue_and_db, tmp_path):
-    """A relinked move adds no new dedup-able content → must NOT set needs_dedup (§12)."""
+    """A relinked move adds no new dedup-able content → must NOT set needs_dedup (§12).
+
+    Asserts the move ACTUALLY fired (moved==1): the hash-attach fallback also leaves
+    needs_dedup 0, so without this the test would pass even if move detection broke."""
     q, database = queue_and_db
     lib = tmp_path / "lib"; lib.mkdir()
     _one_png(lib / "a.png")
@@ -330,9 +333,33 @@ def test_scan_move_is_dedup_neutral(queue_and_db, tmp_path):
     database.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))  # simulate a dedup
     (lib / "sub").mkdir()
     (lib / "a.png").rename(lib / "sub" / "a.png")
-    _run_scan(q, database, root["id"])
+    jid = _run_scan(q, database, root["id"])
+    assert _moved_count(database, jid) == 1, "the move must have fired, not the hash fallback"
     assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
                               (root["id"],))["needs_dedup"] == 0
+
+
+def test_scan_move_of_trashed_asset_falls_through_to_hash(queue_and_db, tmp_path):
+    """A moved file whose asset is TRASHED must NOT relink silently (that would drop the
+    matches_trashed signal, §8 A2 4a guard 6) — it falls through to the hash path, which
+    hits the trashed asset and reports it as matches_trashed (moved stays 0)."""
+    q, database = queue_and_db
+    lib = tmp_path / "lib"; lib.mkdir()
+    _one_png(lib / "a.png")
+    root = register(database, str(lib))
+    _run_scan(q, database, root["id"])
+    # Trash a.png's asset in place (file still on disk — no cleanup yet), then move it.
+    database.execute(
+        "UPDATE assets SET status='trashed' WHERE id="
+        "(SELECT asset_id FROM file_instances WHERE filename='a.png')")
+    (lib / "sub").mkdir()
+    (lib / "a.png").rename(lib / "sub" / "a.png")
+    jid = _run_scan(q, database, root["id"])
+    r = database.query_one("SELECT moved, matches_trashed FROM scan_results WHERE job_id=?", (jid,))
+    assert r["moved"] == 0 and r["matches_trashed"] == 1
+    # The instance still relocated correctly (via the hash path), asset stays trashed.
+    inst = database.query_one("SELECT path FROM file_instances WHERE filename='a.png'")
+    assert inst["path"].endswith(os.path.join("sub", "a.png"))
 
 
 def test_scan_copy_is_not_a_move(queue_and_db, tmp_path):
@@ -393,9 +420,9 @@ def test_scan_full_disables_move_detection(queue_and_db, tmp_path):
 
 # --- plan_moves guards (pure unit tests) -----------------------------------
 def _rec(fid, path, size, mtime, *, undecodable=0, media_type="photo",
-         has_phash=1, has_vphash=0):
+         has_phash=1, has_vphash=0, status="active"):
     return {"fid": fid, "path": path, "size": size, "mtime": mtime, "asset_id": fid * 10,
-            "undecodable": undecodable, "media_type": media_type,
+            "undecodable": undecodable, "media_type": media_type, "status": status,
             "has_phash": has_phash, "has_vphash": has_vphash}
 
 
@@ -439,6 +466,15 @@ def test_plan_moves_not_fully_fingerprinted_vetoes():
     the miss/backfill path decodes it."""
     from packrat.jobs.scan import Candidate, Enumeration, plan_moves
     existing = _existing(_rec(1, _P("a.png"), 100, 1000.0, has_phash=0))
+    cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.0)
+    assert plan_moves([cand], existing, Enumeration(), 2.0) == {}
+
+
+def test_plan_moves_trashed_origin_vetoes():
+    """A trashed origin must fall through to the hash path so the re-appearance is counted
+    matches_trashed, not silently relinked (§8 A2 4a guard 6)."""
+    from packrat.jobs.scan import Candidate, Enumeration, plan_moves
+    existing = _existing(_rec(1, _P("a.png"), 100, 1000.0, status="trashed"))
     cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.0)
     assert plan_moves([cand], existing, Enumeration(), 2.0) == {}
 

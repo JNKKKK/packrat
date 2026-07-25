@@ -229,7 +229,7 @@ RECENT = [
     _job(id=602, type="scan", root_id=10, status="done", total=16200, done=16200,
          finished_at="2026-07-06T08:00:00", params_json=_rj({"root_id": 10}), root_name="OldPhone",
          label="scan OldPhone",
-         result_json=_rj({"op": "scan", "new": 16200, "summary": "+16,200 new"})),
+         result_json=_rj({"op": "scan", "new": 16200, "summary": "16,200 new"})),
     _job(id=601, type="dedup", root_id=10, status="done", finished_at="2026-07-06T10:00:00",
          params_json=_rj({"root_id": 10, "confirm": True}), root_name="OldPhone",
          label="dedup OldPhone (confirm)",
@@ -244,7 +244,7 @@ RECENT = [
     _job(id=599, type="scan", root_id=22, status="done", total=97600, done=97600,
          finished_at="2026-07-04T08:00:00", params_json=_rj({"root_id": 22, "full": True}),
          root_name="NAS_Media_Archive", label="scan NAS_Media_Archive (full)",
-         result_json=_rj({"op": "scan", "new": 97600, "summary": "+97,600 new"})),
+         result_json=_rj({"op": "scan", "new": 97600, "summary": "97,600 new"})),
     _job(id=598, type="dedup", root_id=22, status="done", finished_at="2026-07-04T20:00:00",
          params_json=_rj({"root_id": 22, "confirm": True}), root_name="NAS_Media_Archive",
          label="dedup NAS_Media_Archive (confirm)",
@@ -257,7 +257,7 @@ RECENT = [
                           "deleted": 7, "summary": "7 deleted (marked trashed)"})),
     _job(id=596, type="scan", root_id=30, status="done", total=21000, done=21000,
          finished_at="2026-07-10T08:00:00", params_json=_rj({"root_id": 30}), root_name="Nikon_Z6",
-         label="scan Nikon_Z6", result_json=_rj({"op": "scan", "new": 340, "summary": "+340 new"})),
+         label="scan Nikon_Z6", result_json=_rj({"op": "scan", "new": 340, "summary": "340 new"})),
     _job(id=595, type="merge", root_id=24, status="done", finished_at="2026-07-13T23:00:00",
          params_json=_rj({"source": r"E:\import\onedrive_dump", "into": "Cloud_Sync_Folder"}),
          root_name="Cloud_Sync_Folder", label="merge onedrive_dump → Cloud_Sync_Folder",
@@ -280,7 +280,7 @@ RECENT = [
          finished_at="2026-07-08T22:00:00", params_json=_rj({"root_id": 32}), root_name="Dashcam",
          label="scan Dashcam",
          result_json=_rj({"op": "scan", "new": 14201, "undecodable": 14, "read_errors": 3,
-                          "summary": "+14,201 new · 14 undecodable · 3 read errors"})),
+                          "summary": "14,201 new · 14 undecodable"})),
     _job(id=590, type="untrash", status="done", finished_at="2026-07-07T11:00:00",
          params_json=_rj({"path": r"R:\recovered\2019\batch"}), label="untrash batch",
          result_json=_rj({"op": "untrash", "untrashed": 18, "forgotten": 4, "already_active": 2,
@@ -293,7 +293,7 @@ RECENT = [
     _job(id=588, type="scan", root_id=27, status="done", total=4600, done=4600,
          finished_at="2026-07-01T12:00:00", params_json=_rj({"root_id": 27}),
          root_name="GrandparentsSharedAlbum", label="scan GrandparentsSharedAlbum",
-         result_json=_rj({"op": "scan", "new": 4580, "summary": "+4,580 new"})),
+         result_json=_rj({"op": "scan", "new": 4580, "summary": "4,580 new"})),
 ]
 
 
@@ -420,7 +420,7 @@ def root_jobs(name: str) -> list[dict]:
         mine.append(_job(
             id=500 - k * 3 - rid, type="scan", root_id=rid, status="done",
             finished_at=f"2026-06-{28 - k:02d}T08:00:00", root_name=name, label=f"scan {name}",
-            result_json=_rj({"op": "scan", "new": 100 + k, "summary": f"+{100 + k} new"})))
+            result_json=_rj({"op": "scan", "new": 100 + k, "summary": f"{100 + k} new"})))
     return mine
 
 
