@@ -255,9 +255,10 @@ class RootDetailScreen(FrameScreen):
 
     #: [s] scan-type prompt. Cursor 0 = Normal (fast-path skip), so a plain [Enter]
     #: keeps the incremental default; option 1 maps to `scan --full` (§8 A2 step 4).
+    #: Labels kept ≤ ~54 cells so the choice modal doesn't clip them (like CLEANUP_MODES).
     SCAN_TYPE_OPTIONS = [
-        "Normal  (fast-path skip — only new / changed / moved files)",
-        "Full  (re-hash every file; also retries undecodables)",
+        "Normal  (fast-path skip; relink moves, no re-hash)",
+        "Full  (re-hash every file; retry undecodables)",
     ]
 
     def action_scan(self) -> None:
