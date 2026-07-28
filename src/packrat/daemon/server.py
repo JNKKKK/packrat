@@ -560,6 +560,12 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
         return 3
 
     try:
+        # 1a. Attach the rotating daemon.log handler ONLY now that we own the port.
+        #     A race-losing daemon returned above without opening daemon.log, so it can
+        #     never be the second process that pins the file across our midnight rename.
+        from .__main__ import _setup_logging
+
+        _setup_logging()
         # 2. Now that we hold the lock, generate the token and build the app
         #    (reconciliation + queue pump run inside build_app — safe post-lock).
         token = token_mod.generate_token()
@@ -567,10 +573,17 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
 
         # log_config=None: don't let uvicorn install its own handlers. Its loggers
         # then propagate to the root logger, whose date-rotating handler
-        # (packrat.daemon.__main__._setup_logging) owns daemon.log — so access/error
-        # lines land in the same midnight-rotated file as packrat's own logs.
+        # (packrat.daemon.__main__._setup_logging) writes daemon.log — so error lines
+        # land in the same midnight-rotated file as packrat's own logs.
+        # access_log=False: kill the per-request access logger (uvicorn sets its
+        # handlers=[]/propagate=False). The TUI/CLI poll /health, /status, /jobs
+        # continuously, so at INFO that logger emits one line per poll — the bulk of
+        # what used to fill daemon.log. This is the authoritative switch: quieting the
+        # logger in _setup_logging doesn't stick because uvicorn's configure_logging()
+        # resets uvicorn.access back to log_level during server.run().
         config = uvicorn.Config(
-            app, host=HOST, port=port, log_level="info", loop="asyncio", log_config=None
+            app, host=HOST, port=port, log_level="info", loop="asyncio",
+            log_config=None, access_log=False,
         )
         server = uvicorn.Server(config)
         app.state._uvicorn_server = server

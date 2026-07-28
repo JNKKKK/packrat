@@ -53,9 +53,10 @@ def _windowless_executable() -> str:
 
 def spawn_daemon() -> None:
     """Launch the background daemon process (does not wait for it to bind)."""
-    # Redirect the child's raw fds to a *bootstrap* log, not daemon.log — the
-    # latter is owned exclusively by the child's rotating handler so its midnight
-    # rename can't fail on a pinned inherited handle (§ date-split logging).
+    # Redirect the child's raw fds to a *bootstrap* log, not daemon.log — keeping the
+    # inherited stdout/stderr handle off daemon.log means it can't pin that file across
+    # the rotating handler's midnight rename (§ date-split logging). (The rename is also
+    # made non-fatal by _SafeTimedRotatingFileHandler as a belt-and-suspenders guard.)
     log_file = paths.daemon_bootstrap_log_path()
     logf = open(log_file, "a", encoding="utf-8")  # noqa: SIM115 - handed to child
     kwargs: dict = {

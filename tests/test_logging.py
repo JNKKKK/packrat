@@ -73,3 +73,38 @@ def test_rollover_produces_dated_backup(packrat_home, _clean_root_logging):
 def test_bootstrap_log_path_is_distinct(packrat_home):
     assert paths.daemon_bootstrap_log_path() != paths.daemon_log_path()
     assert paths.daemon_bootstrap_log_path().name == "daemon-bootstrap.log"
+
+
+def test_locked_rename_does_not_loop_forever(packrat_home, _clean_root_logging, monkeypatch):
+    """A failed midnight rename must not strand rolloverAt (the 747 MB-flood bug).
+
+    Simulate Windows WinError 32 by making the rename raise, then confirm the
+    handler still advances past the rollover and keeps logging — instead of
+    retrying the rollover (and dumping a traceback) on every subsequent record.
+    """
+    import os
+    import time
+
+    _setup_logging()
+    handler = _rotating_handler()
+    # Force shouldRollover() true, as it is at real midnight.
+    handler.rolloverAt = int(time.time()) - 1
+
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(
+        OSError("[WinError 32] file in use")))
+    handler.doRollover()  # must NOT raise despite the locked rename
+
+    # rolloverAt now points to the FUTURE → shouldRollover won't re-fire on the next
+    # record. This is the anti-loop invariant the stranded-rolloverAt bug violated.
+    assert handler.rolloverAt > time.time()
+    assert not list(paths.logs_dir().glob("daemon.log.*"))  # rename was skipped
+
+    # Logging still works after the skipped rollover.
+    logging.getLogger("packrat.jobs").info("after skipped rollover")
+    handler.flush()
+    assert "after skipped rollover" in paths.daemon_log_path().read_text(encoding="utf-8")
+
+
+def test_setup_logging_quiets_uvicorn_access(packrat_home, _clean_root_logging):
+    _setup_logging()
+    assert logging.getLogger("uvicorn.access").level == logging.WARNING
