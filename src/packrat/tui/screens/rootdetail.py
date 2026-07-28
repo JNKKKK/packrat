@@ -97,7 +97,7 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
                 jobs: list[dict] | None = None,
                 focus: str | None = None, job_focus: str = "history",
                 cursors: dict | None = None, pages: dict | None = None,
-                review_scroll: int = 0) -> list[str]:
+                review_scroll: int = 0, history_total_pages: int | None = None) -> list[str]:
     """Build the §3 root-detail body for root ``d`` (with its ``jobs`` history).
 
     Top: the 3-column stats header. Then two focus-able bordered boxes — a **Review
@@ -105,7 +105,12 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
     box (``None`` | ``"review"`` | ``"jobs"``); its border is heavy+accent and its
     inside key hints read normal, while the unfocused box dims its hints. ``job_focus``
     names the focused Jobs sub-section; ``cursors`` / ``pages`` hold each sub-section's
-    ▸ cursor + paginator page. The Jobs panel fills the remaining vertical space."""
+    ▸ cursor + paginator page. The Jobs panel fills the remaining vertical space.
+
+    ``history_total_pages``: when None (legacy / golden fixtures), ``jobs`` is the FULL
+    job list and History slices it client-side; when given (lazy-loading, §12), ``jobs``
+    holds only the History rows for the CURRENT page and the paginator shows the true
+    total (running/queued still come from ``d``)."""
     jobs = jobs or []
     row_w = geo.content_w
     # Compute the Review content ONCE (with the real focused flag) and derive both box
@@ -121,7 +126,8 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
                          scroll=review_scroll)
     lines += _jobs_panel(d, jobs, now, geo.roots_w, jobs_h,
                          focused=(focus == "jobs"), job_focus=job_focus,
-                         cursors=cursors or {}, pages=pages or {})
+                         cursors=cursors or {}, pages=pages or {},
+                         history_total_pages=history_total_pages)
     return lines
 
 
@@ -139,17 +145,24 @@ def panel_section_rows(d: dict, geo: Geometry) -> dict:
     return {"running": 1, "queued": q_rows, "history": h_rows}
 
 
-def split_jobs(d: dict, jobs: list[dict]) -> dict:
+def split_jobs(d: dict, jobs: list[dict], *, prefiltered: bool = False) -> dict:
     """Group the root's jobs into the three panel sections (§3 / §4 parity).
 
     Running + queued come from ``root_detail`` (the live view, with blocked reasons);
-    History is the terminal jobs from the per-root ``jobs`` list (``root_jobs``),
-    newest-first. Keyed the same as the Queue interface's sections so the shared
-    :mod:`~packrat.tui.screens.queue` renderers apply unchanged."""
+    History is the terminal jobs from the per-root ``jobs`` list, newest-first. Keyed the
+    same as the Queue interface's sections so the shared
+    :mod:`~packrat.tui.screens.queue` renderers apply unchanged.
+
+    ``prefiltered=True`` (lazy-loading): ``jobs`` is ALREADY the terminal-only History
+    page fetched server-side, so it is used as-is (no re-filtering). Default False keeps
+    the legacy behavior — filter running/queued out of a full ``jobs`` list."""
     running = d.get("running_job")
     queued = d.get("queued_jobs") or []
-    terminal = {"queued", "running"}
-    history = [j for j in jobs if j.get("status") not in terminal]
+    if prefiltered:
+        history = jobs
+    else:
+        terminal = {"queued", "running"}
+        history = [j for j in jobs if j.get("status") not in terminal]
     return {"running": [running] if running else [],
             "queued": queued, "history": history}
 
@@ -198,9 +211,14 @@ def _section_state(focused: bool, job_focus: str, section: str) -> str:
 
 
 def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, *,
-                focused: bool, job_focus: str, cursors: dict, pages: dict) -> list[str]:
-    """The bordered Jobs panel — three Queue-style sections in one box (§3)."""
-    sec = split_jobs(d, jobs)
+                focused: bool, job_focus: str, cursors: dict, pages: dict,
+                history_total_pages: int | None = None) -> list[str]:
+    """The bordered Jobs panel — three Queue-style sections in one box (§3).
+
+    ``history_total_pages`` (lazy-loading): ``jobs`` is the pre-sliced History page, so
+    it renders as-is with the true page count. None → legacy full-list client slicing."""
+    lazy = history_total_pages is not None
+    sec = split_jobs(d, jobs, prefiltered=lazy)
     q_rows, h_rows = _section_budgets(interior)
     sep = [""] * _jobs_seps(interior)   # blank separators, dropped when the panel is tight
     iw = width - 4                      # inner text width (box borders + 1-cell pad)
@@ -229,10 +247,15 @@ def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, 
     # -- History (newest-first terminal jobs) --
     h_focused = focused and job_focus == "history"
     hp = pages.get("history", 0)
-    h_pages = q.section_pages(len(sec["history"]), h_rows)
+    if lazy:
+        h_pages = max(1, history_total_pages)
+        win_page = 0                      # `sec["history"]` IS the pre-sliced page
+    else:
+        h_pages = q.section_pages(len(sec["history"]), h_rows)
+        win_page = hp                     # slice the full list client-side
     body.append(q.header_line("[H]istory:", _section_state(focused, job_focus, "history"),
                               iw, min(hp, h_pages - 1) + 1, h_pages))
-    body += q.window(sec["history"], h_rows, hp, cursors.get("history", 0), h_focused,
+    body += q.window(sec["history"], h_rows, win_page, cursors.get("history", 0), h_focused,
                      lambda j, c: q.history_line(j, now, c, iw), empty="  (no job history)")
 
     # Fixed-height interior, then wrap in a heavy (accent) box when focused (§focus).

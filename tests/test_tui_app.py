@@ -369,9 +369,37 @@ class _FakeClient:
             return {"root_detail": demo.root_detail(root)}
         return demo.status_snapshot(running=True)
 
+    def stats(self):
+        from packrat.tui import demo
+        snap = demo.status_snapshot(running=True)
+        return {k: snap[k] for k in
+                ("assets", "photos", "videos", "trashed", "size_bytes", "lifetime_deduped")}
+
+    def live_jobs(self):
+        from packrat.tui import demo
+        snap = demo.status_snapshot(running=True)
+        return {k: snap.get(k) for k in
+                ("running", "queued", "interrupted", "pending_reviews")}
+
+    def roots(self):
+        from packrat.tui import demo
+        return demo.status_snapshot(running=True)["roots"]
+
     def list_jobs(self, limit=20):
         from packrat.tui import demo
         return demo.recent_jobs()
+
+    def _terminal_history(self):
+        from packrat.tui import demo
+        terminal = {"queued", "running"}
+        return [j for j in demo.recent_jobs() if j.get("status") not in terminal]
+
+    def history_page(self, limit, offset):
+        hist = self._terminal_history()
+        return hist[offset:offset + limit], len(hist)
+
+    def root_history_page(self, rid, limit, offset):
+        return [], 0
 
     def root_jobs(self, rid, limit=50):
         return []
@@ -553,7 +581,22 @@ class _DownClient(_FakeClient):
     def status(self, root=None):
         raise RuntimeError("daemon unreachable")
 
+    def stats(self):
+        raise RuntimeError("daemon unreachable")
+
+    def live_jobs(self):
+        raise RuntimeError("daemon unreachable")
+
+    def roots(self):
+        raise RuntimeError("daemon unreachable")
+
     def list_jobs(self, limit=20):
+        raise RuntimeError("daemon unreachable")
+
+    def history_page(self, limit, offset):
+        raise RuntimeError("daemon unreachable")
+
+    def root_history_page(self, rid, limit, offset):
         raise RuntimeError("daemon unreachable")
 
     def root_jobs(self, rid, limit=50):

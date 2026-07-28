@@ -97,6 +97,25 @@ def test_status_root_detail(client, tiny_photos):
     assert d["photos"] == 2
 
 
+def test_root_jobs_history_pagination(client, tiny_photos):
+    """/roots/{id}/jobs pages a root's terminal history by limit/offset with a true total."""
+    client.post("/roots", json={"path": str(tiny_photos), "name": "Pics"}, headers=_h())
+    rid = client.get("/roots", headers=_h()).json()["roots"][0]["id"]
+    # Build several finished scan jobs on this root.
+    for _ in range(4):
+        r = client.post("/scan", json={"root": "Pics"}, headers=_h())
+        _wait(client, r.json()["job_id"])
+    p0 = client.get(f"/roots/{rid}/jobs?limit=2&offset=0&terminal_only=true", headers=_h()).json()
+    p1 = client.get(f"/roots/{rid}/jobs?limit=2&offset=2&terminal_only=true", headers=_h()).json()
+    assert p0["total"] == 4 and p1["total"] == 4
+    ids0 = [j["id"] for j in p0["jobs"]]
+    ids1 = [j["id"] for j in p1["jobs"]]
+    assert len(ids0) == 2 and len(ids1) == 2
+    assert not set(ids0) & set(ids1)           # disjoint pages
+    assert min(ids0) > max(ids1)               # newest-first across pages
+    assert all(j["root_name"] == "Pics" for j in p0["jobs"])
+
+
 # --- POST /probe (§8 A2b) ---------------------------------------------------
 def test_probe_by_name(client, tiny_photos):
     client.post("/roots", json={"path": str(tiny_photos), "name": "Pics"}, headers=_h())

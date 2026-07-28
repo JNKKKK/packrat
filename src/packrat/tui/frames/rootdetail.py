@@ -57,7 +57,11 @@ class RootDetailScreen(FrameScreen):
         self.cursors = {"running": 0, "queued": 0, "history": 0}
         self.pages = {"running": 0, "queued": 0, "history": 0}
         self.review_scroll = 0           # ↑/↓ offset when the Review box overflows its cap
-        self._jobs: list[dict] = []      # last-fetched jobs (refreshed on mount + poll)
+        # History is LAZY-loaded a page at a time (§12), like the Queue screen: running +
+        # queued come from the detail dict (the live snapshot read), but the terminal-job
+        # history is unbounded, so we hold only the current page + its true total count.
+        self._history: list[dict] = []
+        self._history_total = 0
         self._detail: dict | None = None
         self._loaded = False             # False until the first reload() populates data
 
@@ -80,17 +84,30 @@ class RootDetailScreen(FrameScreen):
         ("undecodable  (delete non-decoding files)", "--undecodable"),
     ]
 
-    def reload(self) -> None:
-        """Fetch this root's detail + jobs from the daemon (mount + first paint).
+    def _history_rows(self) -> int:
+        """The History window height this frame — the page size we fetch. Derived from
+        the panel split (which depends on the review-box size), so it needs a built geo."""
+        from ..screens.rootdetail import panel_section_rows
+        try:
+            return max(1, panel_section_rows(self._detail or {}, self._geo)["history"])
+        except Exception:  # noqa: BLE001 - before the first frame built a geo
+            return 4
 
-        ``root_detail`` online is two blocking HTTP calls (``status <root>`` +
-        ``root_jobs``); doing it inside :meth:`frame` re-hit the daemon on every
-        keypress and blocked the UI. We fetch here — once on mount — and :meth:`frame`
-        renders from the cached ``self._detail``/``self._jobs``. The POLL path uses
-        :meth:`poll_reload`, which fetches off the UI thread (a slow daemon must not
-        freeze input on the timer)."""
-        self._detail, self._jobs = self.app.root_detail(self.root_name)
+    def _history_pages(self) -> int:
+        rows = self._history_rows()
+        return max(1, -(-self._history_total // rows)) if rows else 1
+
+    def reload(self) -> None:
+        """Fetch this root's detail + current history page (mount + first paint).
+
+        ``root_detail`` is ``status <root>`` (stats/review/running/queued); the terminal
+        History is a SEPARATE lazy-loaded page (:meth:`_reload_history`), so a long job
+        history never fetches wholesale. :meth:`frame` renders from the cached
+        ``self._detail``/``self._history``; the POLL path (:meth:`poll_reload`) fetches
+        off the UI thread so a slow daemon can't freeze input on the timer."""
+        self._detail = self.app.root_detail(self.root_name)
         self._loaded = True
+        self._reload_history()
 
     def on_mount(self) -> None:
         self.reload()
@@ -109,22 +126,51 @@ class RootDetailScreen(FrameScreen):
 
     @work(thread=True, exclusive=True, group="rootdetail-poll")
     def _poll_fetch(self) -> None:
-        detail, jobs = self.app.root_detail(self.root_name)
+        detail = self.app.root_detail(self.root_name)
+        rid = detail.get("id") if detail else None
+        hist, total = self.app.root_history(self.root_name, rid,
+                                            self._history_rows(),
+                                            self.pages["history"] * self._history_rows())
         try:
-            self.app.call_from_thread(self._apply_reload, detail, jobs)
+            self.app.call_from_thread(self._apply_reload, detail, hist, total)
         except Exception:
             pass   # screen/app tearing down
 
-    def _apply_reload(self, detail, jobs) -> None:
-        self._detail, self._jobs = detail, jobs
+    def _apply_reload(self, detail, hist, total) -> None:
+        self._detail = detail
+        self._history, self._history_total = hist, total
         self._loaded = True
         self.refresh_frame()
 
+    def _reload_history(self) -> None:
+        """Fetch the current history page (offset = page·window). Inline offline / no loop;
+        else off the UI thread. Called on mount, poll, and history page change."""
+        rows = self._history_rows()
+        offset = self.pages["history"] * rows
+        rid = self._detail.get("id") if self._detail else None
+        if self.app.offline or not self.app._app_loop_running():
+            self._history, self._history_total = self.app.root_history(
+                self.root_name, rid, rows, offset)
+            return
+        self._fetch_history_async(rid, rows, offset)
+
+    @work(thread=True, exclusive=True, group="rootdetail-history")
+    def _fetch_history_async(self, rid, limit: int, offset: int) -> None:
+        hist, total = self.app.root_history(self.root_name, rid, limit, offset)
+        try:
+            self.app.call_from_thread(self._apply_history, hist, total)
+        except Exception:
+            pass   # screen/app tearing down
+
+    def _apply_history(self, hist: list[dict], total: int) -> None:
+        self._history, self._history_total = hist, total
+        self.refresh_frame()
+
     def frame(self) -> str:
-        # Render from the cached detail/jobs (fetched on mount + poll, not per keypress).
+        # Render from the cached detail/history (fetched on mount + poll, not per keypress).
         if not self._loaded:
             self.reload()
-        d, jobs = self._detail, self._jobs
+        d = self._detail
         if self.focus == "review":
             if not self._has_review():
                 footer = self.FOOTER_REVIEW_EMPTY
@@ -140,13 +186,15 @@ class RootDetailScreen(FrameScreen):
         if d is None:
             return screen("packrat · ?", ["root not found."], self.app.header_right,
                           footer="Esc back", width=geo.w, height=geo.h)
-        # DISPLAY masking before layout (detail + jobs); the raw self._detail/_jobs
-        # stay the source for actions (scan/dedup/merge/review, root_name lookups).
-        vd, vjobs = self.app.view(d), self.app.view(jobs)
-        body = detail_body(vd, now=self.now, geo=geo, jobs=vjobs,
+        # DISPLAY masking before layout (detail + history); the raw self._detail/_history
+        # stay the source for actions (scan/dedup/merge/review, root_name lookups). History
+        # is the LAZY-loaded current page; its true total-page count drives the paginator.
+        vd, vhist = self.app.view(d), self.app.view(self._history)
+        body = detail_body(vd, now=self.now, geo=geo, jobs=vhist,
                           focus=self.focus, job_focus=self.job_focus,
                           cursors=self.cursors, pages=self.pages,
-                          review_scroll=self.review_scroll)
+                          review_scroll=self.review_scroll,
+                          history_total_pages=self._history_pages())
         return screen(f"packrat · {vd['name']}", body, detail_header_right(vd),
                       footer=footer, width=geo.w, height=geo.h)
 
@@ -166,7 +214,8 @@ class RootDetailScreen(FrameScreen):
     # -- box focus + per-section navigation (mirrors QueueMax) ------------
     def _sections(self) -> dict:
         from ..screens.rootdetail import split_jobs
-        return split_jobs(self._detail or {}, self._jobs)
+        # History is the pre-sliced lazy page → prefiltered (don't re-filter/slice it).
+        return split_jobs(self._detail or {}, self._history, prefiltered=True)
 
     def _section_jobs(self, section: str) -> list[dict]:
         return self._sections().get(section, [])
@@ -215,15 +264,29 @@ class RootDetailScreen(FrameScreen):
         rows = self._section_rows(sec)
         cur = max(0, min(self.cursors[sec] + delta, n - 1)) if n else 0
         self.cursors[sec] = cur
-        self.pages[sec] = cur // rows if rows else 0     # auto-follow within section
+        # History's cursor is WITHIN the loaded page (rows come pre-sliced), so it never
+        # auto-advances the page here — page moves are explicit (←/→ → re-fetch).
+        if sec != "history":
+            self.pages[sec] = cur // rows if rows else 0     # auto-follow within section
         self.refresh_frame()
 
     def action_page(self, delta: int) -> None:
         if self.focus != "jobs":
             return
         sec = self.job_focus
-        n = len(self._section_jobs(sec))
         rows = self._section_rows(sec)
+        if sec == "history":
+            # Lazy-loaded: clamp to the TRUE page count, then re-fetch that page (cursor
+            # resets to its first row — the rows arrive from the server, not sliced here).
+            pages = self._history_pages()
+            new = max(0, min(self.pages["history"] + delta, pages - 1))
+            if new != self.pages["history"]:
+                self.pages["history"] = new
+                self.cursors["history"] = 0
+                self._reload_history()
+            self.refresh_frame()
+            return
+        n = len(self._section_jobs(sec))
         pages = max(1, -(-n // rows)) if rows else 1
         new = max(0, min(self.pages[sec] + delta, pages - 1))
         if new != self.pages[sec]:

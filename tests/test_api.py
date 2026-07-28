@@ -127,6 +127,71 @@ def test_roots_snapshot_empty(client):
     assert client.get("/roots", headers=_h()).json() == {"roots": []}
 
 
+def _run_sleepers(client, n: int) -> None:
+    """Submit n sleeper jobs sequentially, each to completion (terminal history)."""
+    for _ in range(n):
+        jid = client.post(
+            "/jobs", json={"type": "sleeper", "params": {"steps": 1, "delay_s": 0.0}},
+            headers=_h()).json()["job_id"]
+        for _ in range(200):
+            if client.get(f"/jobs/{jid}", headers=_h()).json()["status"] != "running":
+                break
+            time.sleep(0.01)
+
+
+def test_stats_and_live_decompose_status(client):
+    """/stats + /jobs/live + /roots recompose to the /status shape (§12 decomposition)."""
+    snap = client.get("/status", headers=_h()).json()
+    stats = client.get("/stats", headers=_h()).json()
+    live = client.get("/jobs/live", headers=_h()).json()
+    roots = client.get("/roots", headers=_h()).json()["roots"]
+    # Stats keys are the collection box; live keys are the job sections; together (+roots)
+    # they are exactly the status snapshot.
+    assert set(stats) == {"assets", "photos", "videos", "trashed", "size_bytes",
+                          "lifetime_deduped"}
+    assert set(live) == {"running", "queued", "interrupted", "pending_reviews"}
+    composed = {**stats, **live, "roots": roots}
+    assert composed == snap
+
+
+def test_jobs_live_route_not_shadowed_by_job_id(client):
+    """/jobs/live must resolve to the live endpoint, not be parsed as job id 'live'."""
+    r = client.get("/jobs/live", headers=_h())
+    assert r.status_code == 200 and "running" in r.json()
+
+
+def test_history_pagination_offset_and_total(client):
+    """/jobs?terminal_only&limit&offset pages finished jobs; total is the true count."""
+    _run_sleepers(client, 5)
+    page0 = client.get("/jobs?limit=2&offset=0&terminal_only=true", headers=_h()).json()
+    page1 = client.get("/jobs?limit=2&offset=2&terminal_only=true", headers=_h()).json()
+    assert page0["total"] == 5 and page1["total"] == 5
+    assert len(page0["jobs"]) == 2 and len(page1["jobs"]) == 2
+    ids0 = [j["id"] for j in page0["jobs"]]
+    ids1 = [j["id"] for j in page1["jobs"]]
+    assert ids0 == sorted(ids0, reverse=True)          # newest-first
+    assert not set(ids0) & set(ids1)                   # disjoint pages
+    assert min(ids0) > max(ids1)                       # page 1 is strictly older
+    # terminal_only excludes nothing here (all sleepers finished), but the flag is honored:
+    assert all(j["status"] in ("done", "error", "cancelled", "interrupted")
+               for j in page0["jobs"])
+
+
+def test_history_terminal_only_excludes_queued(client):
+    """terminal_only=true drops running/queued rows (they live in the live sections)."""
+    # A long runner + a queued follower: the backlog job must NOT appear in history.
+    client.post("/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}},
+                headers=_h())
+    qid = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2}},
+                      headers=_h()).json()["job_id"]
+    assert client.get(f"/jobs/{qid}", headers=_h()).json()["status"] == "queued"
+    hist = client.get("/jobs?terminal_only=true&limit=50", headers=_h()).json()
+    assert qid not in [j["id"] for j in hist["jobs"]]      # queued excluded from history
+    # The default (non-terminal) list still includes the backlog (CLI `jobs list` shape).
+    allj = client.get("/jobs?limit=50", headers=_h()).json()
+    assert qid in [j["id"] for j in allj["jobs"]]
+
+
 def test_late_attach_stream_closes(client):
     r = client.post("/jobs", json={"type": "sleeper", "params": {"steps": 2, "delay_s": 0.01}}, headers=_h())
     jid = r.json()["job_id"]

@@ -183,16 +183,30 @@ def build_app(token: str, *, db_file=None, config_path=None):
         return {"job_id": job_id}
 
     @app.get("/jobs", dependencies=[Depends(require_token)])
-    def list_jobs(limit: int = 20):
-        return {"jobs": queries.recent_jobs(limit)}
+    def list_jobs(limit: int = 20, offset: int = 0, terminal_only: bool = False):
+        """Recent jobs, newest-first. ``offset`` + ``terminal_only`` page the TUI Queue
+        History (which shows only finished jobs); ``total`` is the true count so the
+        client can render ``page K/N`` while holding one page (§12 lazy history)."""
+        return {
+            "jobs": queries.recent_jobs(limit, offset, terminal_only=terminal_only),
+            "total": queries.jobs_count(terminal_only=terminal_only),
+        }
 
     # Static /jobs/* routes are declared BEFORE the /jobs/{job_id} catch-all so
     # FastAPI (first-match order) doesn't route "queued"/"cancel-queued" into the
     # int path param.
+    @app.get("/jobs/live", dependencies=[Depends(require_token)])
+    def jobs_live():
+        """Live job state (running + queued + interrupted + pending reviews), one
+        consistent read (§12). Shared by the dashboard Queue box and the maximized Queue
+        screen; terminal history is lazy-loaded via /jobs, not here. Declared BEFORE the
+        /jobs/{job_id} catch-all so 'live' isn't parsed as an int job id."""
+        return queries.live_jobs()
+
     @app.get("/jobs/queued", dependencies=[Depends(require_token)])
     def list_queued():
         """The durable FIFO backlog (§3/§12), oldest-first, with blocked reasons."""
-        return {"queued": queries.status_snapshot().get("queued", [])}
+        return {"queued": queries.live_jobs().get("queued", [])}
 
     @app.post("/jobs/cancel-queued", dependencies=[Depends(require_token)])
     def cancel_queued():
@@ -223,9 +237,16 @@ def build_app(token: str, *, db_file=None, config_path=None):
         return {"prioritized": ok}
 
     @app.get("/roots/{root_id}/jobs", dependencies=[Depends(require_token)])
-    def root_jobs(root_id: int, limit: int = 50):
-        """One root's current + historical jobs, newest-first (§12 per-root panel)."""
-        return {"jobs": queries.root_jobs(root_id, limit)}
+    def root_jobs(root_id: int, limit: int = 50, offset: int = 0,
+                  terminal_only: bool = False):
+        """One root's current + historical jobs, newest-first (§12 per-root panel).
+
+        ``offset`` + ``terminal_only`` page the History section like ``/jobs``; ``total``
+        is the true per-root count for the paginator."""
+        return {
+            "jobs": queries.root_jobs(root_id, limit, offset, terminal_only=terminal_only),
+            "total": queries.root_jobs_count(root_id, terminal_only=terminal_only),
+        }
 
     @app.get("/jobs/{job_id}/stream", dependencies=[Depends(require_token)])
     async def stream_job(job_id: int):
@@ -287,6 +308,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
                 raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
             return {"root_detail": detail}
         return queries.status_snapshot()
+
+    @app.get("/stats", dependencies=[Depends(require_token)])
+    def stats():
+        """App-wide collection stats — the dashboard Collection box (§1.1). Polled on a
+        slow cadence; only moves when a scan/dedup completes (see queries.collection_stats)."""
+        return queries.collection_stats()
 
     @app.get("/roots", dependencies=[Depends(require_token)])
     def roots():

@@ -74,7 +74,6 @@ class PackratApp(App):
         # directly, so an empty dict would KeyError before the first fetch / when the
         # daemon is down (the fallback client at run() exists precisely for that case).
         self.snapshot: dict = _empty_snapshot()
-        self.recent: list[dict] = []
         self.header_right = "daemon ● up"
         # Live-progress plumbing (§3 SSE + §cross-cutting TUI-side ETA). The poll timer
         # is only the backstop; the running job's bar/ETA are driven by an SSE stream
@@ -143,32 +142,59 @@ class PackratApp(App):
         super().notify(message, title=title, **kw)
 
     def on_mount(self) -> None:
-        self.refresh_data()
+        self.refresh_data()          # one full fetch (live + stats + roots) up front
         self.push_screen(Dashboard())
         if not self.offline:
-            from .tokens import POLL_INTERVAL_S
-            self.set_interval(POLL_INTERVAL_S, self.refresh_data)
+            from .tokens import POLL_INTERVAL_S, STATS_POLL_INTERVAL_S
+            # Two cadences: the fast timer refreshes only the live job state; a slow timer
+            # refreshes the O(collection) stats + roots (which only move on job completion,
+            # and are also refreshed immediately then via the SSE finish → refresh_data).
+            self.set_interval(POLL_INTERVAL_S, self.refresh_live)
+            self.set_interval(STATS_POLL_INTERVAL_S, self.refresh_data)
 
     # -- data ---------------------------------------------------------------
+    # The monolithic snapshot was decomposed into three concern-scoped reads so each
+    # dashboard box polls the SAME source as its maximized screen (source-sharing
+    # principle), on its OWN cadence (§12):
+    #   • live  (/jobs/live) — running + queued + interrupted + pending_reviews. Changes
+    #            constantly, so it drives the FAST poll (POLL_INTERVAL_S).
+    #   • stats (/stats)     — collection COUNT/SUM aggregations. Only move when a
+    #            scan/dedup COMPLETES, and are O(collection), so they poll on a SLOW
+    #            cadence + on every job-finish (never re-aggregated every 3 s).
+    #   • roots (/roots)     — per-root rows (counts + scan/dedup recency dots); same
+    #            slow cadence — a root's numbers also only settle on job completion.
+    # `self.snapshot` stays the single COMPOSED dict the pure builders read (so they and
+    # the offline/nsfw paths are untouched); each fetch UPDATES its own keys in place.
+    # Terminal HISTORY is no longer polled wholesale — it is lazy-loaded a page at a time
+    # by the Queue / root-detail screens (see `history_page`).
     def refresh_data(self) -> None:
-        """Re-fetch the snapshot + recent jobs (poll backstop / job-finished trigger).
+        """FULL refresh — live + stats + roots (mount, job-finished, slow backstop).
 
-        ONLINE the fetch is two blocking httpx calls, so it runs in a WORKER THREAD
-        (:meth:`_fetch_online`) and marshals the result back to the UI thread — a slow
-        or hung daemon must never freeze keyboard input / rendering on the poll timer.
-        OFFLINE (in-memory demo data, no I/O) applies inline. Tests that call this
-        directly on a running app get the async worker; the synchronous apply path
-        (:meth:`_apply_data`) is what actually mutates state + re-renders."""
+        ONLINE the fetch is blocking httpx, so it runs in a WORKER THREAD and marshals
+        back to the UI thread — a slow/hung daemon must never freeze input on the timer.
+        OFFLINE (in-memory demo) applies inline. The synchronous apply paths
+        (:meth:`_apply_live` / :meth:`_apply_stats_roots`) are what mutate state + render."""
         if self.offline:
-            self._apply_data(demo.status_snapshot(running=True), demo.recent_jobs(),
-                             "v0.1.0 · daemon ● up")
+            snap = demo.status_snapshot(running=True)
+            self.header_right = "v0.1.0 · daemon ● up"
+            self._apply_stats_roots(snap, snap.get("roots", []))
+            self._apply_live(snap)
             return
-        # Online: fetch off the UI thread. If no app loop is running (a bare unit test
-        # driving refresh_data on an un-mounted app), fall back to a synchronous fetch.
         if self._app_loop_running():
-            self._fetch_online()
+            self._fetch_full()
         else:
-            self._apply_data(*self._blocking_fetch())
+            self._blocking_full()
+
+    def refresh_live(self) -> None:
+        """FAST-cadence refresh — only the live job state (/jobs/live). The stats + roots
+        keep their last values (they only move on job completion, refreshed then)."""
+        if self.offline:
+            self._apply_live(demo.status_snapshot(running=True))
+            return
+        if self._app_loop_running():
+            self._fetch_live()
+        else:
+            self._apply_live(self._get_live())
 
     def _app_loop_running(self) -> bool:
         """True when the Textual event loop is up (so worker threads can marshal back)."""
@@ -177,30 +203,86 @@ class PackratApp(App):
         except Exception:  # noqa: BLE001 - be conservative: no loop → synchronous path
             return False
 
-    def _blocking_fetch(self) -> tuple[dict, list, str]:
-        """The blocking daemon fetch (status + recent jobs). Returns (snapshot, recent,
-        header_right); degrades to a zeroed snapshot + 'down' header if unreachable."""
+    def _get_live(self) -> dict | None:
+        """Blocking /jobs/live fetch; None (→ daemon-down header) on failure."""
         try:
-            return self.client.status(), self.client.list_jobs(20), "v0.1.0 · daemon ● up"
+            live = self.client.live_jobs()
+            self.header_right = "v0.1.0 · daemon ● up"
+            return live
         except Exception:
-            # Daemon unreachable/erroring: a zeroed snapshot (so the frame still draws)
-            # + a 'down' header — never crash / leave a partial dict a builder KeyErrors on.
-            return _empty_snapshot(), [], "v0.1.0 · daemon ○ down"
+            self.header_right = "v0.1.0 · daemon ○ down"
+            return None
+
+    def _blocking_full(self) -> None:
+        """Blocking full fetch (live + stats + roots), applied inline (no app loop)."""
+        try:
+            stats = self.client.stats()
+            roots = self.client.roots()
+            live = self.client.live_jobs()
+            self.header_right = "v0.1.0 · daemon ● up"
+            self._apply_stats_roots(stats, roots)
+            self._apply_live(live)
+        except Exception:
+            # Daemon unreachable/erroring: zeroed snapshot (so the frame still draws) +
+            # a 'down' header — never crash / leave a partial dict a builder KeyErrors on.
+            self.header_right = "v0.1.0 · daemon ○ down"
+            self._apply_stats_roots(_empty_snapshot(), [])
+            self._apply_live(_empty_snapshot())
 
     @work(thread=True, exclusive=True, group="poll-fetch")
-    def _fetch_online(self) -> None:
-        """Worker-thread poll fetch (blocking httpx), applied back on the UI thread."""
-        snap, recent, header = self._blocking_fetch()
+    def _fetch_full(self) -> None:
+        """Worker-thread FULL fetch (live + stats + roots), applied on the UI thread."""
         try:
-            self.call_from_thread(self._apply_data, snap, recent, header)
+            stats = self.client.stats()
+            roots = self.client.roots()
+            live = self.client.live_jobs()
+            header = "v0.1.0 · daemon ● up"
+        except Exception:
+            stats, roots, live, header = (_empty_snapshot(), [], _empty_snapshot(),
+                                          "v0.1.0 · daemon ○ down")
+        try:
+            self.call_from_thread(self._apply_full, stats, roots, live, header)
         except Exception:
             pass   # app tearing down
 
-    def _apply_data(self, snapshot: dict, recent: list, header_right: str) -> None:
-        """Install a freshly-fetched read-model + re-render (UI thread only)."""
-        self.snapshot = snapshot
-        self.recent = recent
-        self.header_right = header_right
+    @work(thread=True, exclusive=True, group="poll-live")
+    def _fetch_live(self) -> None:
+        """Worker-thread FAST fetch (/jobs/live only), applied on the UI thread."""
+        live = self._get_live()
+        header = self.header_right
+        try:
+            self.call_from_thread(self._apply_live_and_render, live, header)
+        except Exception:
+            pass   # app tearing down
+
+    def _apply_full(self, stats: dict, roots: list, live: dict, header: str) -> None:
+        self.header_right = header
+        self._apply_stats_roots(stats, roots)
+        self._apply_live(live)
+
+    def _apply_live_and_render(self, live: dict | None, header: str) -> None:
+        self.header_right = header
+        self._apply_live(live if live is not None else _empty_snapshot())
+
+    def _apply_stats_roots(self, stats: dict, roots: list) -> None:
+        """Fold the collection stats + roots list into the composed snapshot (UI thread).
+
+        Updates ONLY the stats keys + ``roots`` — the live job keys are owned by
+        :meth:`_apply_live`, so a slow stats poll never clobbers a fresher live fetch."""
+        for k in ("assets", "photos", "videos", "trashed", "size_bytes", "lifetime_deduped"):
+            if k in stats:
+                self.snapshot[k] = stats[k]
+        self.snapshot["roots"] = roots
+        if self.screen_stack and isinstance(self.screen, FrameScreen):
+            self.screen.refresh_frame()
+
+    def _apply_live(self, live: dict) -> None:
+        """Fold the live job state into the composed snapshot + re-render (UI thread).
+
+        Updates ONLY the live keys (running/queued/interrupted/pending_reviews); stats +
+        roots are owned by :meth:`_apply_stats_roots`."""
+        for k in ("running", "queued", "interrupted", "pending_reviews"):
+            self.snapshot[k] = live.get(k) if k != "queued" else (live.get(k) or [])
         # Feed the SSE-less poll path into the ETA estimator + keep the live stream
         # subscribed to whatever job is now running (fix: the "live" bar was poll-only).
         self._track_running()
@@ -350,17 +432,35 @@ class PackratApp(App):
         self.push_screen(TrashRefreshModal(name), after)
 
     def root_detail(self, name: str):
-        """Return ``(detail_dict, jobs)`` for a root by name (offline → demo)."""
+        """Return the ``detail_dict`` for a root by name (offline → demo), or None.
+
+        History is NOT fetched here anymore — the root-detail screen lazy-loads its own
+        History page (:meth:`root_history`) the same way the Queue screen does, so this
+        is just the per-root stat/review/running/queued read (``status <root>``)."""
         if self.offline:
-            return demo.root_detail(name), demo.root_jobs(name)
+            return demo.root_detail(name)
         try:
             d = self.client.status(name).get("root_detail")
-            jobs = self.client.root_jobs(d["id"]) if d else []
             if d is not None:
                 self._inject_live_progress(d.get("running_job"))
-            return d, jobs
+            return d
         except Exception:
-            return None, []
+            return None
+
+    def root_history(self, name: str, root_id: int | None, limit: int, offset: int):
+        """One page of a root's terminal (finished) jobs + the true total — the root-detail
+        History section (§12 lazy load). Offline → the demo page (by ``name``); online →
+        the paged endpoint (by ``root_id``); failure → empty."""
+        if self.offline:
+            terminal = {"queued", "running"}
+            hist = [j for j in demo.root_jobs(name) if j.get("status") not in terminal]
+            return hist[offset:offset + limit], len(hist)
+        if root_id is None:
+            return [], 0
+        try:
+            return self.client.root_history_page(root_id, limit=limit, offset=offset)
+        except Exception:
+            return [], 0
 
     def _inject_live_progress(self, job: dict | None) -> None:
         """Copy the live ``done``/``total``/``_eta_s`` onto a per-view running-job dict.

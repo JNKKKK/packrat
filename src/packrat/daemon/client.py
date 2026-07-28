@@ -79,9 +79,24 @@ class DaemonClient:
     def list_jobs(self, limit: int = 20) -> list[dict]:
         return self._get(f"/jobs?limit={limit}")["jobs"]
 
+    def history_page(self, limit: int, offset: int) -> tuple[list[dict], int]:
+        """One page of finished jobs + the true total (TUI Queue History, §12 lazy load).
+
+        ``terminal_only`` so the page matches the History section (running/queued come
+        from the snapshot). Returns ``(jobs, total)`` — ``total`` drives ``page K/N``
+        while only this page's rows are held in memory."""
+        r = self._get(f"/jobs?limit={limit}&offset={offset}&terminal_only=true")
+        return r["jobs"], r.get("total", len(r["jobs"]))
+
     def root_jobs(self, root_id: int, limit: int = 50) -> list[dict]:
         """One root's current + historical jobs, newest-first (§12 per-root panel)."""
         return self._get(f"/roots/{root_id}/jobs?limit={limit}")["jobs"]
+
+    def root_history_page(self, root_id: int, limit: int, offset: int) -> tuple[list[dict], int]:
+        """One page of a root's finished jobs + true total (root-detail History, §12)."""
+        r = self._get(
+            f"/roots/{root_id}/jobs?limit={limit}&offset={offset}&terminal_only=true")
+        return r["jobs"], r.get("total", len(r["jobs"]))
 
     def cancel_job(self, job_id: int) -> bool:
         return bool(self._post(f"/jobs/{job_id}/cancel", {})["cancelled"])
@@ -240,6 +255,16 @@ class DaemonClient:
         if root:
             return self._get("/status", params={"root": root})
         return self._get("/status")
+
+    def stats(self) -> dict:
+        """App-wide collection stats — the dashboard Collection box (§1.1). Cheap to poll
+        rarely; only moves when a scan/dedup completes (decomposed from /status, §12)."""
+        return self._get("/stats")
+
+    def live_jobs(self) -> dict:
+        """Live job state (running + queued + interrupted + pending_reviews), one
+        consistent read — the dashboard Queue box + maximized Queue live sections (§12)."""
+        return self._get("/jobs/live")
 
     def roots(self) -> list[dict]:
         return self._get("/roots")["roots"]

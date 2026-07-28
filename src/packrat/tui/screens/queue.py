@@ -70,11 +70,20 @@ def queue_body(running: dict | None, queued: list[dict], history: list[dict],
                *, now: str, geo: Geometry = REFERENCE, focus: str = "queued",
                queued_cursor: int = 0, queued_page: int = 0,
                history_cursor: int = 0, history_page: int = 0,
+               history_total_pages: int | None = None,
                running_cursor: int = 0) -> list[str]:
     """Build the §4 body — three fixed-height sections, each independently paged.
 
     ``geo`` sizes each section's window (Queued/History grow on a taller terminal)
-    and the paginator width. Rows lay out to ``geo``'s content width."""
+    and the paginator width. Rows lay out to ``geo``'s content width.
+
+    **History paging has two modes.** When ``history_total_pages is None`` (legacy /
+    the golden fixtures), ``history`` is the FULL terminal-job list and this slices it
+    client-side to page ``history_page``. When ``history_total_pages`` is given
+    (lazy-loading, §12), ``history`` is ALREADY the single page fetched server-side
+    (``limit``/``offset``); the window renders it as-is and the paginator shows
+    ``history_page``/``history_total_pages`` — the TRUE total, though only one page of
+    rows is in memory."""
     q_rows, h_rows = geo.queued_rows, geo.recent_rows
     w = geo.content_w
     lines: list[str] = []
@@ -100,10 +109,15 @@ def queue_body(running: dict | None, queued: list[dict], history: list[dict],
 
     # -- History (paginator sits on the header line, right-aligned) --
     h_focused = focus == "history"
-    h_pages = section_pages(len(history), h_rows)
+    if history_total_pages is None:
+        h_pages = section_pages(len(history), h_rows)
+        win_page = history_page             # slice the full list client-side
+    else:
+        h_pages = max(1, history_total_pages)
+        win_page = 0                        # `history` IS the pre-sliced page
     lines.append(header_line("[H]istory:", h_focused, w,
                              min(history_page, h_pages - 1) + 1, h_pages))
-    lines += window(history, h_rows, history_page, history_cursor, h_focused,
+    lines += window(history, h_rows, win_page, history_cursor, h_focused,
                     lambda j, c: history_line(j, now, c, w), empty="  (no job history)")
     return lines
 

@@ -61,6 +61,11 @@ HEAVY_BOX = ("┏", "┓", "┗", "┛", "━", "┃")  # ┏ ┓ ┗ ┛ ━ �
 # The light poll timer is the backstop that surfaces work started in another
 # terminal (no local SSE); the SSE stream drives the live bar/counts directly.
 POLL_INTERVAL_S = 3.0
+# The collection stats + roots list only change when a scan/dedup COMPLETES (and are
+# refreshed immediately then, via the SSE job-finished → refresh_data path). They are
+# O(collection) aggregations, so we poll them on a much slower backstop cadence rather
+# than re-aggregating the whole collection on every 3 s live tick (§12 decomposition).
+STATS_POLL_INTERVAL_S = 30.0
 # Trailing window (seconds) of SSE progress samples the TUI-side ETA averages the
 # observed rate over (§ cross-cutting "ETA is computed TUI-side").
 ETA_WINDOW_S = 8.0

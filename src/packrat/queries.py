@@ -15,8 +15,16 @@ def _ro():
     return _db.connect(read_only=True)
 
 
-def status_snapshot() -> dict:
-    """Global rollup (§11): asset counts, trashed, per-root, running/interrupted jobs."""
+def collection_stats() -> dict:
+    """App-wide collection stats — the dashboard **Collection** box (§1.1) alone.
+
+    Split out of the old monolithic ``status_snapshot`` so the TUI can poll it on its
+    OWN cadence (§12): these are O(collection) aggregations (COUNT over 100K+ assets,
+    SUM over every file_instance, a JSON-scan for lifetime-deduped) that only move when
+    a scan/dedup COMPLETES — decoupling them from the fast-changing jobs list keeps a
+    3 s job poll from re-aggregating the whole collection every tick. No maximized view
+    corresponds to this box, so it is the one genuinely dashboard-unique read.
+    """
     conn = _ro()
     try:
         # `assets` = the ACTIVE collection (what's on disk and kept), so it reconciles
@@ -30,7 +38,6 @@ def status_snapshot() -> dict:
         videos = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE media_type='video' AND status='active'"
         ).fetchone()["c"]
-        assets = photos + videos
         trashed = conn.execute(
             "SELECT COUNT(*) c FROM assets WHERE status='trashed'"
         ).fetchone()["c"]
@@ -49,6 +56,32 @@ def status_snapshot() -> dict:
             "FROM jobs WHERE type='dedup' AND status='done' "
             "AND json_extract(result_json, '$.deleted') IS NOT NULL"
         ).fetchone()["c"]
+        return {
+            "assets": photos + videos,
+            "photos": photos,
+            "videos": videos,
+            "trashed": trashed,
+            "size_bytes": size_bytes,
+            "lifetime_deduped": lifetime_deduped,
+        }
+    finally:
+        conn.close()
+
+
+def live_jobs() -> dict:
+    """The LIVE job state — running (≤1) + queued backlog + interrupted + pending reviews.
+
+    Backs both the dashboard **Queue** box and the maximized **Queue** screen's live
+    sections (the source-sharing principle: a box previews its maximized screen from the
+    same fetch). Read in ONE connection so running/queued/pending_reviews are mutually
+    consistent — a job can't show ``running`` in one section and ``queued`` in another
+    from the same fetch. Terminal **history** is deliberately NOT here: it is unbounded
+    and immutable, so it is lazy-loaded a page at a time (:func:`recent_jobs`), never
+    bundled into the live poll. ``running`` is at most one row (the single-worker queue,
+    §3); ``queued`` is uncapped and paginated client-side.
+    """
+    conn = _ro()
+    try:
         running = conn.execute(
             "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.started_at, "
             "  j.params_json, r.name AS root_name FROM jobs j "
@@ -75,20 +108,23 @@ def status_snapshot() -> dict:
             d["counts"] = _review_counts(conn, r)
             pending_list.append(d)
         return {
-            "assets": assets,
-            "photos": photos,
-            "videos": videos,
-            "trashed": trashed,
-            "size_bytes": size_bytes,
-            "lifetime_deduped": lifetime_deduped,
             "running": _job_dict(running) if running else None,
             "queued": queued,
             "interrupted": [dict(r) for r in interrupted],
             "pending_reviews": pending_list,
-            "roots": roots_snapshot(),
         }
     finally:
         conn.close()
+
+
+def status_snapshot() -> dict:
+    """Global rollup (§11) — the CLI ``status`` / ``--json`` shape.
+
+    Now a COMPOSITION of the decomposed reads (:func:`collection_stats`,
+    :func:`live_jobs`, :func:`roots_snapshot`) so the CLI keeps its one-call,
+    everything-in-one-dict contract while the TUI polls each concern separately (§12).
+    """
+    return {**collection_stats(), **live_jobs(), "roots": roots_snapshot()}
 
 
 def _annotate_queued_row(conn, row) -> dict:
@@ -565,45 +601,86 @@ def _job_dict(row, conn=None) -> dict:
     return d
 
 
-def recent_jobs(limit: int = 20) -> list[dict]:
+#: Columns selected for every job-row query (kept identical so all shapes match).
+_JOB_COLS = (
+    "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.enqueued_at, "
+    "  j.started_at, j.finished_at, j.error, j.result_json, j.params_json, "
+    "  r.name AS root_name "
+    "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
+)
+#: Terminal (finished) statuses — the TUI "History" section shows only these; the live
+#: running/queued rows are sourced from the snapshot instead. ``terminal_only`` filters
+#: to this set so the paged rows and the page-count denominator stay consistent (a page
+#: never mixes in a running/queued row that its own section already shows).
+_TERMINAL_STATUSES = ("done", "error", "cancelled", "interrupted")
+_TERMINAL_SQL = " status IN ('done','error','cancelled','interrupted')"
+
+
+def recent_jobs(limit: int = 20, offset: int = 0, *, terminal_only: bool = False) -> list[dict]:
     """Recent job runs for the TUI 'recent jobs' list (§12), newest-first.
 
-    Includes ``queued`` rows (the backlog) and terminal history. Each row carries a
-    derived ``label`` and its root name (via ``jobs.root_id``).
+    By default includes ``queued`` rows (the backlog) and terminal history — the CLI
+    ``jobs list`` shape. ``terminal_only=True`` restricts to finished jobs (the TUI Queue
+    **History** section, whose running/queued come from the snapshot). ``offset`` skips
+    that many newest matching rows — the TUI pages by ``limit``/``offset`` so it never
+    fetches the whole (unbounded) table at once (denominator: :func:`jobs_count`).
     """
+    where = f"WHERE{_TERMINAL_SQL} " if terminal_only else ""
     conn = _ro()
     try:
         rows = conn.execute(
-            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.enqueued_at, "
-            "  j.started_at, j.finished_at, j.error, j.result_json, j.params_json, "
-            "  r.name AS root_name "
-            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
-            "ORDER BY j.id DESC LIMIT ?",
-            (limit,),
+            _JOB_COLS + where + "ORDER BY j.id DESC LIMIT ? OFFSET ?",
+            (limit, max(0, offset)),
         ).fetchall()
         return [_job_dict(r, conn) for r in rows]
     finally:
         conn.close()
 
 
-def root_jobs(root_id: int, limit: int = 50) -> list[dict]:
+def jobs_count(*, terminal_only: bool = False) -> int:
+    """Total matching ``jobs`` rows — the denominator for the Queue History paginator.
+
+    Lets the TUI show ``page K/N`` over the true total while holding only one page of
+    rows in memory (lazy history loading). ``terminal_only`` must match the flag passed
+    to :func:`recent_jobs` so count and content agree."""
+    where = f"WHERE{_TERMINAL_SQL}" if terminal_only else ""
+    conn = _ro()
+    try:
+        return conn.execute(f"SELECT COUNT(*) c FROM jobs {where}").fetchone()["c"]
+    finally:
+        conn.close()
+
+
+def root_jobs(root_id: int, limit: int = 50, offset: int = 0, *,
+              terminal_only: bool = False) -> list[dict]:
     """One root's jobs — current (queued/running) + history, newest-first (§12).
 
     Keys off ``jobs.root_id`` (the root a job concerns). A ``scan --all`` has no
     ``root_id`` so it doesn't appear here per-root — its per-root outcome lives in
-    ``scan_results`` (§4), surfaced separately by ``status <root>``.
+    ``scan_results`` (§4), surfaced separately by ``status <root>``. ``offset`` pages
+    this root's history like :func:`recent_jobs`; ``terminal_only`` filters to finished
+    jobs (the History section — running/queued render from the snapshot).
     """
+    where = "WHERE j.root_id=?" + (f" AND{_TERMINAL_SQL}" if terminal_only else "")
     conn = _ro()
     try:
         rows = conn.execute(
-            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.enqueued_at, "
-            "  j.started_at, j.finished_at, j.error, j.result_json, j.params_json, "
-            "  r.name AS root_name "
-            "FROM jobs j LEFT JOIN roots r ON r.id = j.root_id "
-            "WHERE j.root_id=? ORDER BY j.id DESC LIMIT ?",
-            (root_id, limit),
+            _JOB_COLS + where + " ORDER BY j.id DESC LIMIT ? OFFSET ?",
+            (root_id, limit, max(0, offset)),
         ).fetchall()
         return [_job_dict(r, conn) for r in rows]
+    finally:
+        conn.close()
+
+
+def root_jobs_count(root_id: int, *, terminal_only: bool = False) -> int:
+    """Total matching ``jobs`` rows for one root — denominator for its History paginator."""
+    where = "WHERE root_id=?" + (f" AND{_TERMINAL_SQL}" if terminal_only else "")
+    conn = _ro()
+    try:
+        return conn.execute(
+            f"SELECT COUNT(*) c FROM jobs {where}", (root_id,)
+        ).fetchone()["c"]
     finally:
         conn.close()
 

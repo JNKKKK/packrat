@@ -145,7 +145,7 @@ class JobCard(FrameScreen):
         network share (permanent delete — §10). Read from the live root detail; any
         failure → 0 (no warning, never blocks the confirm)."""
         try:
-            detail, _ = self.app.root_detail(root)
+            detail = self.app.root_detail(root)
             return int(((detail or {}).get("pending_review") or {}).get("counts", {}).get("network", 0))
         except Exception:  # noqa: BLE001 - the warning is best-effort
             return 0
