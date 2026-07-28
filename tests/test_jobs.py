@@ -58,6 +58,36 @@ def test_submit_runs_and_reports_progress(queue_and_db):
     assert row["done"] == 4 and row["total"] == 4
 
 
+def test_close_all_subscribers_unblocks_streams(queue_and_db):
+    """close_all_subscribers() pushes the sentinel to every open sub so a blocked SSE
+    reader wakes — the graceful-shutdown fix for the hung-teardown / orphaned-daemon leak.
+
+    Without it, a stream attached to a still-running job blocks forever on q.get(), which
+    is exactly what made uvicorn's (infinite-by-default) graceful shutdown hang."""
+    q, database = queue_and_db
+    # A long-running job with two attached subscribers, both mid-stream (job not done).
+    jid = q.submit("sleeper", {"steps": 100, "delay_s": 0.05})
+    subs = [q.subscribe(jid), q.subscribe(jid)]
+    q.close_all_subscribers()
+    # Each subscriber must receive the sentinel promptly (not hang until the job ends).
+    for sub in subs:
+        assert _drain_to_sentinel(sub, timeout=2.0), "subscriber never got the sentinel"
+
+
+def _drain_to_sentinel(sub, *, timeout: float) -> bool:
+    """True if the subscriber's queue yields the None sentinel within ``timeout``."""
+    import queue as _q
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if sub.q.get(timeout=deadline - time.monotonic()) is None:
+                return True
+        except _q.Empty:
+            return False
+    return False
+
+
 def test_second_submit_enqueues(queue_and_db):
     """§3 guarantee 1: a submit while busy is QUEUED (durable backlog), not rejected."""
     q, database = queue_and_db

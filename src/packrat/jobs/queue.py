@@ -505,3 +505,18 @@ class JobQueue:
         with self._sub_lock:
             for sub in self._subscribers.get(job_id, []):
                 sub.close()
+
+    def close_all_subscribers(self) -> None:
+        """Push the sentinel to EVERY open SSE subscriber (all jobs) — used at daemon
+        shutdown so each ``event_gen`` loop breaks and frees its blocked executor thread.
+
+        Without this, an attached ``/jobs/{id}/stream`` never completes (its response
+        stays open, heartbeating forever), so uvicorn's graceful shutdown waits on that
+        task indefinitely and the daemon process hangs (the "executor did not finish
+        joining its threads" leak). Closing the subscribers here lets the streams end
+        cleanly *before* the server stops, the graceful path rather than a forced cancel.
+        Idempotent — a second sentinel is dropped by the bounded queue's Full guard."""
+        with self._sub_lock:
+            for subs in self._subscribers.values():
+                for sub in subs:
+                    sub.close()

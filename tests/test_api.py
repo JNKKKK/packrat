@@ -203,3 +203,38 @@ def test_late_attach_stream_closes(client):
     with client.stream("GET", f"/jobs/{jid}/stream", headers=_h()) as s:
         lines = [ln for ln in s.iter_lines() if ln.startswith("data:")]
     assert any("done" in ln for ln in lines)
+
+
+def test_shutdown_closes_open_stream_of_running_job(client):
+    """POST /shutdown must terminate an SSE stream attached to a still-RUNNING job.
+
+    Regression for the hung teardown: an open stream never completes on its own, so an
+    infinite graceful wait left the daemon (and its executor thread) hanging. /shutdown
+    now closes subscribers up front, so the stream ends promptly. We assert the streaming
+    read finishes quickly after shutdown rather than blocking on a running job forever."""
+    import threading
+
+    jid = client.post(
+        "/jobs", json={"type": "sleeper", "params": {"steps": 200, "delay_s": 0.05}},
+        headers=_h()).json()["job_id"]
+    for _ in range(200):
+        if client.get(f"/jobs/{jid}", headers=_h()).json()["status"] == "running":
+            break
+        time.sleep(0.02)
+
+    done = threading.Event()
+
+    def read_stream():
+        try:
+            with client.stream("GET", f"/jobs/{jid}/stream", headers=_h()) as s:
+                for _ln in s.iter_lines():
+                    pass          # drain until the server closes the stream
+        finally:
+            done.set()
+
+    t = threading.Thread(target=read_stream, daemon=True)
+    t.start()
+    time.sleep(0.3)               # let the stream attach + block on the running job
+    # Requesting shutdown must close the subscriber → the stream ends (no infinite block).
+    client.post("/shutdown", headers=_h())
+    assert done.wait(timeout=5.0), "open stream did not close after /shutdown (hung teardown)"

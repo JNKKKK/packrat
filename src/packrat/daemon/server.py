@@ -526,6 +526,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
         # next start lands it as 'interrupted' — matching §3's "stop is a
         # resumable interruption, not a cancel." We stop serving after replying.
         running_id = queue.running_job_id()
+        # Close any attached SSE streams up front so their event_gen loops break and free
+        # their blocked executor threads BEFORE uvicorn's graceful shutdown waits on them.
+        # An open stream never completes on its own, so without this uvicorn would hang the
+        # graceful wait (the orphaned-daemon leak). This is the clean path; the finite
+        # timeout_graceful_shutdown is the backstop for anything that attaches after this.
+        queue.close_all_subscribers()
         # Schedule the actual process exit shortly after the response is sent.
         asyncio.get_event_loop().call_later(0.2, _stop_server, app)
         return {"stopping": True, "running_job": running_id}
@@ -608,9 +614,16 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
         # what used to fill daemon.log. This is the authoritative switch: quieting the
         # logger in _setup_logging doesn't stick because uvicorn's configure_logging()
         # resets uvicorn.access back to log_level during server.run().
+        # timeout_graceful_shutdown: uvicorn's default is None (wait FOREVER for in-flight
+        # request tasks to finish). An attached SSE stream (/jobs/{id}/stream) never
+        # finishes on its own — its response stays open, heartbeating — so an infinite
+        # graceful wait hangs the whole daemon on `daemon stop` (the "executor did not
+        # finish joining its threads" leak that left orphaned daemons pinning daemon.log).
+        # /shutdown proactively closes the subscribers so streams end cleanly; this finite
+        # timeout is the backstop that force-cancels anything still lingering.
         config = uvicorn.Config(
             app, host=HOST, port=port, log_level="info", loop="asyncio",
-            log_config=None, access_log=False,
+            log_config=None, access_log=False, timeout_graceful_shutdown=5,
         )
         server = uvicorn.Server(config)
         app.state._uvicorn_server = server
