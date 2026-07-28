@@ -317,6 +317,71 @@ def test_root_detail_jobs_list_pages():
     _drive(scenario)
 
 
+def test_reanchor_page_keeps_first_visible_and_clamps():
+    """The lazy-history page index re-anchors on a page-SIZE change (resize/reflow)."""
+    from packrat.tui.screens.queue import reanchor_page
+    # Grow (7→20 rows): page 14 (offset 98) has no page 14 at 20/page → clamp to last (4).
+    assert reanchor_page(14, 7, 20, 100) == 4
+    # Shrink (20→7): page 2 (offset 40) → the 7-row page CONTAINING item 40 is page 5.
+    assert reanchor_page(2, 20, 7, 100) == 5
+    assert 5 * 7 <= 40 < 6 * 7                      # first-visible item stays on-screen
+    assert reanchor_page(3, 10, 10, 100) == 3       # no size change → unchanged
+    assert reanchor_page(14, 7, 20, 5) == 0         # total shrank → clamp into range
+    assert reanchor_page(5, 7, 0, 100) == 0         # collapsed window → single empty page
+    assert reanchor_page(0, 7, 20, 100) == 0        # page 0 stays 0
+
+
+def test_queue_history_page_survives_resize():
+    """Deep-paging Queue History then GROWING the terminal re-anchors to a valid page
+    (regression: the stored page index was invalid under the new, larger page size)."""
+    async def scenario(app, pilot):
+        await pilot.press("q"); await pilot.press("q")   # QueueMax
+        await pilot.press("h")                           # focus History
+        # Page to the last history page at the small (100×24) size.
+        for _ in range(10):
+            before = _pagers(app)[-1]
+            await pilot.press("right")
+            if _pagers(app)[-1][0] == before[0]:
+                break                                    # reached the last page
+        cur, total = _pagers(app)[-1]
+        assert cur == total and total >= 2, (cur, total)
+        # Grow the terminal: bigger window → more rows/page → fewer pages. The stored index
+        # must re-anchor into range (not point past the end) and still render a valid frame.
+        await pilot.resize_terminal(100, 45)
+        await pilot.pause()
+        cur2, total2 = _pagers(app)[-1]
+        assert total2 < total                            # fewer pages at the taller size
+        assert 1 <= cur2 <= total2                       # index is valid, not stranded
+        assert _rows_exact(app.screen.current_frame, 100, 45)
+        # History rows actually rendered (not an empty past-the-end page).
+        assert "#" in app.screen.current_frame
+    _drive(scenario)
+
+
+def test_root_detail_history_page_survives_resize():
+    """Root-detail History deep-page survives a terminal resize (re-anchors, no empty page).
+
+    The root-detail history page size is the jobs-panel height, which ALSO changes on
+    resize — so the same re-anchor guard must apply here as in the Queue screen."""
+    async def scenario(app, pilot):
+        await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
+        assert _scr(app) == "RootDetailScreen"
+        await pilot.press("j")                           # focus Jobs panel
+        await pilot.press("h")                           # focus History section
+        for _ in range(10):
+            before = _pagers(app)[-1]
+            await pilot.press("right")
+            if _pagers(app)[-1][0] == before[0]:
+                break
+        cur, total = _pagers(app)[-1]
+        await pilot.resize_terminal(100, 48)
+        await pilot.pause()
+        cur2, total2 = _pagers(app)[-1]
+        assert 1 <= cur2 <= total2                       # re-anchored into range
+        assert _rows_exact(app.screen.current_frame, 100, 48)
+    _drive(scenario)
+
+
 async def _to_photos_detail(app, pilot):
     """Drill into the Photos root's detail (the pending-review + queued-jobs case)."""
     await pilot.press("r")

@@ -62,6 +62,11 @@ class RootDetailScreen(FrameScreen):
         # history is unbounded, so we hold only the current page + its true total count.
         self._history: list[dict] = []
         self._history_total = 0
+        # History PAGE SIZE = the jobs-panel height, which changes on resize AND when the
+        # review box appears/shrinks (a poll can move it). That invalidates the stored page
+        # INDEX, so `_history_win` records the size the loaded page used and `_anchor_history`
+        # re-derives the index (keeping the first-visible job) whenever it changes.
+        self._history_win = 0
         self._detail: dict | None = None
         self._loaded = False             # False until the first reload() populates data
 
@@ -97,6 +102,21 @@ class RootDetailScreen(FrameScreen):
         rows = self._history_rows()
         return max(1, -(-self._history_total // rows)) if rows else 1
 
+    def _anchor_history(self) -> int:
+        """Re-anchor the history page index to the CURRENT window height, returning that
+        height. The page size (jobs-panel height) shifts on resize and when the review box
+        appears/shrinks, so a stored index is only valid for its own size — re-derive it
+        from the absolute offset (keep the first-visible job on-screen) whenever it changes.
+        Call on the UI thread before computing a fetch offset."""
+        rows = self._history_rows()
+        if self._history_win and rows != self._history_win:
+            from ..screens.queue import reanchor_page
+            self.pages["history"] = reanchor_page(
+                self.pages["history"], self._history_win, rows, self._history_total)
+            self.cursors["history"] = 0
+        self._history_win = rows
+        return rows
+
     def reload(self) -> None:
         """Fetch this root's detail + current history page (mount + first paint).
 
@@ -113,6 +133,12 @@ class RootDetailScreen(FrameScreen):
         self.reload()
         super().on_mount()
 
+    def on_resize(self, event) -> None:
+        # Base refreshes the frame (→ frame() rebuilds self._geo); then re-anchor + re-fetch
+        # the history page for the new panel height so a deep page stays valid.
+        super().on_resize(event)
+        self._reload_history()
+
     def poll_reload(self) -> None:
         """Poll refresh — fetch off the UI thread so a slow daemon can't freeze input.
 
@@ -122,15 +148,16 @@ class RootDetailScreen(FrameScreen):
         if self.app.offline or not self.app._app_loop_running():
             self.reload()
             return
-        self._poll_fetch()
+        # Re-anchor on the UI thread BEFORE the worker reads the page/offset (a poll can
+        # move the review box → change the jobs-panel height → invalidate the page index).
+        rows = self._anchor_history()
+        self._poll_fetch(rows, self.pages["history"] * rows)
 
     @work(thread=True, exclusive=True, group="rootdetail-poll")
-    def _poll_fetch(self) -> None:
+    def _poll_fetch(self, rows: int, offset: int) -> None:
         detail = self.app.root_detail(self.root_name)
         rid = detail.get("id") if detail else None
-        hist, total = self.app.root_history(self.root_name, rid,
-                                            self._history_rows(),
-                                            self.pages["history"] * self._history_rows())
+        hist, total = self.app.root_history(self.root_name, rid, rows, offset)
         try:
             self.app.call_from_thread(self._apply_reload, detail, hist, total)
         except Exception:
@@ -144,8 +171,9 @@ class RootDetailScreen(FrameScreen):
 
     def _reload_history(self) -> None:
         """Fetch the current history page (offset = page·window). Inline offline / no loop;
-        else off the UI thread. Called on mount, poll, and history page change."""
-        rows = self._history_rows()
+        else off the UI thread. Called on mount, resize, poll, and history page change.
+        Re-anchors the page index first so a window-height change can't strand it."""
+        rows = self._anchor_history()
         offset = self.pages["history"] * rows
         rid = self._detail.get("id") if self._detail else None
         if self.app.offline or not self.app._app_loop_running():

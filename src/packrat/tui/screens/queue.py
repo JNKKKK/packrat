@@ -37,6 +37,23 @@ def section_pages(n: int, rows: int) -> int:
     return max(1, -(-n // rows))
 
 
+def reanchor_page(page: int, old_rows: int, new_rows: int, total: int) -> int:
+    """Re-derive a page index after the page SIZE changes (terminal resize / panel reflow).
+
+    For the LAZY-loaded history the page size *is* the window height, so a resize changes
+    how many rows fit per page — which invalidates a stored page *index* (page 14 of 7-row
+    pages is offset 98; at 20-row pages there is no page 14). Re-anchor on the absolute
+    offset instead: keep the first item that was visible (``page·old_rows``) on-screen under
+    the new page size, then clamp into range. ``old_rows``/``new_rows`` ≤ 0 → page 0 (a
+    collapsed window has a single empty page). Pure + tiny so it's unit-testable and shared
+    by the Queue + root-detail history."""
+    if new_rows <= 0:
+        return 0
+    first_visible = max(0, page) * max(0, old_rows)
+    new_page = first_visible // new_rows
+    return max(0, min(new_page, section_pages(total, new_rows) - 1))
+
+
 def section_jobs(section: str, running: dict | None, queued: list[dict],
                  history: list[dict]) -> list[dict]:
     """The selectable jobs of one section (running is a 0-or-1 list)."""

@@ -53,10 +53,21 @@ class QueueMax(FrameScreen):
         # poll + page change, off the UI thread.
         self._history: list[dict] = []
         self._history_total = 0     # total terminal jobs (denominator for page K/N)
+        # The history PAGE SIZE is the window height, so a terminal resize changes it and
+        # invalidates the stored page INDEX (page 14 of 7-row pages ≠ page 14 of 20-row
+        # pages). `_history_win` records the size the current page was fetched at, so
+        # `_reload_history` can re-anchor the index (keep the first-visible job) on a change.
+        self._history_win = 0
 
     def on_mount(self) -> None:
         self._reload_history()
         super().on_mount()
+
+    def on_resize(self, event) -> None:
+        # Base refreshes the frame (→ frame() sets the new self._geo); then re-anchor +
+        # re-fetch the history page for the new window height so a deep page stays valid.
+        super().on_resize(event)
+        self._reload_history()
 
     # -- history page size / fetch ----------------------------------------
     def _history_rows(self) -> int:
@@ -74,8 +85,18 @@ class QueueMax(FrameScreen):
 
     def _reload_history(self) -> None:
         """Fetch the current history page (limit=window, offset=page·window) off the UI
-        thread. Offline / no app loop applies inline (demo data / unit tests)."""
+        thread. Offline / no app loop applies inline (demo data / unit tests).
+
+        Re-anchors the page index first if the window height changed since the loaded page
+        (resize): the stored index is only valid for its own page size, so we recompute it
+        from the absolute offset to keep the first-visible job on-screen and in range."""
         rows = self._history_rows()
+        if self._history_win and rows != self._history_win:
+            from ..screens.queue import reanchor_page
+            self.pages["history"] = reanchor_page(
+                self.pages["history"], self._history_win, rows, self._history_total)
+            self.cursors["history"] = 0
+        self._history_win = rows
         offset = self.pages["history"] * rows
         if self.app.offline:
             full = demo.recent_jobs()
