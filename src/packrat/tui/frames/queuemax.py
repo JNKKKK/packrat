@@ -58,6 +58,23 @@ class QueueMax(FrameScreen):
         # pages). `_history_win` records the size the current page was fetched at, so
         # `_reload_history` can re-anchor the index (keep the first-visible job) on a change.
         self._history_win = 0
+        # History (terminal jobs) only changes when a job LEAVES the running/queued set —
+        # i.e. a job finishes. So a poll only needs to refetch the page when the live set
+        # changed since the last fetch; between finishes the page is identical. `_live_sig`
+        # records the (running_id, queued_ids) the current page was fetched against. (A job
+        # finishing while streamed also triggers a full refresh via SSE — this is the poll
+        # backstop for finishes with no attached stream: queued jobs, other terminals.)
+        self._live_sig: tuple | None = None
+
+    def _current_live_sig(self) -> tuple:
+        """The (running_id, queued_ids) signature of the live set — changes exactly when a
+        job enters/leaves running or queued (the only events that alter terminal history)."""
+        snap = self.app.snapshot
+        running = snap.get("running")
+        return (
+            running.get("id") if running else None,
+            tuple(j.get("id") for j in snap.get("queued", [])),
+        )
 
     def on_mount(self) -> None:
         # Render FIRST so frame() builds self._geo from the real terminal size — THEN fetch
@@ -67,10 +84,15 @@ class QueueMax(FrameScreen):
         self._reload_history()
 
     def on_resize(self, event) -> None:
-        # Base refreshes the frame (→ frame() sets the new self._geo); then re-anchor +
-        # re-fetch the history page for the new window height so a deep page stays valid.
+        # Base refreshes the frame (→ frame() sets the new self._geo). Only refetch the
+        # history page when the page SIZE actually changed (recent_rows crossed a row
+        # boundary): a drag-resize fires many on_resize events per second, and a width-only
+        # change — or a height change that didn't move recent_rows — leaves the loaded page
+        # valid, so a refetch would be pure waste. `_history_win` holds the size the current
+        # page was fetched at; `_reload_history` re-anchors + fetches for the new size.
         super().on_resize(event)
-        self._reload_history()
+        if self._history_rows() != self._history_win:
+            self._reload_history()
 
     # -- history page size / fetch ----------------------------------------
     def _history_rows(self) -> int:
@@ -82,9 +104,12 @@ class QueueMax(FrameScreen):
         return max(1, -(-self._history_total // rows)) if rows else 1
 
     def poll_reload(self) -> None:
-        """Poll refresh — re-fetch the CURRENT history page so a just-finished job appears
-        (the live running/queued sections come from the snapshot, refreshed centrally)."""
-        self._reload_history()
+        """Poll refresh — re-fetch the history page ONLY if the live set changed since the
+        last fetch (a job entered/left running/queued → terminal history changed). Between
+        finishes the page is unchanged, so we skip the round-trip. The live running/queued
+        sections themselves come from the snapshot, refreshed centrally."""
+        if self._current_live_sig() != self._live_sig:
+            self._reload_history()
 
     def _reload_history(self) -> None:
         """Fetch the current history page (limit=window, offset=page·window) off the UI
@@ -93,6 +118,9 @@ class QueueMax(FrameScreen):
         Re-anchors the page index first if the window height changed since the loaded page
         (resize): the stored index is only valid for its own page size, so we recompute it
         from the absolute offset to keep the first-visible job on-screen and in range."""
+        # Record the live set this fetch is made against, so poll_reload can skip a refetch
+        # until it changes again (set here — before the fetch — so every path updates it).
+        self._live_sig = self._current_live_sig()
         rows = self._history_rows()
         if self._history_win and rows != self._history_win:
             from ..screens.queue import reanchor_page

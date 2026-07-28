@@ -140,10 +140,14 @@ class RootDetailScreen(FrameScreen):
         self._reload_history()      # now sized to the real jobs-panel height
 
     def on_resize(self, event) -> None:
-        # Base refreshes the frame (→ frame() rebuilds self._geo); then re-anchor + re-fetch
-        # the history page for the new panel height so a deep page stays valid.
+        # Base refreshes the frame (→ frame() rebuilds self._geo). Only refetch when the
+        # history page SIZE (jobs-panel height) actually changed — a drag-resize fires many
+        # events/sec, and a width-only or sub-boundary height change leaves the loaded page
+        # valid, so a refetch would be wasted. `_history_win` = the size the page was fetched
+        # at; `_reload_history` re-anchors + fetches for the new size.
         super().on_resize(event)
-        self._reload_history()
+        if self._history_rows() != self._history_win:
+            self._reload_history()
 
     def poll_reload(self) -> None:
         """Poll refresh — fetch off the UI thread so a slow daemon can't freeze input.

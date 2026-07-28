@@ -627,6 +627,51 @@ def test_daemon_down_renders_dashboard_not_crash():
     asyncio.run(runner())
 
 
+def test_queuemax_poll_skips_history_refetch_when_live_set_unchanged():
+    """QueueMax refetches its history page on a poll ONLY when the live (running/queued)
+    set changed — between job finishes the terminal history is identical, so we skip the
+    round-trip. Efficiency guard (F5 follow-up)."""
+    from packrat.tui import demo
+    from packrat.tui.frames import QueueMax
+
+    class _CountClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.history_calls = 0
+            self._running = {"id": 999, "type": "scan", "done": 1, "total": 2,
+                             "status": "running", "root_name": "iPhone"}
+
+        def live_jobs(self):
+            return {"running": self._running, "queued": [],
+                    "interrupted": [], "pending_reviews": []}
+
+        def history_page(self, limit, offset):
+            self.history_calls += 1
+            return self._terminal_history()[offset:offset + limit], len(self._terminal_history())
+
+    fc = _CountClient()
+    app = PackratApp(client=fc, offline=False)
+
+    async def scenario(app, pilot):
+        await pilot.press("q"); await pilot.press("q")   # QueueMax
+        await pilot.pause()
+        assert isinstance(app.screen, QueueMax)
+        base = fc.history_calls                          # after mount's initial load
+        # Two polls with the SAME running job → no history refetch.
+        app.refresh_live(); await pilot.pause()
+        app.refresh_live(); await pilot.pause()
+        assert fc.history_calls == base, "history refetched despite unchanged live set"
+        # The running job finishes (leaves the live set) → the next poll refetches history.
+        fc._running = None
+        app.refresh_live(); await pilot.pause()
+        assert fc.history_calls == base + 1, "history NOT refetched after a job finished"
+
+    async def runner():
+        async with app.run_test(size=(100, 34)) as pilot:
+            await scenario(app, pilot)
+    asyncio.run(runner())
+
+
 def test_refresh_live_daemon_down_synchronous_path_does_not_crash():
     """The SYNCHRONOUS refresh_live path (unmounted app / no event loop) must survive a
     daemon-down fetch. _get_live() returns None on failure and the non-loop branch feeds
