@@ -262,7 +262,7 @@ class PackratApp(App):
 
     def _apply_live_and_render(self, live: dict | None, header: str) -> None:
         self.header_right = header
-        self._apply_live(live if live is not None else _empty_snapshot())
+        self._apply_live(live)   # tolerates None (daemon-down) — see _apply_live
 
     def _apply_stats_roots(self, stats: dict, roots: list) -> None:
         """Fold the collection stats + roots list into the composed snapshot (UI thread).
@@ -276,13 +276,21 @@ class PackratApp(App):
         if self.screen_stack and isinstance(self.screen, FrameScreen):
             self.screen.refresh_frame()
 
-    def _apply_live(self, live: dict) -> None:
+    def _apply_live(self, live: dict | None) -> None:
         """Fold the live job state into the composed snapshot + re-render (UI thread).
 
         Updates ONLY the live keys (running/queued/interrupted/pending_reviews); stats +
-        roots are owned by :meth:`_apply_stats_roots`."""
-        for k in ("running", "queued", "interrupted", "pending_reviews"):
-            self.snapshot[k] = live.get(k) if k != "queued" else (live.get(k) or [])
+        roots are owned by :meth:`_apply_stats_roots`. ``live`` is ``None`` when the daemon
+        was unreachable (``_get_live`` returns None on failure) — treat that as the zeroed
+        live state so the synchronous ``refresh_live`` path can't crash on ``None.get``
+        (the async path coalesces too, via :meth:`_apply_live_and_render`)."""
+        if live is None:
+            live = _empty_snapshot()
+        # `running` → None means "nothing running" (a valid state); the list keys default
+        # to [] so a partial/absent dict never leaves a builder indexing None.
+        self.snapshot["running"] = live.get("running")
+        for k in ("queued", "interrupted", "pending_reviews"):
+            self.snapshot[k] = live.get(k) or []
         # Feed the SSE-less poll path into the ETA estimator + keep the live stream
         # subscribed to whatever job is now running (fix: the "live" bar was poll-only).
         self._track_running()

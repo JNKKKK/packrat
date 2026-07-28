@@ -65,8 +65,10 @@ def test_close_all_subscribers_unblocks_streams(queue_and_db):
     Without it, a stream attached to a still-running job blocks forever on q.get(), which
     is exactly what made uvicorn's (infinite-by-default) graceful shutdown hang."""
     q, database = queue_and_db
-    # A long-running job with two attached subscribers, both mid-stream (job not done).
-    jid = q.submit("sleeper", {"steps": 100, "delay_s": 0.05})
+    # A job with enough steps to still be running while we attach + close (but not a
+    # needless multi-second job — the point is only that subscribers are mid-stream, and
+    # close_all_subscribers() is called immediately). The fixture cancels it at teardown.
+    jid = q.submit("sleeper", {"steps": 20, "delay_s": 0.05})
     subs = [q.subscribe(jid), q.subscribe(jid)]
     q.close_all_subscribers()
     # Each subscriber must receive the sentinel promptly (not hang until the job ends).

@@ -627,6 +627,21 @@ def test_daemon_down_renders_dashboard_not_crash():
     asyncio.run(runner())
 
 
+def test_refresh_live_daemon_down_synchronous_path_does_not_crash():
+    """The SYNCHRONOUS refresh_live path (unmounted app / no event loop) must survive a
+    daemon-down fetch. _get_live() returns None on failure and the non-loop branch feeds
+    it straight to _apply_live — which used to crash on None.get (regression F1)."""
+    app = PackratApp(client=_DownClient(), offline=False)
+    # Unmounted → _app_loop_running() is False → refresh_live takes the synchronous
+    # branch: _apply_live(_get_live()) with _get_live() → None (daemon unreachable).
+    assert not app._app_loop_running()
+    app.refresh_live()                              # must NOT raise
+    # The live keys degrade to the zeroed state; header flags the daemon down.
+    assert app.snapshot["running"] is None
+    assert app.snapshot["queued"] == [] and app.snapshot["interrupted"] == []
+    assert "down" in app.header_right
+
+
 # --- issue #3: root-detail running job inherits the live ETA/counters ---------
 def test_root_detail_running_job_gets_live_eta():
     """The SSE ETA is tracked on snapshot['running']; root detail's running_job comes

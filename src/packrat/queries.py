@@ -613,7 +613,10 @@ _JOB_COLS = (
 #: to this set so the paged rows and the page-count denominator stay consistent (a page
 #: never mixes in a running/queued row that its own section already shows).
 _TERMINAL_STATUSES = ("done", "error", "cancelled", "interrupted")
-_TERMINAL_SQL = " status IN ('done','error','cancelled','interrupted')"
+#: Derived from _TERMINAL_STATUSES (not a second hardcoded literal) so the two can't
+#: drift — add a status to the tuple and the SQL filter picks it up automatically. These
+#: are fixed identifiers (not user input), so inlining them is injection-safe.
+_TERMINAL_SQL = " status IN (" + ",".join(f"'{s}'" for s in _TERMINAL_STATUSES) + ")"
 
 
 def recent_jobs(limit: int = 20, offset: int = 0, *, terminal_only: bool = False) -> list[dict]:
