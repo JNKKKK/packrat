@@ -34,6 +34,15 @@ def _drive(coro_fn):
     asyncio.run(runner())
 
 
+def _drive_size(coro_fn, size):
+    """Like :func:`_drive` but at an explicit terminal size (for responsive-first-load tests)."""
+    async def runner():
+        app = PackratApp(offline=True)
+        async with app.run_test(size=size) as pilot:
+            await coro_fn(app, pilot)
+    asyncio.run(runner())
+
+
 def _scr(app) -> str:
     return type(app.screen).__name__
 
@@ -356,6 +365,25 @@ def test_queue_history_page_survives_resize():
         # History rows actually rendered (not an empty past-the-end page).
         assert "#" in app.screen.current_frame
     _drive(scenario)
+
+
+def test_queue_history_first_load_matches_real_window():
+    """The FIRST history load is sized to the real terminal, not the 100×24 default.
+
+    Regression: on_mount fetched history before frame() built _geo, so it read the class
+    default (7 rows) then visibly grew to the real window on the next poll."""
+    async def scenario(app, pilot):
+        await pilot.press("q"); await pilot.press("q")   # QueueMax on a tall terminal
+        await pilot.pause()
+        first = len(app.screen._history)
+        # A tall window fits more than the 100×24 default of 7 rows — proving the first
+        # fetch used the real size (24 demo terminal jobs, so it's window-bound, not total-bound).
+        assert first > 7, first
+        assert app.screen._history_win == app.screen._geo.recent_rows
+        app.screen.poll_reload()                          # settle
+        await pilot.pause()
+        assert len(app.screen._history) == first          # no growth on the next poll
+    _drive_size(scenario, (100, 50))
 
 
 def test_root_detail_history_page_survives_resize():

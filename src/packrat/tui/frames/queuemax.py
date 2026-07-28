@@ -60,8 +60,11 @@ class QueueMax(FrameScreen):
         self._history_win = 0
 
     def on_mount(self) -> None:
-        self._reload_history()
+        # Render FIRST so frame() builds self._geo from the real terminal size — THEN fetch
+        # the history page sized to it. (Fetching before the first render would read the
+        # 100×24 class default, load too few rows, and visibly grow on the next poll.)
         super().on_mount()
+        self._reload_history()
 
     def on_resize(self, event) -> None:
         # Base refreshes the frame (→ frame() sets the new self._geo); then re-anchor +

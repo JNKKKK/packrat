@@ -118,7 +118,7 @@ class RootDetailScreen(FrameScreen):
         return rows
 
     def reload(self) -> None:
-        """Fetch this root's detail + current history page (mount + first paint).
+        """Fetch this root's detail + current history page (poll / re-entry).
 
         ``root_detail`` is ``status <root>`` (stats/review/running/queued); the terminal
         History is a SEPARATE lazy-loaded page (:meth:`_reload_history`), so a long job
@@ -130,8 +130,14 @@ class RootDetailScreen(FrameScreen):
         self._reload_history()
 
     def on_mount(self) -> None:
-        self.reload()
-        super().on_mount()
+        # Fetch the detail, THEN render (so frame() builds self._geo from the real terminal
+        # size AND the just-fetched review state — both feed the history page height), THEN
+        # fetch the history page sized to it. Fetching history before the first render would
+        # read the 100×24 class default, load too few rows, and visibly grow on the next poll.
+        self._detail = self.app.root_detail(self.root_name)
+        self._loaded = True
+        super().on_mount()          # → frame() sets self._geo (from size + _detail)
+        self._reload_history()      # now sized to the real jobs-panel height
 
     def on_resize(self, event) -> None:
         # Base refreshes the frame (→ frame() rebuilds self._geo); then re-anchor + re-fetch
