@@ -147,11 +147,35 @@ no wheel risk — §9.1).
 
 **Progress transport — server-sent events (SSE), not polling.** A client that submits (or attaches
 to) a job holds an SSE stream on the HTTP API; the daemon pushes progress/state events (bar, counts,
-ETA, completion). The TUI uses the same stream for the running job. Read-only *snapshots*
-(`status`, `roots`, TUI stat panels) are plain request/response — polled on a light timer for the
-"recent jobs" list. SSE is chosen over polling for the live progress path so a moving bar doesn't
-require a busy-loop of requests; it degrades gracefully (a dropped stream just reconnects, since job
-state is durable in the `jobs` table).
+ETA, completion). The TUI uses the same stream for the running job. Read-only *reads* (see the
+resource API below) are plain request/response — polled on a light timer. SSE is chosen over polling
+for the live progress path so a moving bar doesn't require a busy-loop of requests; it degrades
+gracefully (a dropped stream just reconnects, since job state is durable in the `jobs` table).
+
+**HTTP API — resource-oriented, single-concern reads.** The read surface is organized so each
+resource returns **one concern**, and each TUI dashboard box polls the *same* resource its maximized
+screen does (the source-sharing principle — no box can drift from its full view). The reads:
+- `GET /stats` — the collection summary alone (active-asset counts, trashed, on-disk size, lifetime-
+  deduped). O(collection) aggregations; nothing job-, root-, or review-specific. Backs the dashboard
+  Collection box.
+- `GET /jobs` — global job history, newest-first, **paged** (`limit`/`offset`, `terminal_only`,
+  returns `total`). `GET /jobs/live` — the live set (running ≤1 + queued backlog + interrupted) in
+  one consistent read. `GET /jobs/{id}` — one job; `GET /jobs/{id}/stream` — its SSE stream.
+- `GET /reviews` — the open (`pending`) review runs across all roots. **A review is `review_runs`
+  state, not a job**, so it is its own resource (not folded into `/jobs/live`).
+- `GET /roots` — the root list (`id`, name, path, kind, counts, scan/dedup recency). `GET
+  /roots/resolve?q=<name|path>` — resolve a user-typed handle → `{id}` (the *one* name/path→id hop;
+  a query value, so a Windows path with `\`/spaces/`%` is percent-encoded and never a URL path
+  segment). `GET /roots/{id}` — one root's detail **by id** (counts, recency, its running/queued
+  jobs, its `pending_review`). `GET /roots/{id}/history` — that root's terminal job history, paged
+  (always terminal — the root's live running/queued come from `/roots/{id}`).
+
+There is **no combined `/status` snapshot** — the CLI `status` composes the global rollup client-side
+from `/stats` + `/jobs/live` + `/reviews` + `/roots` (a human summary, not a hot path). Two invariants
+this shape buys: (1) **unbounded lists are always paged** — job history (global and per-root) is never
+fetched wholesale, only a window at a time (§12); (2) **live vs. terminal are separate** — running/
+queued (small, mutable, live) come from `/jobs/live` or `/roots/{id}`, while history (large, append-
+only) is its own paged resource, so a poll of one never drags the other.
 
 **Auto-spawn handshake (race-free).** Auto-spawn on first client use must tolerate *two* clients
 racing to start the daemon at once. The client does **bind-or-connect**, not check-then-spawn: it
@@ -215,7 +239,12 @@ signals the running job to checkpoint, then exits; its `jobs` row becomes `inter
 crash — resumable), **not** `cancelled`. Cancelling is a distinct, explicit user action (TUI `[c]`
 / another terminal, §9/§12) that *does* set `cancelled` (terminal) and, for merge/review, discards
 the resumable plan. So "stop the daemon" never loses in-flight progress; only an explicit cancel
-does.
+does. **Shutdown must not hang on an open SSE stream:** an attached `/jobs/{id}/stream` never
+completes on its own (its response stays open, heartbeating), and uvicorn's graceful shutdown waits
+for in-flight request tasks — with the default (infinite) grace timeout that hangs the process,
+leaking an orphaned daemon that keeps files (e.g. `daemon.log`) open. So `/shutdown` **closes all SSE
+subscribers up front** (pushes the stream-end sentinel so each generator returns and frees its worker
+thread), and the server sets a **finite `timeout_graceful_shutdown`** as the backstop.
 
 **CLI** — thin client. `packrat scan D:\…` submits a job and **streams its progress**. Key
 property: **the job runs in the daemon, not the terminal**, so:
@@ -2606,7 +2635,11 @@ packrat status [<root>] [--json]     # global rollup, or one root's detail
 
 **No arguments — global rollup:** total assets (photo/video split), trashed count, per-root asset
 counts + scan freshness, any `interrupted` jobs (with the command to resume, §3), and the
-currently-running job plus any `queued` backlog behind it (§3 durable FIFO queue), if any.
+currently-running job plus any `queued` backlog behind it (§3 durable FIFO queue), if any. This
+rollup is **composed client-side** from the single-concern resource reads (`/stats` + `/jobs/live` +
+`/reviews` + `/roots`, §3) — there is no combined `/status` endpoint; the CLI assembles the human
+summary because it's a summary view, not a hot path. `<root>` resolves the handle to an id
+(`/roots/resolve`) then reads `/roots/{id}`.
 
 **Dedup/cleanup review state — show only what's actionable.** The one state worth surfacing is a
 **`pending` review run** (a paused dedup or cleanup awaiting the user); completed/cancelled runs are
@@ -2864,11 +2897,25 @@ where both the jobs layer and the TUI can import it without either depending on 
 - **Every job is show-able.** Each job writes a uniform `jobs.result_json` at terminal time whatever
   its outcome (§4), so history and the result card always render; the CLI's `status` surfaces the
   actionable slice of the same rows (§11).
-- **Live.** Queue/running views subscribe to the running job's **SSE stream**; snapshots poll on a
-  light timer and re-fetch immediately on the job-finished event. **ETA is computed TUI-side** from the
+- **Live.** Queue/running views subscribe to the running job's **SSE stream**; reads poll on light
+  timers and re-fetch immediately on the job-finished event. **ETA is computed TUI-side** from the
   observed rate. Keyboard-first: `↑/↓` select, `←/→` page, `Enter` drills in, `Esc` backs out (and
   quits at the dashboard), `Ctrl+Q` quits anywhere. `Ctrl+C` is left unbound so the terminal's
   copy shortcut works.
+- **Two poll cadences, single-concern fetches (matches the §3 resource API).** The **fast** timer
+  refreshes only the live job set (`/jobs/live`); a **slow** timer (+ every job-finished event)
+  refreshes the O(collection) stats (`/stats`) + roots (`/roots`) — those only move when a scan/dedup
+  completes, so a running scan never re-aggregates the whole collection every tick. The app composes
+  these into one read-model dict the pure builders read; each fetch updates only its own keys, so a
+  slow stats poll never clobbers a fresher live fetch.
+- **Job history is lazy-loaded, never fetched wholesale.** The Queue and root-detail **History**
+  sections hold only the *current page* (`limit`/`offset` against `/jobs` or `/roots/{id}/history`)
+  plus the true total, so the paginator shows `page K/N` while one window is in memory — history is
+  unbounded (no retention, §14 #10), so it must page. The page **size is the window height**, so a
+  terminal resize re-anchors the page index on the absolute offset (keep the first-visible row) and
+  refetches only when the height actually changed; a poll refetches history only when the live
+  running/queued set changed (a job entered/left = history changed), since terminal history is
+  otherwise immutable between finishes.
 
 M6 depends on two M0-runtime pieces (§3/§4): the durable FIFO **queue** and per-job
 **`root_id`/`result_json`** columns — so the TUI is a pure presentation layer on top of the runtime.
