@@ -236,16 +236,16 @@ def build_app(token: str, *, db_file=None, config_path=None):
         ok = queue.prioritize(job_id)
         return {"prioritized": ok}
 
-    @app.get("/roots/{root_id}/jobs", dependencies=[Depends(require_token)])
-    def root_jobs(root_id: int, limit: int = 50, offset: int = 0,
-                  terminal_only: bool = False):
-        """One root's current + historical jobs, newest-first (§12 per-root panel).
+    @app.get("/roots/{root_id}/history", dependencies=[Depends(require_token)])
+    def root_history(root_id: int, limit: int = 50, offset: int = 0):
+        """One root's terminal job HISTORY, newest-first, paged (§12 per-root panel).
 
-        ``offset`` + ``terminal_only`` page the History section like ``/jobs``; ``total``
-        is the true per-root count for the paginator."""
+        Always terminal-only: the root's live running/queued come from GET /roots/{id}
+        (root_detail), so this resource is purely finished jobs. ``offset`` pages it;
+        ``total`` is the true per-root history count for the paginator."""
         return {
-            "jobs": queries.root_jobs(root_id, limit, offset, terminal_only=terminal_only),
-            "total": queries.root_jobs_count(root_id, terminal_only=terminal_only),
+            "jobs": queries.root_jobs(root_id, limit, offset, terminal_only=True),
+            "total": queries.root_jobs_count(root_id, terminal_only=True),
         }
 
     @app.get("/jobs/{job_id}/stream", dependencies=[Depends(require_token)])
@@ -300,24 +300,46 @@ def build_app(token: str, *, db_file=None, config_path=None):
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
     # -- read-only snapshots -----------------------------------------
-    @app.get("/status", dependencies=[Depends(require_token)])
-    def status(root: str | None = None):
-        if root:
-            detail = queries.root_detail(root)
-            if detail is None:
-                raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
-            return {"root_detail": detail}
-        return queries.status_snapshot()
-
     @app.get("/stats", dependencies=[Depends(require_token)])
     def stats():
-        """App-wide collection stats — the dashboard Collection box (§1.1). Polled on a
-        slow cadence; only moves when a scan/dedup completes (see queries.collection_stats)."""
+        """App-wide collection summary — the dashboard Collection box (§1.1). Collection
+        aggregations ONLY (assets/photos/videos/trashed/size/deduped); no jobs, no roots,
+        no reviews (those are their own resources — /jobs, /roots, /reviews). Polled on a
+        slow cadence; only moves when a scan/dedup completes (queries.collection_stats)."""
         return queries.collection_stats()
+
+    @app.get("/reviews", dependencies=[Depends(require_token)])
+    def reviews():
+        """Open review runs across all roots (§8 B/§6.2). A review is review_runs state,
+        not a job — its own resource, so /jobs/live stays pure jobs. The per-root pending
+        review is also on GET /roots/{id}; this is the collection-wide list."""
+        return {"reviews": queries.pending_reviews()}
 
     @app.get("/roots", dependencies=[Depends(require_token)])
     def roots():
         return {"roots": queries.roots_snapshot()}
+
+    @app.get("/roots/resolve", dependencies=[Depends(require_token)])
+    def resolve_root(q: str):
+        """Resolve a user-supplied name/path to a root id (§11). The ONE place name/path→id
+        lives, so the id-keyed routes below stay clean while the CLI/TUI accept a human
+        handle. Declared BEFORE /roots/{root_id} so 'resolve' isn't parsed as an int id.
+        A path with \\/spaces/% is safe — it's the ?q= query value (encoded), not a path
+        segment. 404 when nothing matches."""
+        rid = queries.resolve_root_id(q)
+        if rid is None:
+            raise HTTPException(status_code=404, detail=f"no root at path or named {q!r}")
+        return {"id": rid}
+
+    @app.get("/roots/{root_id}", dependencies=[Depends(require_token)])
+    def root_detail(root_id: int):
+        """One root's detail by id (§11): counts, scan/dedup recency, size, the root's
+        running/queued jobs, and its pending review. History is a separate paged resource
+        (/roots/{id}/history)."""
+        detail = queries.root_detail_by_id(root_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"no root with id {root_id}")
+        return {"root_detail": detail}
 
     @app.post("/roots", dependencies=[Depends(require_token)])
     def register_root(body: RegisterRootRequest):

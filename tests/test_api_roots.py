@@ -66,8 +66,8 @@ def test_register_with_scan(client, tiny_photos):
     assert jid is not None
     d = _wait(client, jid)
     assert d["status"] == "done"
-    snap = client.get("/status", headers=_h()).json()
-    assert snap["assets"] == 2  # a.png, b.png (a_copy is a byte-dup)
+    stats = client.get("/stats", headers=_h()).json()
+    assert stats["assets"] == 2  # a.png, b.png (a_copy is a byte-dup)
 
 
 def test_scan_by_name(client, tiny_photos):
@@ -83,30 +83,35 @@ def test_scan_unknown_root_404(client):
     assert r.status_code == 404
 
 
-def test_status_root_detail(client, tiny_photos):
+def test_root_detail_by_id_and_resolve(client, tiny_photos):
+    """§12 resource model: resolve a name→id (/roots/resolve), then read /roots/{id}."""
     client.post("/roots", json={"path": str(tiny_photos), "name": "Pics", "scan": True}, headers=_h())
     # let the auto-scan finish
-    jid = None
     for _ in range(1500):
         js = client.get("/jobs", headers=_h()).json()["jobs"]
         if js and js[0]["status"] != "running":
             break
         time.sleep(0.02)
-    d = client.get("/status?root=Pics", headers=_h()).json()["root_detail"]
-    assert d["name"] == "Pics"
+    rid = client.get("/roots/resolve?q=Pics", headers=_h()).json()["id"]
+    d = client.get(f"/roots/{rid}", headers=_h()).json()["root_detail"]
+    assert d["id"] == rid and d["name"] == "Pics"
     assert d["photos"] == 2
+    # resolve also accepts the path; an unknown handle is a 404.
+    assert client.get("/roots/resolve", params={"q": str(tiny_photos)}, headers=_h()).json()["id"] == rid
+    assert client.get("/roots/resolve?q=ghost", headers=_h()).status_code == 404
+    assert client.get("/roots/999999", headers=_h()).status_code == 404
 
 
-def test_root_jobs_history_pagination(client, tiny_photos):
-    """/roots/{id}/jobs pages a root's terminal history by limit/offset with a true total."""
+def test_root_history_pagination(client, tiny_photos):
+    """/roots/{id}/history pages a root's terminal history by limit/offset with a true total."""
     client.post("/roots", json={"path": str(tiny_photos), "name": "Pics"}, headers=_h())
     rid = client.get("/roots", headers=_h()).json()["roots"][0]["id"]
     # Build several finished scan jobs on this root.
     for _ in range(4):
         r = client.post("/scan", json={"root": "Pics"}, headers=_h())
         _wait(client, r.json()["job_id"])
-    p0 = client.get(f"/roots/{rid}/jobs?limit=2&offset=0&terminal_only=true", headers=_h()).json()
-    p1 = client.get(f"/roots/{rid}/jobs?limit=2&offset=2&terminal_only=true", headers=_h()).json()
+    p0 = client.get(f"/roots/{rid}/history?limit=2&offset=0", headers=_h()).json()
+    p1 = client.get(f"/roots/{rid}/history?limit=2&offset=2", headers=_h()).json()
     assert p0["total"] == 4 and p1["total"] == 4
     ids0 = [j["id"] for j in p0["jobs"]]
     ids1 = [j["id"] for j in p1["jobs"]]
@@ -126,7 +131,8 @@ def test_probe_by_name(client, tiny_photos):
     d = _wait(client, ids[0])
     assert d["status"] == "done"
     # The completed probe recorded a signal on the root (3 media files, never scanned).
-    det = client.get("/status?root=Pics", headers=_h()).json()["root_detail"]
+    rid = client.get("/roots/resolve?q=Pics", headers=_h()).json()["id"]
+    det = client.get(f"/roots/{rid}", headers=_h()).json()["root_detail"]
     assert det["probe_new_count"] == 3
 
 

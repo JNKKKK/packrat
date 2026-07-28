@@ -444,16 +444,31 @@ class PackratApp(App):
 
         History is NOT fetched here anymore — the root-detail screen lazy-loads its own
         History page (:meth:`root_history`) the same way the Queue screen does, so this
-        is just the per-root stat/review/running/queued read (``status <root>``)."""
+        is just the per-root stat/review/running/queued read (id-keyed ``GET /roots/{id}``).
+
+        Maps the screen's root NAME → id via the already-polled roots snapshot (no extra
+        round-trip in the common case), falling back to ``/roots/resolve`` if the name
+        isn't in the cached list yet."""
         if self.offline:
             return demo.root_detail(name)
         try:
-            d = self.client.status(name).get("root_detail")
+            rid = self._root_id_for(name)
+            if rid is None:
+                return None
+            d = self.client.root_detail(rid)
             if d is not None:
                 self._inject_live_progress(d.get("running_job"))
             return d
         except Exception:
             return None
+
+    def _root_id_for(self, name: str) -> int | None:
+        """Resolve a root name → id from the cached roots snapshot (no round-trip), or via
+        ``/roots/resolve`` as a fallback (first open before the snapshot has this root)."""
+        for r in self.snapshot.get("roots", []):
+            if r.get("name") == name:
+                return r.get("id")
+        return self.client.resolve_root(name)
 
     def root_history(self, name: str, root_id: int | None, limit: int, offset: int):
         """One page of a root's terminal (finished) jobs + the true total — the root-detail

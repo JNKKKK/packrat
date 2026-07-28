@@ -33,8 +33,8 @@ def test_health_unauthenticated(client):
 
 
 def test_auth_required(client):
-    assert client.get("/status").status_code == 401
-    assert client.get("/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/stats").status_code == 401
+    assert client.get("/stats", headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
 def test_submit_and_status(client):
@@ -48,8 +48,10 @@ def test_submit_and_status(client):
             break
         time.sleep(0.02)
     assert d["status"] == "done"
-    snap = client.get("/status", headers=_h()).json()
-    assert snap["assets"] == 0 and "roots" in snap
+    # Collection summary is its own resource now (§12 resource model); roots is separate.
+    stats = client.get("/stats", headers=_h()).json()
+    assert stats["assets"] == 0
+    assert client.get("/roots", headers=_h()).json() == {"roots": []}
 
 
 def test_second_submit_enqueues_not_rejected(client):
@@ -139,19 +141,25 @@ def _run_sleepers(client, n: int) -> None:
             time.sleep(0.01)
 
 
-def test_stats_and_live_decompose_status(client):
-    """/stats + /jobs/live + /roots recompose to the /status shape (§12 decomposition)."""
-    snap = client.get("/status", headers=_h()).json()
+def test_resource_model_endpoints_are_single_concern(client):
+    """Each resource returns ONLY its concern (§12): /stats = collection summary (no jobs/
+    reviews), /jobs/live = pure jobs (no reviews), /reviews = review runs, /roots = list."""
     stats = client.get("/stats", headers=_h()).json()
     live = client.get("/jobs/live", headers=_h()).json()
-    roots = client.get("/roots", headers=_h()).json()["roots"]
-    # Stats keys are the collection box; live keys are the job sections; together (+roots)
-    # they are exactly the status snapshot.
+    reviews = client.get("/reviews", headers=_h()).json()
+    roots = client.get("/roots", headers=_h()).json()
     assert set(stats) == {"assets", "photos", "videos", "trashed", "size_bytes",
                           "lifetime_deduped"}
-    assert set(live) == {"running", "queued", "interrupted", "pending_reviews"}
-    composed = {**stats, **live, "roots": roots}
-    assert composed == snap
+    # /jobs/live is jobs-only — pending_reviews is NOT here (it's its own resource).
+    assert set(live) == {"running", "queued", "interrupted"}
+    assert "pending_reviews" not in live
+    assert set(reviews) == {"reviews"}
+    assert set(roots) == {"roots"}
+
+
+def test_status_route_is_gone(client):
+    """The combined /status snapshot was retired — the CLI composes from the resources."""
+    assert client.get("/status", headers=_h()).status_code == 404
 
 
 def test_jobs_live_route_not_shadowed_by_job_id(client):

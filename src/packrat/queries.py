@@ -69,16 +69,17 @@ def collection_stats() -> dict:
 
 
 def live_jobs() -> dict:
-    """The LIVE job state — running (≤1) + queued backlog + interrupted + pending reviews.
+    """The LIVE job state — running (≤1) + queued backlog + interrupted.
 
     Backs both the dashboard **Queue** box and the maximized **Queue** screen's live
     sections (the source-sharing principle: a box previews its maximized screen from the
-    same fetch). Read in ONE connection so running/queued/pending_reviews are mutually
-    consistent — a job can't show ``running`` in one section and ``queued`` in another
-    from the same fetch. Terminal **history** is deliberately NOT here: it is unbounded
-    and immutable, so it is lazy-loaded a page at a time (:func:`recent_jobs`), never
-    bundled into the live poll. ``running`` is at most one row (the single-worker queue,
-    §3); ``queued`` is uncapped and paginated client-side.
+    same fetch). Read in ONE connection so running/queued are mutually consistent — a job
+    can't show ``running`` in one section and ``queued`` in another from the same fetch.
+    Terminal **history** is deliberately NOT here: it is unbounded and immutable, so it is
+    lazy-loaded a page at a time (:func:`recent_jobs`). **Pending reviews are NOT here
+    either** — a review is ``review_runs`` state, not a job (its own resource,
+    :func:`pending_reviews` / ``GET /reviews``). ``running`` is at most one row (the
+    single-worker queue, §3); ``queued`` is uncapped and paginated client-side.
     """
     conn = _ro()
     try:
@@ -96,23 +97,38 @@ def live_jobs() -> dict:
         # shared root_holder), else runnable ('waiting for worker'). Computed here so
         # `status`/TUI show the same reasons the live queue enforces at dequeue.
         queued = _queued_with_reasons(conn)
-        pending_reviews = conn.execute(
+        return {
+            "running": _job_dict(running) if running else None,
+            "queued": queued,
+            "interrupted": [dict(r) for r in interrupted],
+        }
+    finally:
+        conn.close()
+
+
+def pending_reviews() -> list[dict]:
+    """Every open (``pending``) review run across all roots — backs ``GET /reviews``.
+
+    A review is ``review_runs`` state, NOT a job — its own resource, so ``/jobs/live``
+    stays pure jobs. Each entry carries the run's stage thresholds + a ``counts`` bundle
+    (the per-stage tallies the CLI/TUI render). The per-root pending review also appears
+    on ``GET /roots/{id}`` (``pending_review``); this is the collection-wide list the
+    dashboard badge + ``packrat status`` global view read.
+    """
+    conn = _ro()
+    try:
+        rows = conn.execute(
             "SELECT rr.id, rr.root_id, rr.run_type, rr.stage, rr.created_at, "
             "  rr.t_photo_recompress, rr.t_photo_edit, rr.t_match_video, r.name root_name "
             "FROM review_runs rr JOIN roots r ON r.id = rr.root_id "
             "WHERE rr.status='pending'"
         ).fetchall()
-        pending_list = []
-        for r in pending_reviews:
+        out = []
+        for r in rows:
             d = dict(r)
             d["counts"] = _review_counts(conn, r)
-            pending_list.append(d)
-        return {
-            "running": _job_dict(running) if running else None,
-            "queued": queued,
-            "interrupted": [dict(r) for r in interrupted],
-            "pending_reviews": pending_list,
-        }
+            out.append(d)
+        return out
     finally:
         conn.close()
 
@@ -120,11 +136,12 @@ def live_jobs() -> dict:
 def status_snapshot() -> dict:
     """Global rollup (§11) — the CLI ``status`` / ``--json`` shape.
 
-    Now a COMPOSITION of the decomposed reads (:func:`collection_stats`,
-    :func:`live_jobs`, :func:`roots_snapshot`) so the CLI keeps its one-call,
+    A COMPOSITION of the decomposed reads (:func:`collection_stats`, :func:`live_jobs`,
+    :func:`pending_reviews`, :func:`roots_snapshot`) so the CLI keeps its one-call,
     everything-in-one-dict contract while the TUI polls each concern separately (§12).
     """
-    return {**collection_stats(), **live_jobs(), "roots": roots_snapshot()}
+    return {**collection_stats(), **live_jobs(),
+            "pending_reviews": pending_reviews(), "roots": roots_snapshot()}
 
 
 def _annotate_queued_row(conn, row) -> dict:
@@ -245,122 +262,160 @@ def roots_snapshot() -> list[dict]:
         conn.close()
 
 
-def root_detail(root_arg: str) -> dict | None:
-    """One root's detail for ``packrat status <root>`` (§11).
+def resolve_root_id(root_arg: str) -> int | None:
+    """Resolve a user-supplied ``root_arg`` (path-then-name, §11) to a root **id**, or None.
 
-    Resolves ``root_arg`` as path-then-name (§11) via a read-only connection, then
-    reports its counts + scan recency + any pending review run.
+    The one place name/path→id resolution lives, backing ``GET /roots/resolve?q=`` — so
+    the id-keyed resource routes (``/roots/{id}`` etc.) can be addressed cleanly while the
+    CLI/TUI still accept a human-typed name or path. A path with ``\\``/spaces/``%`` is
+    fine here: it never enters a URL path segment (it's the ``?q=`` query value, encoded).
+    """
+    conn = _ro()
+    try:
+        match = _resolve_root_ro(conn, root_arg)
+        return match["id"] if match is not None else None
+    finally:
+        conn.close()
+
+
+def root_detail(root_arg: str) -> dict | None:
+    """One root's detail by name/path for the CLI ``packrat status <root>`` (§11).
+
+    Resolves ``root_arg`` (path-then-name) then delegates to :func:`root_detail_by_id`.
+    The TUI addresses the id-keyed route directly (it holds the id from the roots list).
     """
     conn = _ro()
     try:
         match = _resolve_root_ro(conn, root_arg)
         if match is None:
             return None
-        rid = match["id"]
-        photos = conn.execute(
-            "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
-            "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='photo'",
-            (rid,),
-        ).fetchone()["c"]
-        videos = conn.execute(
-            "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
-            "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='video'",
-            (rid,),
-        ).fetchone()["c"]
-        row = conn.execute(
-            "SELECT COUNT(*) c, MAX(last_seen_at) last_scan_at, "
-            "  COALESCE(SUM(size), 0) size_bytes "
-            "FROM file_instances WHERE root_id=?",
-            (rid,),
-        ).fetchone()
-        instances, last_scan_at, size_bytes = row["c"], row["last_scan_at"], row["size_bytes"]
-        pending = conn.execute(
-            "SELECT id, run_type, stage, created_at, "
-            "  t_photo_recompress, t_photo_edit, t_match_video FROM review_runs "
-            "WHERE root_id=? AND status='pending'",
-            (rid,),
-        ).fetchone()
-        pending_dict = None
-        if pending is not None:
-            pending_dict = dict(pending)
-            pending_dict["counts"] = _review_counts(conn, pending)
-        # Recency of the last SUCCESSFUL review per type (§11 "deduped/cleaned <age>"):
-        # the newest `completed` run's confirmed_at. A dedup run is `completed` only after
-        # it went through ALL stages (or was already clean — both land status='completed'
-        # via _finalize_completed / the already-clean path). A `cancelled` run does NOT
-        # count. NULL → never (successfully) deduped/cleaned.
-        last_dedup_at = _last_completed_at(conn, rid, "dedup")
-        last_cleanup_at = _last_completed_at(conn, rid, "cleanup-perceptual")
-        # The root's live queue view (§12 root detail): the job running ON this root
-        # (if any), plus this root's queued backlog with blocked reasons. Both key off
-        # jobs.root_id, so a `scan --all` (root_id NULL) isn't attributed to any root.
-        running_row = conn.execute(
-            "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.started_at, "
-            "  j.params_json, r.name AS root_name FROM jobs j "
-            "LEFT JOIN roots r ON r.id=j.root_id WHERE j.status='running' AND j.root_id=?",
-            (rid,),
-        ).fetchone()
-        running_dict = _job_dict(running_row) if running_row is not None else None
-        queued_here = _queued_with_reasons(conn, root_id=rid)
-        # Most-recent persisted scan result for this root + its problem files, so
-        # `status <root>` can re-render the last scan's banner + undecodable/error
-        # paths (the §scan-results read path). Newest by job_id.
-        last_scan = conn.execute(
-            "SELECT * FROM scan_results WHERE root_id=? ORDER BY job_id DESC LIMIT 1",
-            (rid,),
-        ).fetchone()
-        # Undecodable problem files are re-derived LIVE from the catalog (current state),
-        # NOT read from the frozen last-scan snapshot — a `cleanup --undecodable` or a
-        # decoder-upgrade rescan changes the set without necessarily writing a fresh
-        # snapshot, so the frozen rows go stale (they'd keep listing files just deleted).
-        # This mirrors what scan itself persists (§8 A2 Phase 5 re-derives the same way),
-        # only computed at read time so `status` always reflects the root as it is now.
-        undec_rows = conn.execute(
-            "SELECT DISTINCT fi.path, a.media_type, a.decode_error detail "
-            "FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
-            "WHERE fi.root_id=? AND a.undecodable=1 ORDER BY fi.path",
-            (rid,),
-        ).fetchall()
-        problem_files = [
-            {"path": r["path"], "media_type": r["media_type"],
-             "problem": "undecodable", "detail": r["detail"]}
-            for r in undec_rows
-        ]
-        # Read-errors have no asset to re-derive, so they stay per-pass (from the last scan).
-        if last_scan is not None:
-            problem_files += [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT path, media_type, problem, detail FROM scan_problem_files "
-                    "WHERE job_id=? AND root_id=? AND problem='read-error' ORDER BY path",
-                    (last_scan["job_id"], rid),
-                ).fetchall()
-            ]
-        return {
-            "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
-            "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
-            # Probe signal (§8 A2b): last_probe_at (recency) + probe_new_count (the dot
-            # driver — >0 means unscanned files await a scan; §12 rung 1).
-            "last_probe_at": match["last_probe_at"],
-            "probe_new_count": match["probe_new_count"],
-            # Dedup-dirty signal (§12 rung 3): 1 ⇒ scanned content awaiting a (re-)dedup.
-            "needs_dedup": match["needs_dedup"],
-            "last_scan_at": last_scan_at,
-            "photos": photos, "videos": videos, "instances": instances,
-            "size_bytes": size_bytes,             # total on-disk bytes of this root's files
-            "pending_review": pending_dict,
-            "last_dedup_at": last_dedup_at,       # newest completed dedup (§11 "deduped <age>")
-            "last_cleanup_at": last_cleanup_at,   # newest completed perceptual-cleanup
-            "running_job": running_dict,
-            "queued_jobs": queued_here,
-            "last_scan": dict(last_scan) if last_scan is not None else None,
-            # Live current undecodable count (see problem_files above) — the banner shows
-            # this, not the stale last-scan number, so count + list agree post-cleanup.
-            "undecodable_current": len(undec_rows),
-            "problem_files": problem_files,
-        }
+        return _root_detail_from_match(conn, match)
     finally:
         conn.close()
+
+
+def root_detail_by_id(root_id: int) -> dict | None:
+    """One root's detail by **id** — backs ``GET /roots/{id}`` (§11 resource model).
+
+    Same payload as :func:`root_detail`; keyed by the canonical id rather than a
+    name/path resolve, so the TUI (which holds the id) reads it without a resolve hop.
+    """
+    conn = _ro()
+    try:
+        match = conn.execute("SELECT * FROM roots WHERE id=?", (root_id,)).fetchone()
+        if match is None:
+            return None
+        return _root_detail_from_match(conn, match)
+    finally:
+        conn.close()
+
+
+def _root_detail_from_match(conn, match) -> dict:
+    """Build the per-root detail payload from a resolved ``roots`` row (shared core of
+    :func:`root_detail` / :func:`root_detail_by_id`)."""
+    rid = match["id"]
+    photos = conn.execute(
+        "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
+        "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='photo'",
+        (rid,),
+    ).fetchone()["c"]
+    videos = conn.execute(
+        "SELECT COUNT(DISTINCT fi.asset_id) c FROM file_instances fi "
+        "JOIN assets a ON a.id=fi.asset_id WHERE fi.root_id=? AND a.media_type='video'",
+        (rid,),
+    ).fetchone()["c"]
+    row = conn.execute(
+        "SELECT COUNT(*) c, MAX(last_seen_at) last_scan_at, "
+        "  COALESCE(SUM(size), 0) size_bytes "
+        "FROM file_instances WHERE root_id=?",
+        (rid,),
+    ).fetchone()
+    instances, last_scan_at, size_bytes = row["c"], row["last_scan_at"], row["size_bytes"]
+    pending = conn.execute(
+        "SELECT id, run_type, stage, created_at, "
+        "  t_photo_recompress, t_photo_edit, t_match_video FROM review_runs "
+        "WHERE root_id=? AND status='pending'",
+        (rid,),
+    ).fetchone()
+    pending_dict = None
+    if pending is not None:
+        pending_dict = dict(pending)
+        pending_dict["counts"] = _review_counts(conn, pending)
+    # Recency of the last SUCCESSFUL review per type (§11 "deduped/cleaned <age>"):
+    # the newest `completed` run's confirmed_at. A dedup run is `completed` only after
+    # it went through ALL stages (or was already clean — both land status='completed'
+    # via _finalize_completed / the already-clean path). A `cancelled` run does NOT
+    # count. NULL → never (successfully) deduped/cleaned.
+    last_dedup_at = _last_completed_at(conn, rid, "dedup")
+    last_cleanup_at = _last_completed_at(conn, rid, "cleanup-perceptual")
+    # The root's live queue view (§12 root detail): the job running ON this root
+    # (if any), plus this root's queued backlog with blocked reasons. Both key off
+    # jobs.root_id, so a `scan --all` (root_id NULL) isn't attributed to any root.
+    running_row = conn.execute(
+        "SELECT j.id, j.type, j.root_id, j.status, j.total, j.done, j.started_at, "
+        "  j.params_json, r.name AS root_name FROM jobs j "
+        "LEFT JOIN roots r ON r.id=j.root_id WHERE j.status='running' AND j.root_id=?",
+        (rid,),
+    ).fetchone()
+    running_dict = _job_dict(running_row) if running_row is not None else None
+    queued_here = _queued_with_reasons(conn, root_id=rid)
+    # Most-recent persisted scan result for this root + its problem files, so
+    # `status <root>` can re-render the last scan's banner + undecodable/error
+    # paths (the §scan-results read path). Newest by job_id.
+    last_scan = conn.execute(
+        "SELECT * FROM scan_results WHERE root_id=? ORDER BY job_id DESC LIMIT 1",
+        (rid,),
+    ).fetchone()
+    # Undecodable problem files are re-derived LIVE from the catalog (current state),
+    # NOT read from the frozen last-scan snapshot — a `cleanup --undecodable` or a
+    # decoder-upgrade rescan changes the set without necessarily writing a fresh
+    # snapshot, so the frozen rows go stale (they'd keep listing files just deleted).
+    # This mirrors what scan itself persists (§8 A2 Phase 5 re-derives the same way),
+    # only computed at read time so `status` always reflects the root as it is now.
+    undec_rows = conn.execute(
+        "SELECT DISTINCT fi.path, a.media_type, a.decode_error detail "
+        "FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
+        "WHERE fi.root_id=? AND a.undecodable=1 ORDER BY fi.path",
+        (rid,),
+    ).fetchall()
+    problem_files = [
+        {"path": r["path"], "media_type": r["media_type"],
+         "problem": "undecodable", "detail": r["detail"]}
+        for r in undec_rows
+    ]
+    # Read-errors have no asset to re-derive, so they stay per-pass (from the last scan).
+    if last_scan is not None:
+        problem_files += [
+            dict(r)
+            for r in conn.execute(
+                "SELECT path, media_type, problem, detail FROM scan_problem_files "
+                "WHERE job_id=? AND root_id=? AND problem='read-error' ORDER BY path",
+                (last_scan["job_id"], rid),
+            ).fetchall()
+        ]
+    return {
+        "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
+        "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
+        # Probe signal (§8 A2b): last_probe_at (recency) + probe_new_count (the dot
+        # driver — >0 means unscanned files await a scan; §12 rung 1).
+        "last_probe_at": match["last_probe_at"],
+        "probe_new_count": match["probe_new_count"],
+        # Dedup-dirty signal (§12 rung 3): 1 ⇒ scanned content awaiting a (re-)dedup.
+        "needs_dedup": match["needs_dedup"],
+        "last_scan_at": last_scan_at,
+        "photos": photos, "videos": videos, "instances": instances,
+        "size_bytes": size_bytes,             # total on-disk bytes of this root's files
+        "pending_review": pending_dict,
+        "last_dedup_at": last_dedup_at,       # newest completed dedup (§11 "deduped <age>")
+        "last_cleanup_at": last_cleanup_at,   # newest completed perceptual-cleanup
+        "running_job": running_dict,
+        "queued_jobs": queued_here,
+        "last_scan": dict(last_scan) if last_scan is not None else None,
+        # Live current undecodable count (see problem_files above) — the banner shows
+        # this, not the stale last-scan number, so count + list agree post-cleanup.
+        "undecodable_current": len(undec_rows),
+        "problem_files": problem_files,
+    }
 
 
 def _resolve_root_ro(conn, root_arg: str):

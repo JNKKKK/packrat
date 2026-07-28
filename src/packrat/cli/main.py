@@ -232,12 +232,19 @@ def status(
     """Print collection state (read-only, never blocked by a running job)."""
     client = _client_or_spawn()
     if root:
+        # Resolve the user handle (name/path) → id, then read the id-keyed resource (§11).
         try:
-            resp = client.status(root)
+            rid = client.resolve_root(root)
+            if rid is None:
+                typer.echo(f"no root at path or named {root!r}", err=True)
+                raise typer.Exit(1)
+            d = client.root_detail(rid)
         except DaemonError as exc:
             typer.echo(_detail(exc), err=True)
             raise typer.Exit(1)
-        d = resp["root_detail"]
+        if d is None:
+            typer.echo(f"no root at path or named {root!r}", err=True)
+            raise typer.Exit(1)
         if json_out:
             typer.echo(json.dumps(d, indent=2))
             return
@@ -270,7 +277,7 @@ def status(
                 typer.echo(f"    {q.get('label') or q['type']} · {why}")
         _print_last_scan(d)
         return
-    snap = client.status()
+    snap = client.status_snapshot()
     if json_out:
         typer.echo(json.dumps(snap, indent=2))
         return

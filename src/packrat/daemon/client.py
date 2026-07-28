@@ -88,14 +88,12 @@ class DaemonClient:
         r = self._get(f"/jobs?limit={limit}&offset={offset}&terminal_only=true")
         return r["jobs"], r.get("total", len(r["jobs"]))
 
-    def root_jobs(self, root_id: int, limit: int = 50) -> list[dict]:
-        """One root's current + historical jobs, newest-first (§12 per-root panel)."""
-        return self._get(f"/roots/{root_id}/jobs?limit={limit}")["jobs"]
-
     def root_history_page(self, root_id: int, limit: int, offset: int) -> tuple[list[dict], int]:
-        """One page of a root's finished jobs + true total (root-detail History, §12)."""
-        r = self._get(
-            f"/roots/{root_id}/jobs?limit={limit}&offset={offset}&terminal_only=true")
+        """One page of a root's terminal job history + true total (root-detail History, §12).
+
+        Hits the id-keyed ``/roots/{id}/history`` resource (always terminal — the root's
+        live running/queued come from ``root_detail``)."""
+        r = self._get(f"/roots/{root_id}/history?limit={limit}&offset={offset}")
         return r["jobs"], r.get("total", len(r["jobs"]))
 
     def cancel_job(self, job_id: int) -> bool:
@@ -250,24 +248,61 @@ class DaemonClient:
         """Submit an ``untrash`` job (§6.3); returns the job id (always enqueued)."""
         return int(self._post("/untrash", {"path": path, "dry_run": dry_run})["job_id"])
 
-    # -- snapshots -------------------------------------------------------
-    def status(self, root: str | None = None) -> dict:
-        if root:
-            return self._get("/status", params={"root": root})
-        return self._get("/status")
-
+    # -- snapshots (§12 resource model) ----------------------------------
     def stats(self) -> dict:
-        """App-wide collection stats — the dashboard Collection box (§1.1). Cheap to poll
-        rarely; only moves when a scan/dedup completes (decomposed from /status, §12)."""
+        """App-wide collection summary — the dashboard Collection box (§1.1). Cheap to poll
+        rarely; only moves when a scan/dedup completes. Collection aggregations only (no
+        jobs/roots/reviews — those are their own resources)."""
         return self._get("/stats")
 
     def live_jobs(self) -> dict:
-        """Live job state (running + queued + interrupted + pending_reviews), one
-        consistent read — the dashboard Queue box + maximized Queue live sections (§12)."""
+        """Live job state (running + queued + interrupted), one consistent read — the
+        dashboard Queue box + maximized Queue live sections (§12). Pure jobs: reviews are
+        a separate resource (:meth:`reviews`)."""
         return self._get("/jobs/live")
+
+    def reviews(self) -> list[dict]:
+        """Open review runs across all roots (§8 B/§6.2) — the ``/reviews`` resource. A
+        review is review_runs state, not a job, so it's read separately from /jobs/live."""
+        return self._get("/reviews")["reviews"]
 
     def roots(self) -> list[dict]:
         return self._get("/roots")["roots"]
+
+    def status_snapshot(self) -> dict:
+        """The composed global rollup for ``packrat status`` (no args) — the old ``/status``
+        dict shape, now assembled CLIENT-SIDE from the decomposed resources (§12): /stats +
+        /jobs/live + /reviews + /roots. The daemon no longer serves a combined snapshot;
+        the CLI is a human summary (not a hot path), so composing here keeps its rich
+        output while the endpoints stay single-concern."""
+        live = self.live_jobs()
+        return {
+            **self.stats(),
+            "running": live.get("running"),
+            "queued": live.get("queued", []),
+            "interrupted": live.get("interrupted", []),
+            "pending_reviews": self.reviews(),
+            "roots": self.roots(),
+        }
+
+    def resolve_root(self, arg: str) -> int | None:
+        """Resolve a user handle (name/path) to a root id via ``/roots/resolve`` (§11), or
+        None if nothing matches. The one name/path→id hop before the id-keyed routes."""
+        try:
+            return int(self._get("/roots/resolve", params={"q": arg})["id"])
+        except DaemonError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def root_detail(self, root_id: int) -> dict | None:
+        """One root's detail by id via ``GET /roots/{id}`` (§11), or None if unknown."""
+        try:
+            return self._get(f"/roots/{root_id}")["root_detail"]
+        except DaemonError as exc:
+            if "404" in str(exc):
+                return None
+            raise
 
     # -- helpers ---------------------------------------------------------
     def _get(self, path: str, params: dict | None = None) -> dict:

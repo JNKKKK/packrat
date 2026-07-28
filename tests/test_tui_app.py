@@ -363,12 +363,6 @@ class _FakeClient:
     def __init__(self):
         self.calls = []
 
-    def status(self, root=None):
-        from packrat.tui import demo
-        if root:
-            return {"root_detail": demo.root_detail(root)}
-        return demo.status_snapshot(running=True)
-
     def stats(self):
         from packrat.tui import demo
         snap = demo.status_snapshot(running=True)
@@ -378,12 +372,29 @@ class _FakeClient:
     def live_jobs(self):
         from packrat.tui import demo
         snap = demo.status_snapshot(running=True)
-        return {k: snap.get(k) for k in
-                ("running", "queued", "interrupted", "pending_reviews")}
+        return {k: snap.get(k) for k in ("running", "queued", "interrupted")}
+
+    def reviews(self):
+        from packrat.tui import demo
+        return demo.status_snapshot(running=True).get("pending_reviews", [])
 
     def roots(self):
         from packrat.tui import demo
         return demo.status_snapshot(running=True)["roots"]
+
+    def resolve_root(self, arg):
+        from packrat.tui import demo
+        for r in demo.status_snapshot(running=True)["roots"]:
+            if r["name"] == arg:
+                return r["id"]
+        return None
+
+    def root_detail(self, root_id):
+        from packrat.tui import demo
+        for r in demo.status_snapshot(running=True)["roots"]:
+            if r["id"] == root_id:
+                return demo.root_detail(r["name"])
+        return None
 
     def list_jobs(self, limit=20):
         from packrat.tui import demo
@@ -400,9 +411,6 @@ class _FakeClient:
 
     def root_history_page(self, rid, limit, offset):
         return [], 0
-
-    def root_jobs(self, rid, limit=50):
-        return []
 
     def submit_scan(self, root, **kw):
         self.calls.append(("scan", root)); return 901
@@ -578,16 +586,22 @@ def _press_seq(keys):
 class _DownClient(_FakeClient):
     """A client whose every call fails — stands in for an unreachable daemon."""
 
-    def status(self, root=None):
-        raise RuntimeError("daemon unreachable")
-
     def stats(self):
         raise RuntimeError("daemon unreachable")
 
     def live_jobs(self):
         raise RuntimeError("daemon unreachable")
 
+    def reviews(self):
+        raise RuntimeError("daemon unreachable")
+
     def roots(self):
+        raise RuntimeError("daemon unreachable")
+
+    def resolve_root(self, arg):
+        raise RuntimeError("daemon unreachable")
+
+    def root_detail(self, root_id):
         raise RuntimeError("daemon unreachable")
 
     def list_jobs(self, limit=20):
@@ -597,9 +611,6 @@ class _DownClient(_FakeClient):
         raise RuntimeError("daemon unreachable")
 
     def root_history_page(self, rid, limit, offset):
-        raise RuntimeError("daemon unreachable")
-
-    def root_jobs(self, rid, limit=50):
         raise RuntimeError("daemon unreachable")
 
 
@@ -909,24 +920,23 @@ def test_root_detail_does_not_refetch_per_keypress():
     class CountingClient(_FakeClient):
         def __init__(self):
             super().__init__()
-            self.status_calls = 0
+            self.detail_calls = 0
 
-        def status(self, root=None):
-            if root:
-                self.status_calls += 1
-            return super().status(root)
+        def root_detail(self, root_id):
+            self.detail_calls += 1
+            return super().root_detail(root_id)
 
     fc = CountingClient()
 
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         assert _screen(app) == "RootDetailScreen"
-        before = fc.status_calls
+        before = fc.detail_calls
         # Focus the Jobs panel and navigate — pure re-renders, NO new daemon fetch.
         await pilot.press("j")
         await pilot.press("down"); await pilot.press("down"); await pilot.press("up")
         await pilot.pause()
-        assert fc.status_calls == before, "navigation must not re-hit status <root>"
+        assert fc.detail_calls == before, "navigation must not re-hit /roots/{id}"
 
     app = PackratApp(client=fc, offline=False)
 
