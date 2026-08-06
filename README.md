@@ -53,7 +53,7 @@ Check collection state anytime (read-only, never blocked by a running job):
 uv run packrat status          # collection rollup + any running/interrupted job
 ```
 
-### Add and scan a folder (M1/M2)
+### Add and scan a folder
 
 Register a folder as a root, then scan it to fingerprint its contents (BLAKE3 +
 perceptual PDQ). `--scan` does both in one step:
@@ -82,7 +82,7 @@ uv run pytest -q               # quiet
 uv run pytest tests/test_jobs.py -v   # one file, verbose
 ```
 
-Confirm the decode/fingerprint wheels work on your machine (the §9.1 smoke test):
+Confirm the decode/fingerprint wheels work on your machine (the decode smoke test):
 
 ```sh
 uv run packrat smoke-test                    # report which deps are available
