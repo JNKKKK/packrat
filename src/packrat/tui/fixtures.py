@@ -1,4 +1,4 @@
-"""Shared sample data for the TUI golden-frame tests (§Testing).
+"""Shared sample data for the TUI golden-frame tests.
 
 Query-shaped sample dicts matching exactly what :mod:`packrat.queries` returns
 (``status_snapshot`` / ``roots_snapshot`` / ``root_detail`` / job rows + per-op
@@ -32,7 +32,7 @@ def _rj(d: dict) -> str:
 # (id ASC) — exactly what the query returns; the TUI sorts client-side (the [s] cycle),
 # whose default "most-recently-registered" is an id-DESC reordering (→ Downloads, _Trash,
 # Photos, Camera, iPhone, the mockup dashboard order).
-# The 4-state dot (§12) spans all states across these fixtures: iPhone ◉ green
+# The 4-state dot spans all states across these fixtures: iPhone ◉ green
 # (deduped, not dirty), Camera ◉ yellow (needs_dedup=1 — new content since its last dedup),
 # Photos ◐ grey (probe found new files: probe_new_count>0), Downloads ◉ yellow (scanned,
 # never deduped). (The ○ "never scanned" grey lives in the demo's larger root set.)
@@ -103,12 +103,12 @@ RUNNING_SCAN = _job(
     id=418, type="scan", root_id=1, status="running", total=13204, done=8912,
     started_at="2026-07-15T09:04:00", params_json=_rj({"root_id": 1}),
     root_name="iPhone", label="scan iPhone",
-    # `_eta_s` is the TUI-side estimate (§cross-cutting) — the app derives it live
+    # `_eta_s` is the TUI-side estimate — the app derives it live
     # from the SSE rate; the fixture pins it to the mockup's "ETA 4m" (240s).
     _eta_s=240,
 )
 
-# Recent/terminal jobs with per-op result_json (§Result cards).
+# Recent/terminal jobs with per-op result_json (Result cards).
 SCAN_DONE = _job(
     id=418, type="scan", root_id=1, status="done", total=13204, done=13204,
     started_at="2026-07-15T09:04:00", finished_at="2026-07-15T09:12:00",
@@ -139,7 +139,7 @@ MERGE_DONE = _job(
 
 # A paused dedup: the analyze job COMPLETED (status='done') and left a pending
 # review_run — the card keys off result_json.review_status='pending' to show the
-# ⚠ awaiting-review card with its confirm/cancel actions (§5.4), NOT a live bar.
+# ⚠ awaiting-review card with its confirm/cancel actions, NOT a live bar.
 DEDUP_PENDING = _job(
     id=430, type="dedup", root_id=3, status="done", total=None, done=0,
     started_at="2026-07-15T11:31:00", finished_at="2026-07-15T11:31:00",
@@ -176,7 +176,7 @@ DEDUP_CLEAN = _job(
 # A paused `cleanup --trash-perceptual`: the analyze job COMPLETED and left a pending
 # review_run — like DEDUP_PENDING, but op='cleanup', so the card must route its
 # confirm/cancel to `cleanup … --confirm` (not dedup). Its analyze emits
-# review_status='pending' (jobs/cleanup.py), which the card keys off (§6.2).
+# review_status='pending' (jobs/cleanup.py), which the card keys off.
 CLEANUP_PENDING = _job(
     id=462, type="cleanup", root_id=3, status="done", finished_at="2026-07-15T11:40:00",
     params_json=_rj({"root_id": 3, "mode": "perceptual"}), root_name="Photos",
@@ -260,7 +260,7 @@ def recent_jobs() -> list[dict]:
 
 # --- root_detail() ---------------------------------------------------------
 def root_detail_pending() -> dict:
-    """iPhone with a pending dedup review (§3.1, the actionable case)."""
+    """iPhone with a pending dedup review (the actionable case)."""
     return {
         "id": 1, "name": "iPhone", "path": r"D:\Backup\iPhone", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-10T10:00:00",
@@ -295,11 +295,11 @@ def root_detail_pending() -> dict:
 
 def perceptual_action(group_no, *, is_external=0, is_lead=0, lead_reason=None,
                       distance=0, media_type="photo", path=None) -> dict:
-    """A synthetic stage-2/3 perceptual ``review_actions`` row-dict (§8 B).
+    """A synthetic stage-2/3 perceptual ``review_actions`` row-dict.
 
     One factory for the shape so the fixture and the golden test can't drift from the real
-    row the dedup job emits (they had to move in lockstep when ``is_lead``/``lead_reason``
-    were added). ``path`` defaults to a representative internal/external sample path."""
+    row the dedup job emits (including ``is_lead``/``lead_reason``). ``path`` defaults to a
+    representative internal/external sample path."""
     if path is None:
         path = "\\\\nas\\x" if is_external else "C:\\x"
     return {"kind": "perceptual", "group_no": group_no, "is_external": is_external,
@@ -308,7 +308,7 @@ def perceptual_action(group_no, *, is_external=0, is_lead=0, lead_reason=None,
 
 
 def root_detail_stage2_rich() -> dict:
-    """iPhone parked at stage 2 with a RICH `stage2` bundle (§8 B item-3 metrics).
+    """iPhone parked at stage 2 with a RICH `stage2` bundle (item-3 metrics).
 
     Carries a synthetic keep-lead/PDQ/make-up breakdown big enough to overflow the
     Review box's responsive cap at the reference size — so it exercises the scroll path
@@ -340,7 +340,7 @@ def root_detail_stage2_rich() -> dict:
 
 
 def root_detail_clean() -> dict:
-    """Camera, no pending review (§3.2, the clean case)."""
+    """Camera, no pending review (the clean case)."""
     return {
         "id": 2, "name": "Camera", "path": r"E:\Photos", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-08T08:00:00",
@@ -364,11 +364,11 @@ def root_detail_clean() -> dict:
 
 
 def root_detail_cleanup_pending() -> dict:
-    """Photos with a pending ``cleanup --trash-perceptual`` review (§6.2).
+    """Photos with a pending ``cleanup --trash-perceptual`` review.
 
     Its ``counts`` carry the CLEANUP shape (``{exact, perceptual, network}``), NOT the
     dedup shape — so the Review box must branch on ``run_type`` to render real numbers
-    (regression: it read dedup keys → a false "0 to delete · 0 groups / 0 members")."""
+    (reading dedup keys here would yield a false "0 to delete · 0 groups / 0 members")."""
     return {
         "id": 3, "name": "Photos", "path": r"E:\Photos2", "kind": "library",
         "enabled": 1, "last_full_scan_at": "2026-07-14T20:00:00",

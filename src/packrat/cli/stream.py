@@ -1,4 +1,4 @@
-"""Client-side progress streaming with Ctrl-C-detaches semantics (§3, §11).
+"""Client-side progress streaming with Ctrl-C-detaches semantics.
 
 Key property: the job runs **in the daemon, not the terminal**. Streaming just
 renders SSE events. So:

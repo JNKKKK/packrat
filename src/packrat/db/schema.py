@@ -1,20 +1,20 @@
-"""SQLite schema (§4) — the durable catalog.
+"""SQLite schema — the durable catalog.
 
 The full DDL lives here as one string applied inside a transaction by
 :func:`packrat.db.connection.init_db`. Design points carried over verbatim from
 the plan:
 
 - **presence = row existence.** ``file_instances`` has no ``present`` flag; a gone
-  file has its row deleted (§4, §2).
+  file has its row deleted.
 - **two asset states only** (``active``/``trashed``); a forgotten asset is deleted,
-  cascading its dependent rows via ``ON DELETE CASCADE`` (§4).
-- **partial-unique indexes** encode the per-root exclusivity invariants (§3):
+  cascading its dependent rows via ``ON DELETE CASCADE``.
+- **partial-unique indexes** encode the per-root exclusivity invariants:
   one ``pending`` review_run per root; one open ``merge_run`` per dest root.
 - ``similarity_edges`` is stored with **canonical ordering** ``asset_a < asset_b``
-  and a ``UNIQUE(asset_a, asset_b)`` so an undirected pair has exactly one row (§4).
+  and a ``UNIQUE(asset_a, asset_b)`` so an undirected pair has exactly one row.
 - ``review_actions`` FKs to assets/instances are **NOT** cascade-linked — a scan of a
   referenced root may forget a now-gone asset mid-review, and the plan keys off the
-  stored ``path`` (§4, §3 owned-vs-referenced).
+  stored ``path`` (owned-vs-referenced).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ SCHEMA_VERSION = 1
 
 SCHEMA_SQL = """
 -- ---------------------------------------------------------------------------
--- roots: registered folder trees (§4). name is globally unique (case-insensitive
+-- roots: registered folder trees. name is globally unique (case-insensitive
 -- via NOCASE collation). kind ∈ library|trash.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS roots (
@@ -39,15 +39,15 @@ CREATE TABLE IF NOT EXISTS roots (
     enabled            INTEGER NOT NULL DEFAULT 1,
     ignore_globs       TEXT,                 -- JSON array of per-root --ignore patterns
     last_full_scan_at  TEXT,
-    last_probe_at      TEXT,                 -- when `probe` last completed on this root (§8 A2b)
+    last_probe_at      TEXT,                 -- when `probe` last completed on this root
     probe_new_count    INTEGER NOT NULL DEFAULT 0,
     -- new/changed files probe last saw awaiting a scan. Set by a completed probe; CLEARED
     -- to 0 by a completed scan of the root. This ONE field carries the whole dot-precedence
-    -- signal (§12): because a completed scan always resets it to 0, `count > 0` means exactly
+    -- signal: because a completed scan always resets it to 0, `count > 0` means exactly
     -- "a probe found unscanned files and no scan has consumed them yet" — no separate
     -- `last_activity` column is needed. Offline probe writes nothing (never reads as "clean").
     needs_dedup        INTEGER NOT NULL DEFAULT 0
-    -- 1 ⇒ this root has scanned content awaiting a (re-)dedup (§12 ◉ yellow). SET by the
+    -- 1 ⇒ this root has scanned content awaiting a (re-)dedup (◉ yellow). SET by the
     -- events that introduce dedup-able content — a scan that indexed ≥1 genuinely new/
     -- changed asset, or a merge that registered ≥1 new instance — and CLEARED to 0 when a
     -- dedup run reaches `completed` (incl. the already-clean path). This is an EVENT signal,
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS roots (
 );
 
 -- ---------------------------------------------------------------------------
--- assets: a unique piece of content, identified by content_hash (§4).
+-- assets: a unique piece of content, identified by content_hash.
 -- status ∈ active|trashed (no 'missing'). undecodable is orthogonal to status.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS assets (
@@ -71,25 +71,25 @@ CREATE TABLE IF NOT EXISTS assets (
     duration_s    REAL,
     captured_at   TEXT,
     status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'trashed')),
-    undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels (§4)
+    undecodable   INTEGER NOT NULL DEFAULT 0, -- bytes hashed OK but decoder rejected pixels
     decode_error  TEXT,                       -- last decoder failure detail (debugging POC wheels)
     codec         TEXT,                       -- video codec name (h264|hevc|av1|vp9|…) from the decode
                                               --   probe; VIDEO only (NULL for photo/undecodable). Feeds
-                                              --   the video keep-lead's codec-efficiency weight (§8 B).
+                                              --   the video keep-lead's codec-efficiency weight.
     added_at      TEXT,
     trashed_at    TEXT,
     trash_reason  TEXT
 );
 
 -- ---------------------------------------------------------------------------
--- file_instances: a physical file at a path. presence = row existence (§4).
+-- file_instances: a physical file at a path. presence = row existence.
 -- UNIQUE(root_id, path): one row per physical file; scan/merge upsert on this key.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS file_instances (
     id            INTEGER PRIMARY KEY,
     asset_id      INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
     root_id       INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
-    path          TEXT NOT NULL,             -- canonical long-path-safe form (§8 A1)
+    path          TEXT NOT NULL,             -- canonical long-path-safe form
     filename      TEXT,
     size          INTEGER,
     mtime         REAL,
@@ -100,7 +100,7 @@ CREATE INDEX IF NOT EXISTS ix_file_instances_asset ON file_instances(asset_id);
 CREATE INDEX IF NOT EXISTS ix_file_instances_root  ON file_instances(root_id);
 
 -- ---------------------------------------------------------------------------
--- phash: one PDQ row per photo asset (§4/§5.3). algo always 'pdq'.
+-- phash: one PDQ row per photo asset. algo always 'pdq'.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS phash (
     asset_id  INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS phash (
 );
 
 -- ---------------------------------------------------------------------------
--- vphash: one row per sampled video frame (§4/§5.3). Same PDQ as photos.
+-- vphash: one row per sampled video frame. Same PDQ as photos.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS vphash (
     asset_id     INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS vphash (
 );
 
 -- ---------------------------------------------------------------------------
--- embeddings: one CLIP vector per asset, only if scan --embed (§4/§7).
+-- embeddings: one CLIP vector per asset, only if scan --embed.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS embeddings (
     asset_id  INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 
 -- ---------------------------------------------------------------------------
--- similarity_edges: pairwise near-dups; written by dedup, NOT scan (§4/§5.3).
+-- similarity_edges: pairwise near-dups; written by dedup, NOT scan.
 -- CANONICAL ORDERING: asset_a < asset_b, so UNIQUE(asset_a, asset_b) dedups pairs.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS similarity_edges (
@@ -149,10 +149,10 @@ CREATE TABLE IF NOT EXISTS similarity_edges (
 CREATE INDEX IF NOT EXISTS ix_sim_b ON similarity_edges(asset_b);
 
 -- ---------------------------------------------------------------------------
--- review_runs: one stateful review lifecycle per target root (§4). For dedup a
+-- review_runs: one stateful review lifecycle per target root. For dedup a
 -- SINGLE row spans the whole 3-stage sequence; `stage` (1=exact, 2=recompression,
 -- 3=minor-edit) is the cursor within it and `stage_phase` (staged|applied) marks
--- the apply-then-advance crash window (§8 B Phase 7). status stays 'pending' until
+-- the apply-then-advance crash window (Phase 7). status stays 'pending' until
 -- the last non-empty stage applies. partial UNIQUE(root_id) WHERE status='pending'.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS review_runs (
@@ -161,12 +161,12 @@ CREATE TABLE IF NOT EXISTS review_runs (
     run_type      TEXT NOT NULL CHECK (run_type IN ('dedup', 'cleanup-perceptual')),
     status        TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'cancelled')),
     stage         INTEGER NOT NULL DEFAULT 1,  -- dedup stage cursor 1..3 (cleanup: 1)
-    stage_phase   TEXT,                        -- staged | applied (§8 B Phase 7)
+    stage_phase   TEXT,                        -- staged | applied (Phase 7)
     prefer_internal INTEGER NOT NULL DEFAULT 0, -- dedup --prefer-internal: keep the INTERNAL
                                                -- copy on exact-match survivor + keep-lead ties
                                                -- (default 0 = external is master). Locked at
-                                               -- analyze; carries across every --confirm (§8 B).
-    t_photo_recompress INTEGER,  -- PDQ thresholds snapshotted at analyze (§8 B): the bands the
+                                               -- analyze; carries across every --confirm.
+    t_photo_recompress INTEGER,  -- PDQ thresholds snapshotted at analyze: the bands the
     t_photo_edit       INTEGER,  -- run's stages + histogram bins are derived from, so the log and
     t_match_video      INTEGER,  -- box read ONE source and can't drift from a later config edit.
                                  -- Nullable: a row predating these columns reads NULL → callers
@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS review_runs (
                                                -- result_json.deleted: bumped at each stage's
                                                -- apply, drained (→0) when a confirm job records
                                                -- its result, so a crash-resumed confirm still
-                                               -- credits the lifetime metric without double-count (§8 B)
+                                               -- credits the lifetime metric without double-count
     created_at    TEXT,
     confirmed_at  TEXT
 );
@@ -183,7 +183,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_runs_pending_root
     ON review_runs(root_id) WHERE status = 'pending';
 
 -- ---------------------------------------------------------------------------
--- review_actions: the persisted, crash-safe plan for a review_run (§4).
+-- review_actions: the persisted, crash-safe plan for a review_run.
 -- path is the AUTHORITATIVE target; asset_id/instance_id/survivor_instance_id
 -- are reference-only and MUST tolerate becoming dangling (NOT cascade-linked).
 -- `stage` tags which dedup stage the action belongs to (--confirm applies
@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS review_actions (
     member_no                INTEGER,
     is_external              INTEGER,
     is_lead                  INTEGER,          -- stage-2 keep-lead: 1 on the suggested lead
-    lead_reason              TEXT,             -- why the lead won (ranking-key decision level, §8 B)
+    lead_reason              TEXT,             -- why the lead won (ranking-key decision level)
     matched_trashed_asset_id INTEGER,         -- cleanup-perceptual only
     distance                 INTEGER,
     shortcut_name            TEXT
@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS review_actions (
 CREATE INDEX IF NOT EXISTS ix_review_actions_run ON review_actions(run_id);
 
 -- ---------------------------------------------------------------------------
--- merge_runs: one merge lifecycle; the frozen plan header + cross-op guard (§4).
+-- merge_runs: one merge lifecycle; the frozen plan header + cross-op guard.
 -- partial UNIQUE(dest_root_id) WHERE status IN ('planning','copying').
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS merge_runs (
@@ -232,7 +232,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_merge_runs_open_dest
     ON merge_runs(dest_root_id) WHERE status IN ('planning', 'copying');
 
 -- ---------------------------------------------------------------------------
--- merge_plan_items: the persisted, FROZEN per-source-file plan (§4/§8 C).
+-- merge_plan_items: the persisted, FROZEN per-source-file plan.
 -- No metadata columns — dims/duration/captured_at are probed JIT in Phase 3.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS merge_plan_items (
@@ -251,24 +251,24 @@ CREATE TABLE IF NOT EXISTS merge_plan_items (
 );
 CREATE INDEX IF NOT EXISTS ix_merge_plan_items_run ON merge_plan_items(run_id);
 -- One row per (run, source file): Phase 1 UPSERTs each file's hash by this key so a
--- crash-resumed merge keeps already-hashed rows instead of re-reading the source (§8 C).
+-- crash-resumed merge keeps already-hashed rows instead of re-reading the source.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_merge_plan_items_run_relpath
     ON merge_plan_items(run_id, source_rel_path);
 
 -- ---------------------------------------------------------------------------
--- jobs: the durable queue + progress-display counter (§4). total/done drive the
+-- jobs: the durable queue + progress-display counter. total/done drive the
 -- bar only; resume is from each op's own durable state.
---   status: 'queued' (in the durable FIFO backlog, not yet started — §3 guarantee 1),
+--   status: 'queued' (in the durable FIFO backlog, not yet started — guarantee 1),
 --     'running', then a terminal 'done'/'error'/'cancelled'/'interrupted'.
 --   root_id: the single root this job concerns (NULL for scan --all / untrash /
---     trash-refresh) — the TUI's per-root job list keys off it (§12).
+--     trash-refresh) — the TUI's per-root job list keys off it.
 --   enqueued_at: when the row was created (queued); started_at: when the worker began
 --     it (NULL while queued); dequeue order = priority DESC, then enqueued_at (ties by id).
 --   priority: 0 = normal FIFO; a higher value jumps the job to the front of the
---     runnable-first dequeue scan (`packrat jobs prioritize <id>`, §3/§11). Durable, so
+--     runnable-first dequeue scan (`packrat jobs prioritize <id>`). Durable, so
 --     a prioritized job stays ahead across a daemon restart.
 --   result_json: a uniform, human-showable OUTCOME summary written at terminal time
---     by EVERY job whatever its status — the single surface the TUI renders (§12).
+--     by EVERY job whatever its status — the single surface the TUI renders.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY,
@@ -282,7 +282,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at  TEXT,
     error        TEXT,
     result_json  TEXT,
-    priority     INTEGER NOT NULL DEFAULT 0,   -- jobs prioritize (§3/§11); higher = dequeued first
+    priority     INTEGER NOT NULL DEFAULT 0,   -- jobs prioritize; higher = dequeued first
     params_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_status ON jobs(status);
@@ -290,7 +290,7 @@ CREATE INDEX IF NOT EXISTS ix_jobs_root ON jobs(root_id);
 
 -- ---------------------------------------------------------------------------
 -- scan_results: one row per (scan job, root) — the persisted scan report so a
--- later `status <root>` (and the M6 TUI) can re-render a past scan. One scan of
+-- later `status <root>` (and the TUI) can re-render a past scan. One scan of
 -- N roots (--all) writes N rows. Keyed to the jobs row; cascades when it's gone.
 -- Counters mirror the scan-done banner; profile_json holds the --profile snapshot.
 -- ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS scan_results (
     candidates        INTEGER, new INTEGER, exact_dup INTEGER, backfilled INTEGER,
     matches_trashed   INTEGER, skipped_fastpath INTEGER, undecodable INTEGER,
     errors            INTEGER, deleted_instances INTEGER, forgotten_assets INTEGER,
-    moved             INTEGER,   -- files relinked to a new path without re-hashing (§8 A2 step 4a)
+    moved             INTEGER,   -- files relinked to a new path without re-hashing
     root_offline      INTEGER NOT NULL DEFAULT 0,
     profile_json      TEXT,     -- ScanProfiler.snapshot_json(), NULL unless --profile
     created_at        TEXT,

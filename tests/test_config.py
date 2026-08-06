@@ -1,4 +1,4 @@
-"""Config auto-create / reload / fallback / malformed handling (§9.2)."""
+"""Config auto-create / reload / fallback / malformed handling."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ def test_defaults_match_plan():
     c = config.Config()
     assert c.match.t_photo_recompress == 10
     assert c.match.t_photo_edit == 32
-    assert c.match.t_photo_recompress < c.match.t_photo_edit  # band ordering (§5.3)
+    assert c.match.t_photo_recompress < c.match.t_photo_edit  # band ordering
     assert c.match.t_match_video == 90
-    # video keep-lead knobs (§8 B)
+    # video keep-lead knobs
     assert c.match.video_bitrate_tie_pct == 10.0
     assert c.match.codec_weights["hevc"] == 2.0 > c.match.codec_weights["h264"] == 1.0
     assert c.video.sample_frames == 12
@@ -66,7 +66,7 @@ def test_malformed_raises(tmp_path):
 
 def test_scalar_where_extension_list_expected_raises(tmp_path):
     # allowlist.photo = "jpg" (a scalar, not an array) must be rejected at LOAD naming
-    # the key — not stored as a str and detonated later in media_exts() (§9.2).
+    # the key — not stored as a str and detonated later in media_exts().
     p = tmp_path / "bad_photo.toml"
     p.write_text('[allowlist]\nphoto = "jpg"\n', encoding="utf-8")
     with pytest.raises(config.ConfigError, match=r"allowlist\.photo"):

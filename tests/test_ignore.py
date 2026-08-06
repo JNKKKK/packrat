@@ -1,4 +1,4 @@
-"""Ignore set: allowlist + gitignore-style glob matching (§8 A1)."""
+"""Ignore set: allowlist + gitignore-style glob matching."""
 
 from __future__ import annotations
 

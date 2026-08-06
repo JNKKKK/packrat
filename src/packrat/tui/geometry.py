@@ -73,7 +73,7 @@ class Geometry:
         """Body rows available to content, above the pinned (possibly multi-row) footer."""
         return self.body_rows - self.footer_rows   # ref: 21 (1-row footer)
 
-    # --- dashboard layout (§1) ------------------------------------------
+    # --- dashboard layout ------------------------------------------
     # The dashboard stacks THREE full-width sections top→bottom:
     #   1. top: hjoin(logo, collection box) — logo left, collection right
     #   2. roots box (full width)
@@ -134,14 +134,15 @@ class Geometry:
     # --- maximized-list row budgets ------------------------------------
     @property
     def roots_list_rows(self) -> int:
-        # §2.1 fills the frame: content_rows − header − (legend+pager line) − rule.
+        # The maximized Roots list fills the frame: content_rows − header −
+        # (legend+pager line) − rule.
         return self.content_rows - 3             # ref 18
 
     @property
     def jobs_rows(self) -> int:
-        return 4 + self.dh                       # §3 root-detail Jobs list (ref 4)
+        return 4 + self.dh                       # root-detail Jobs list (ref 4)
 
-    # §4 queue: running(2) + blank(1) + queued-header(1) + queued_rows + blank(1)
+    # queue: running(2) + blank(1) + queued-header(1) + queued_rows + blank(1)
     # + recent-header(1) + recent_rows == content_rows. So the two windows split
     # content_rows − 6 (pagers moved onto the header lines, no standalone rows).
     @property

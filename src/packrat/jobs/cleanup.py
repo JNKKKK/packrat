@@ -1,12 +1,12 @@
-r"""The ``cleanup`` operation (§6.2, §9.1) — cull trashed/undecodable files from a folder.
+r"""The ``cleanup`` operation — cull trashed/undecodable files from a folder.
 
 From the user's view: **delete files in ``<folder>`` that are junk.** ``cleanup``
 requires exactly one **mode** (no bare default), dispatched by the ``mode`` param:
 
 - **``--trash-exact``** (``mode='exact'``) — one-shot, CLI-orchestrated: a *preview*
-  job refreshes the trash collection (§6.1) and counts library files whose asset is
+  job refreshes the trash collection and counts library files whose asset is
   ``trashed`` by **exact hash**; the CLI prompts a typed confirmation showing the count
-  (and any non-recyclable network paths, §10), then submits an *apply* job that recycles
+  (and any non-recyclable network paths), then submits an *apply* job that recycles
   them. No staging folder, no ``review_runs`` row — exact-hash matching is
   false-positive-free.
 
@@ -19,22 +19,22 @@ requires exactly one **mode** (no bare default), dispatched by the ``mode`` para
   mode — both exact and still-staged perceptual deletions apply together at ``--confirm``.
 
 - **``--undecodable``** (``mode='undecodable'``) — one-shot (same preview → count-confirm
-  → apply shape as ``--trash-exact``): delete the folder's ``undecodable=1`` files (§9.1
-  — bytes hashed OK but the decoder rejected the pixels, so they carry no perceptual
+  → apply shape as ``--trash-exact``): delete the folder's ``undecodable=1`` files
+  (bytes hashed OK but the decoder rejected the pixels, so they carry no perceptual
   signature and can never dedup) **and mark each deleted asset ``trashed``**
   (``trash_reason='cleanup-undecodable'``) so a re-import of the same corrupt bytes is
   excluded from a future merge. Does **not** refresh the trash collection — it targets
   the folder's own undecodables, independent of the trashed set.
 
-The two trash modes first **refresh the trash collection** (§6.1) so the trashed set
-is current — this runs for real even under ``--dry-run`` (§6.1's always-absorb rule).
+The two trash modes first **refresh the trash collection** so the trashed set
+is current — this runs for real even under ``--dry-run`` (the always-absorb rule).
 ``--undecodable`` does not refresh.
 
-Reuses the M3 machinery: the §5.3 :mod:`matcher` (here **active-vs-trashed**, the
+Reuses the dedup machinery: the :mod:`matcher` (here **active-vs-trashed**, the
 single wider ``t_photo_edit`` cutoff, **no** recompress/edit banding), the
 :mod:`review` plumbing (staging paths + audit trail), and the ``review_runs`` /
 ``review_actions`` state (single-stage: ``stage=1``). The reconcile analyze-rollback
-(§3) already handles ``type='cleanup'``.
+already handles ``type='cleanup'``.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ RUN_TYPE = "cleanup-perceptual"
 # job dispatch
 # ---------------------------------------------------------------------------
 def _run_cleanup(ctx: JobContext) -> None:
-    """Dispatch by mode + sub-verb (§6.2).
+    """Dispatch by mode + sub-verb.
 
     ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable`` (the three required
     ``cleanup`` modes). ``exact`` and ``undecodable`` are one-shot (CLI-orchestrated
@@ -68,9 +68,9 @@ def _run_cleanup(ctx: JobContext) -> None:
     ``--confirm``/``--cancel`` review run (which also bundles exact-trash deletions).
     """
     p = ctx.params
-    # §6.2: a cleanup that DELETES (or opens a review) requires an EXPLICIT, valid mode —
+    # A cleanup that DELETES (or opens a review) requires an EXPLICIT, valid mode —
     # there is no bare default that deletes. The CLI enforces this, but the daemon is the
-    # authoritative contract (§1.6), so validate here too: never silently fall into a real
+    # authoritative contract, so validate here too: never silently fall into a real
     # delete mode on a mode-less API call. A confirm/cancel acts on an existing pending
     # perceptual run (no mode needed); a read-only PREVIEW is harmless (acts on nothing),
     # so a mode-less preview is allowed and treated as the exact-trash count.
@@ -109,7 +109,7 @@ def _run_cleanup(ctx: JobContext) -> None:
         # preview (a mode's step-1) or any --dry-run: refresh + report, act on nothing.
         _preview(ctx, mode=mode, dry_run=bool(p.get("dry_run")))
         action = "dry-run" if p.get("dry_run") else "preview"
-    # Uniform outcome (§4). Each leaf sets ctx._cleanup_outcome with its numbers;
+    # Uniform outcome. Each leaf sets ctx._cleanup_outcome with its numbers;
     # fall back to just the action/mode label if a path recorded none.
     outcome = getattr(ctx, "_cleanup_outcome", None) or {}
     ctx.set_result({"op": "cleanup", "mode": mode, "action": action,
@@ -121,7 +121,7 @@ def _resolve_library_root(ctx: JobContext) -> dict:
 
 
 def _reject_if_held(ctx, root: dict) -> None:
-    """§3/§6.2 shared lock: reject if the root has *another* active op (not ours).
+    """Shared lock: reject if the root has *another* active op (not ours).
 
     A pending dedup review, a pending cleanup from a different invocation, or an
     in-flight merge stages/plans against this root — cleanup must not delete files
@@ -135,7 +135,7 @@ def _reject_if_held(ctx, root: dict) -> None:
 # match discovery (pure DB / fingerprint math)
 # ---------------------------------------------------------------------------
 def _exact_match_instances(db, root_id: int) -> list[dict]:
-    """Library instances in ``root_id`` whose asset is ``trashed`` (exact hash, §6.2).
+    """Library instances in ``root_id`` whose asset is ``trashed`` (exact hash).
 
     A byte-identical copy of trashed content shares its content_hash → same asset →
     the instance's asset is ``trashed``. False-positive-free.
@@ -151,7 +151,7 @@ def _exact_match_instances(db, root_id: int) -> list[dict]:
 
 
 def _undecodable_instances(db, root_id: int) -> list[dict]:
-    """Library instances in ``root_id`` whose asset is ``undecodable=1`` (§9.1).
+    """Library instances in ``root_id`` whose asset is ``undecodable=1``.
 
     These are files whose bytes hashed fine but whose pixels/frames the decoder
     rejected (corrupt, unsupported codec, missing wheel), so they carry no perceptual
@@ -171,9 +171,9 @@ def _undecodable_instances(db, root_id: int) -> list[dict]:
 
 
 def _perceptual_candidates(ctx, root_id: int) -> list[dict]:
-    """Folder instances whose (active) asset perceptually matches a *trashed* asset (§6.2).
+    """Folder instances whose (active) asset perceptually matches a *trashed* asset.
 
-    Runs the §5.3 matcher with the folder's active assets as targets and the whole
+    Runs the matcher with the folder's active assets as targets and the whole
     trashed set as the pool (the wider ``t_photo_edit`` cutoff / video frame-vote —
     **no** dedup-style recompress/edit banding). Each matched target asset's
     library-folder instances become candidates; records which trashed asset it
@@ -214,7 +214,7 @@ def _perceptual_candidates(ctx, root_id: int) -> list[dict]:
     candidates: list[dict] = []
     seq = 0
     for target_asset, (trashed_asset, distance) in best.items():
-        # Every library-folder instance of this matched asset is a candidate (§6.2).
+        # Every library-folder instance of this matched asset is a candidate.
         insts = db.query(
             "SELECT id fid, path FROM file_instances WHERE asset_id=? AND root_id=? ORDER BY id",
             (target_asset, root_id),
@@ -256,7 +256,7 @@ def _preview(ctx: JobContext, *, mode: str, dry_run: bool) -> None:
                                 "summary": f"undecodable · {len(undec)} would delete"}
         return
 
-    # exact / perceptual both need the trashed set current → refresh (real even in dry-run, §6.1).
+    # exact / perceptual both need the trashed set current → refresh (real even in dry-run).
     trash.refresh_trash(ctx)
     exact = _exact_match_instances(ctx.db, root_id)
     n_net = sum(1 for m in exact if fsutil.is_network_path(m["path"]))
@@ -295,7 +295,7 @@ def _apply_default_exact(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# UNDECODABLE APPLY (§9.1) — delete the folder's undecodable files + mark trashed
+# UNDECODABLE APPLY — delete the folder's undecodable files + mark trashed
 # ===========================================================================
 def _apply_undecodable(ctx: JobContext) -> None:
     """One-shot delete of the folder's undecodable files; mark each asset ``trashed``."""
@@ -344,7 +344,7 @@ def _apply_oneshot(ctx: JobContext, *, mode, find, backup, trash_reason, empty_m
 
 
 # ===========================================================================
-# PERCEPTUAL ANALYZE (§6.2) — open pending run + stage the candidates
+# PERCEPTUAL ANALYZE — open pending run + stage the candidates
 # ===========================================================================
 def _analyze_perceptual(ctx: JobContext) -> None:
     db = ctx.db
@@ -387,8 +387,8 @@ def _analyze_perceptual(ctx: JobContext) -> None:
         audit_dir, "proposed.json",
         _proposed_json(ctx, root, run_id, exact_actions, staged, skipped),
     )
-    # Outcome carries `review_status='pending'` (mirrors dedup analyze, §8 B) so the
-    # M6 result card / root-detail Review box detect the awaiting-review state and
+    # Outcome carries `review_status='pending'` (mirrors dedup analyze) so the
+    # result card / root-detail Review box detect the awaiting-review state and
     # surface the [o]/[g]/[k] actions — otherwise a paused cleanup looked "done".
     ctx._cleanup_outcome = {
         "review_status": "pending", "stage": 1, "run_id": run_id,
@@ -400,7 +400,7 @@ def _analyze_perceptual(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# CONFIRM (§6.2) — apply exact + still-staged perceptual deletions together
+# CONFIRM — apply exact + still-staged perceptual deletions together
 # ===========================================================================
 def _confirm(ctx: JobContext) -> None:
     db = ctx.db
@@ -429,7 +429,7 @@ def _confirm(ctx: JobContext) -> None:
             f"{review.PERCEPTUAL_TRASH} staging folder is missing — aborting (did you delete it?)."
         )
 
-    # delete-default: a still-present shortcut → delete; removed/renamed → spare (§6.2).
+    # delete-default: a still-present shortcut → delete; removed/renamed → spare.
     perceptual_del = [a for a in perceptual
                       if review.path_exists(os.path.join(stage_dir, a["shortcut_name"]))]
     intended = exact + perceptual_del
@@ -465,7 +465,7 @@ def _confirm(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# CANCEL (§6.2) — discard the pending perceptual run, delete nothing
+# CANCEL — discard the pending perceptual run, delete nothing
 # ===========================================================================
 def _cancel(ctx: JobContext) -> None:
     db = ctx.db
@@ -490,13 +490,13 @@ def _cancel(ctx: JobContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# staging (perceptual candidates only — delete-default; §6.2 step 4)
+# staging (perceptual candidates only — delete-default)
 # ---------------------------------------------------------------------------
 def _materialize(ctx, root_path, run_id, candidates):
     """Stat-before-create ``.lnk`` for each perceptual candidate; persist rows.
 
     Returns ``(staged, skipped)``. A vanished target is skipped + lazily forgotten
-    (its active asset at zero instances is forgotten — a plain delete, §6). Only a
+    (its active asset at zero instances is forgotten — a plain delete). Only a
     shortcut actually on disk is persisted: in this **delete-default** folder confirm
     reads a *present* shortcut as "delete", so an unwritten shortcut simply means the
     file isn't offered — safe (it re-surfaces on a later cleanup), never a silent delete.
@@ -574,14 +574,14 @@ def _write_manifest(stage_dir, staged) -> None:
 
 
 # ---------------------------------------------------------------------------
-# apply one deletion (lazy liveness gate, §6.2 step 6 / §8 B Phase 6)
+# apply one deletion (lazy liveness gate)
 # ---------------------------------------------------------------------------
 def _new_out() -> dict:
     return {"exact_deleted": 0, "perceptual_deleted": 0, "undecodable_deleted": 0, "deleted": 0,
             "already_gone": 0, "network": 0, "dispositions": []}
 
 
-# Which `out` counter each trash_reason increments (§6.2/§9.1).
+# Which `out` counter each trash_reason increments.
 _REASON_COUNTER = {
     None: "exact_deleted",                          # exact-trash: asset already trashed
     "cleanup-perceptual": "perceptual_deleted",     # confirmed near-dup of trashed content
@@ -599,7 +599,7 @@ def _delete_one(db, action: dict, out: dict, *, trash_reason: str | None) -> Non
       confirmed this content is junk; drop the instance and, if the asset now has zero
       instances, flip it to ``trashed`` with that reason (fingerprints retained) so a
       future merge excludes a re-import. If the file was *already gone* on disk, a
-      reason still means "forget an orphaned active asset" (a plain delete, §6) — we
+      reason still means "forget an orphaned active asset" (a plain delete) — we
       don't resurrect it as trashed from a stale row.
     """
     marks_trash = trash_reason is not None
@@ -648,7 +648,7 @@ def _delete_one(db, action: dict, out: dict, *, trash_reason: str | None) -> Non
 
 
 # ---------------------------------------------------------------------------
-# audit JSON + reporting (§8.1, §10)
+# audit JSON + reporting
 # ---------------------------------------------------------------------------
 
 def _proposed_json(ctx, root, run_id, exact_actions, staged, skipped) -> dict:
@@ -717,10 +717,10 @@ register_job(
     JobSpec(
         type="cleanup",
         handler=_run_cleanup,
-        # owned_root drives the DEQUEUE gate (§3): a cleanup that TOUCHES the root —
+        # owned_root drives the DEQUEUE gate: a cleanup that TOUCHES the root —
         # analyze, preview, one-shot apply, dry-run — must not run while another op
         # holds it, so it declares the root and the queue holds it in the backlog
-        # until the holder clears (§6.2). Only confirm/cancel own None: they act on
+        # until the holder clears. Only confirm/cancel own None: they act on
         # this run's OWN pending review_run, so gating them on it would deadlock
         # (the gate would see their own holder). `_reject_if_held` stays as
         # gate-backed defense (with the single-worker slot it can no longer fire).

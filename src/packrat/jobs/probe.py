@@ -1,10 +1,10 @@
-r"""The ``probe`` job (§8 A2b) — is there anything new here worth a scan?
+r"""The ``probe`` job — is there anything new here worth a scan?
 
 Probe is scan's cheap *discovery* half without the multi-hour *fingerprinting*
 half. It answers ONE question about a root — *are there files here we haven't
 scanned yet?* — **without hashing, decoding, or PDQ-ing anything**, and records the
 answer as a per-root signal (``roots.probe_new_count``) the TUI surfaces as a new
-status-dot state (§12). Runs every 24 h per root via the periodic scheduler
+status-dot state. Runs every 24 h per root via the periodic scheduler
 (:mod:`packrat.jobs.scheduler`); also a first-class CLI verb (``packrat probe``).
 
 What it does (all read-only on the catalog):
@@ -22,11 +22,11 @@ What it does (all read-only on the catalog):
 The one write, on **clean completion** (not offline): set ``last_probe_at=now`` and
 ``probe_new_count=<n found>`` — which may be **0** (found nothing). Writing 0 is
 correct and important: it means "a probe ran and there's nothing unscanned," so the
-dot stays whatever the scan/dedup state says (§12 rung ladder). An **offline /
-unreadable** root (SMB blip, §10.1) writes **nothing** — absence of a readable
+dot stays whatever the scan/dedup state says (rung ladder). An **offline /
+unreadable** root (SMB blip) writes **nothing** — absence of a readable
 listing ≠ "no new files"; an unreachable root must never read as "clean."
 
-**Concurrency (§3).** Probe **owns its root** (``owned_root=root_id``), so a probe
+**Concurrency.** Probe **owns its root** (``owned_root=root_id``), so a probe
 waits in the durable backlog until its root is idle — reusing the dequeue gate
 verbatim, exactly like ``scan <root>`` does. It is non-destructive, so reconcile
 drains a queued probe normally; an interrupted running probe just re-runs
@@ -58,21 +58,21 @@ def _run_probe(ctx: JobContext) -> None:
     row = db.query_one("SELECT * FROM roots WHERE id=?", (root_id,))
     if row is None:
         raise ValueError(f"no such root id: {root_id}")
-    # Trash roots are never scanned (§6.1), so they are never probed either. (The API
+    # Trash roots are never scanned, so they are never probed either. (The API
     # /probe endpoint + `probe --all` filter to library roots, so this is a belt-and-
     # braces guard for a directly-submitted job.)
     if row["kind"] == "trash":
         raise ValueError(
-            f"{row['name']!r} is a trash root; probe never inspects trash folders (§6.1)"
+            f"{row['name']!r} is a trash root; probe never inspects trash folders"
         )
 
     ctx.log(f"probing {row['name']} ({row['path']})")
     ignore = IgnoreSet.build(ctx.config, roots.ignore_globs_of(row))
     en = enumerate_root(row["path"], ignore)
 
-    # Offline / unreadable root (§10.1): write NO signal — an unreachable root must
+    # Offline / unreadable root: write NO signal — an unreachable root must
     # never be recorded as "0 new files" (that would wrongly clear a real pending
-    # signal). Report it so the §12 job card shows the outcome.
+    # signal). Report it so the job card shows the outcome.
     if en.root_offline:
         ctx.log(f"{row['name']} is offline/unreadable — no probe signal written.")
         ctx.set_result({
@@ -118,7 +118,7 @@ register_job(
         type="probe",
         handler=_run_probe,
         # Probe OWNS its root → held in the backlog until the root is idle (dequeue
-        # gate, §3), exactly like `scan <root>`. Non-destructive → drains normally on
+        # gate), exactly like `scan <root>`. Non-destructive → drains normally on
         # reconcile; idempotent on re-run.
         owned_root=lambda params: params.get("root_id"),
     )

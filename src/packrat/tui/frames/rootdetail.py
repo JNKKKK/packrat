@@ -1,4 +1,4 @@
-"""The RootDetailScreen screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The RootDetailScreen screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from .mergepicker import MergePickerScreen
 
 
 # ---------------------------------------------------------------------------
-# Root detail (§3)
+# Root detail
 # ---------------------------------------------------------------------------
 class RootDetailScreen(FrameScreen):
     BINDINGS = [
@@ -53,11 +53,11 @@ class RootDetailScreen(FrameScreen):
         # "jobs"); within the Jobs panel, [r]/[q]/[h] pick the sub-section (each with
         # its own cursor + page). Unfocused by default.
         self.focus: str | None = None
-        self.job_focus = "running"       # default Jobs sub-section (§3, matches Queue)
+        self.job_focus = "running"       # default Jobs sub-section (matches Queue)
         self.cursors = {"running": 0, "queued": 0, "history": 0}
         self.pages = {"running": 0, "queued": 0, "history": 0}
         self.review_scroll = 0           # ↑/↓ offset when the Review box overflows its cap
-        # History is LAZY-loaded a page at a time (§12), like the Queue screen: running +
+        # History is LAZY-loaded a page at a time, like the Queue screen: running +
         # queued come from the detail dict (the live snapshot read), but the terminal-job
         # history is unbounded, so we hold only the current page + its true total count.
         self._history: list[dict] = []
@@ -74,14 +74,14 @@ class RootDetailScreen(FrameScreen):
                    "[e] review  [J] jobs  Esc")
     FOOTER_REVIEW = ("[o] open in Explorer   [g] confirm stage   [k] cancel run   "
                      "Esc unfocus")
-    # Stage-2 dedup also offers the bulk keep-suggested confirm (§8 B --keep-suggested).
+    # Stage-2 dedup also offers the bulk keep-suggested confirm (--keep-suggested).
     FOOTER_REVIEW_STAGE2 = ("[o] open in Explorer   [g] confirm stage   "
                             "[b] keep suggested   [k] cancel run   Esc unfocus")
     FOOTER_REVIEW_EMPTY = "no pending review — nothing to act on   Esc unfocus"
     FOOTER_JOBS = ("[r]/[q]/[h] section   ↑/↓ select   ←/→ page   [Enter] result   "
                    "Esc unfocus")
 
-    # The three cleanup modes (§6.2) offered by [c]; label → CLI flag. Labels kept
+    # The three cleanup modes offered by [c]; label → CLI flag. Labels kept
     # short enough to fit the choice modal (≤ ~54 cells) without wrapping.
     CLEANUP_MODES = [
         ("trash-exact  (delete byte-identical trash)", "--trash-exact"),
@@ -259,7 +259,7 @@ class RootDetailScreen(FrameScreen):
         return self._sections().get(section, [])
 
     def _section_rows(self, section: str) -> int:
-        # The queued/history window heights the body used this frame (§3 panel split).
+        # The queued/history window heights the body used this frame (panel split).
         from ..screens.rootdetail import panel_section_rows
         return panel_section_rows(self._detail or {}, self._geo)[section]
 
@@ -351,11 +351,11 @@ class RootDetailScreen(FrameScreen):
         if job:
             self.app.push_screen(JobCard(job))
 
-    # -- per-root ops (§3): each maps to a CLI verb (§1.6), submitted for real
+    # -- per-root ops: each maps to a CLI verb, submitted for real
     #    online via the daemon client; offline shows the "would run" notice.
 
     #: [s] scan-type prompt. Cursor 0 = Normal (fast-path skip), so a plain [Enter]
-    #: keeps the incremental default; option 1 maps to `scan --full` (§8 A2 step 4).
+    #: keeps the incremental default; option 1 maps to `scan --full`.
     #: Labels kept ≤ ~54 cells so the choice modal doesn't clip them (like CLEANUP_MODES).
     SCAN_TYPE_OPTIONS = [
         "Normal  (fast-path skip; relink moves, no re-hash)",
@@ -380,7 +380,7 @@ class RootDetailScreen(FrameScreen):
                         prompt="How should packrat scan this root?"),
             after)
 
-    #: [d] dedup master-preference prompt (§8 B --prefer-internal). Cursor 0 = default
+    #: [d] dedup master-preference prompt (--prefer-internal). Cursor 0 = default
     #: (external is the master), so a plain [Enter] keeps today's behavior.
     DEDUP_PREFER_OPTIONS = [
         "Prefer external (keep the other root's copy)",
@@ -407,12 +407,12 @@ class RootDetailScreen(FrameScreen):
             after)
 
     def action_merge(self) -> None:
-        # [m] → the §3.3 merge-from picker (this root is the destination).
+        # [m] → the merge-from picker (this root is the destination).
         if self.is_active and self._detail is not None:
             self.app.push_screen(MergePickerScreen(self._detail))
 
     def action_cleanup(self) -> None:
-        """[c] → pick one of the 3 cleanup modes (§6.2), then run it."""
+        """[c] → pick one of the 3 cleanup modes, then run it."""
         if not self.is_active:
             return
         options = [label for label, _ in self.CLEANUP_MODES]
@@ -427,7 +427,7 @@ class RootDetailScreen(FrameScreen):
             cmd = f"packrat cleanup {root} {flag}"
             if mode == "perceptual":
                 # Stateful analyze → pause: the bare submit IS the real step; the user
-                # reviews staging and then confirms via the Review box's [g] (§6.2). No
+                # reviews staging and then confirms via the Review box's [g]. No
                 # count-confirm here — perceptual matches stage for review, not a tally.
                 self.app.run_verb(cmd, title="clean up",
                                   submit=lambda: self.app.client.submit_cleanup(root, mode=mode))
@@ -445,20 +445,20 @@ class RootDetailScreen(FrameScreen):
         return "undecodable file(s)" if mode == "undecodable" else "file(s) matching trashed content"
 
     def _cleanup_one_shot(self, root: str, mode: str, cmd: str) -> None:
-        """Count-confirm → apply for a one-shot cleanup mode (exact / undecodable, §6.2).
+        """Count-confirm → apply for a one-shot cleanup mode (exact / undecodable).
 
         A bare ``submit_cleanup`` for these modes runs only the read-only preview leaf
         (it logs "would delete … Nothing deleted"), so the TUI must — like the CLI —
-        fetch the count, require a typed count-confirmation (with the §10 network
+        fetch the count, require a typed count-confirmation (with the network
         permanent-delete warning), and then submit the real ``apply=True`` job.
 
-        **Exact mode refreshes the trash collection first** (§6.1), exactly like the CLI:
+        **Exact mode refreshes the trash collection first**, exactly like the CLI:
         a freshly-dropped trash-folder file must be absorbed into the trashed set *before*
         we count/delete its library re-appearances, or the TUI would silently delete fewer
         files than the same CLI command. That refresh runs inside a daemon PREVIEW job, so
         we stream it to completion off the UI thread, then count over the now-current set
         (:meth:`_cleanup_exact_refresh_then_confirm`). **Undecodable mode never refreshes**
-        (it targets the folder's own undecodables, independent of the trashed set — §9.1),
+        (it targets the folder's own undecodables, independent of the trashed set),
         so it counts directly. **Offline** (demo, no daemon) degrades to a plain y/n confirm.
         """
         if self.app.offline:
@@ -509,14 +509,14 @@ class RootDetailScreen(FrameScreen):
 
     @work(thread=True, exclusive=True, group="cleanup-preview")
     def _cleanup_exact_refresh_then_confirm(self, root: str, cmd: str) -> None:
-        """Run the exact-cleanup PREVIEW job (which refreshes trash, §6.1), wait for it to
+        """Run the exact-cleanup PREVIEW job (which refreshes trash), wait for it to
         finish, then read the now-current count + open the confirm — all off the UI thread.
 
         The preview job's ``_preview`` leaf refreshes-and-empties the trash roots and
         commits before it reports, so by the time its SSE stream reaches a terminal event
         the refreshed trashed set is durable; the follow-up ``cleanup_preview`` GET then
         counts over it. A dropped/absent stream just falls through to the count (safe —
-        the worst case is a slightly stale count, same as before this fix)."""
+        the worst case is a slightly stale count)."""
         try:
             job_id = self.app.client.submit_cleanup(root, mode="exact")   # preview → refresh
             try:
@@ -551,7 +551,7 @@ class RootDetailScreen(FrameScreen):
 
     def _is_stage2_dedup(self) -> bool:
         """True when the pending review is a dedup parked at stage 2 — the only case
-        that offers ``--confirm --keep-suggested`` (§8 B)."""
+        that offers ``--confirm --keep-suggested``."""
         from ..screens.rootdetail import is_stage2_dedup
         return bool(self._detail and is_stage2_dedup(self._detail.get("pending_review")))
 
@@ -576,7 +576,7 @@ class RootDetailScreen(FrameScreen):
             verb = _review_verb(pr)
             root = self.root_name
             # Warn when the stage's delete set includes files on a non-recyclable
-            # network share (permanent, no Recycle Bin — §10). `network` is the §10 gate.
+            # network share (permanent, no Recycle Bin). `network` is the gate.
             network = (pr.get("counts") or {}).get("network", 0)
             self.app.confirm_verb(f"Confirm this {verb} stage for {root}?",
                                   f"packrat {verb} {root} --confirm",
@@ -584,7 +584,7 @@ class RootDetailScreen(FrameScreen):
                                   submit=lambda: self._submit_review(verb, root, confirm=True))
 
     def action_confirm_keep_suggested(self) -> None:
-        """[b] on a stage-2 dedup review → `--confirm --keep-suggested` (§8 B): keep
+        """[b] on a stage-2 dedup review → `--confirm --keep-suggested`: keep
         each group's suggested lead, delete the rest, ignoring shortcut edits. Inert
         unless the Review box is focused AND the run is a stage-2 dedup."""
         if self._review_actionable() and self._is_stage2_dedup():

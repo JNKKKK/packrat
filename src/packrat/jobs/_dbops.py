@@ -1,7 +1,7 @@
-"""Shared catalog-mutation primitives for the job handlers (§4, §6).
+"""Shared catalog-mutation primitives for the job handlers.
 
 The forget/delete rules are identical wherever a file instance disappears — a
-plain filesystem delete is not trash (§6), so an ``active`` asset that loses its
+plain filesystem delete is not trash, so an ``active`` asset that loses its
 last instance is forgotten entirely (its fingerprints cascade), while a ``trashed``
 asset is kept at zero instances (its fingerprint is the trash memory). scan,
 dedup, and cleanup all apply these, so they live here rather than being copied per
@@ -12,12 +12,12 @@ from __future__ import annotations
 
 
 def delete_instance(conn, instance_id: int) -> None:
-    """Drop a single ``file_instances`` row (presence = row existence, §4)."""
+    """Drop a single ``file_instances`` row (presence = row existence)."""
     conn.execute("DELETE FROM file_instances WHERE id=?", (instance_id,))
 
 
 def forget_if_orphaned(conn, asset_id: int) -> None:
-    """Delete an ``active`` asset that now has zero file instances (§4 forget rule).
+    """Delete an ``active`` asset that now has zero file instances (forget rule).
 
     A ``trashed`` asset is kept at zero instances (its fingerprint is trash memory).
     Deleting the asset cascades its ``phash``/``vphash``/``embeddings``/

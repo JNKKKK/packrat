@@ -1,4 +1,4 @@
-"""Loopback API token (§3).
+"""Loopback API token.
 
 The daemon writes a random token to ``%APPDATA%\\packrat\\token`` *before* it
 accepts requests, so clients authenticate against a live server. Clients read it

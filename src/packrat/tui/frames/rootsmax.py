@@ -1,4 +1,4 @@
-"""The RootsMax screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The RootsMax screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .addroot import AddRootScreen
 
 
 # ---------------------------------------------------------------------------
-# Roots interface (§2)
+# Roots interface
 # ---------------------------------------------------------------------------
 class RootsMax(FrameScreen):
     BINDINGS = [
@@ -49,7 +49,7 @@ class RootsMax(FrameScreen):
     def _colorize(self, frame: str):
         # ◉ is green (deduped) OR yellow (need-dedup) — recolor each list row's dot to its
         # true role after the base pass (the glyph pass can't split one glyph two ways).
-        # Uses the SAME sorted+masked roots roots_body rendered (§12 4-state dot).
+        # Uses the SAME sorted+masked roots roots_body rendered (4-state dot).
         from .. import render
         from ..colorize import recolor_dot_legend, recolor_root_dots
         text = super()._colorize(frame)

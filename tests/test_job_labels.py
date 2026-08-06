@@ -1,4 +1,4 @@
-"""Job label derivation from type + params (§12)."""
+"""Job label derivation from type + params."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def test_trash_refresh_single_root_label():
 
 
 def test_merge_labels():
-    # merge shows "<src-leaf> → <dest-root>" (§12).
+    # merge shows "<src-leaf> → <dest-root>".
     assert job_label("merge", {"source": r"E:\iphone_dump", "root_id": 1}, root_name="iPhone") \
         == "merge iphone_dump → iPhone"
     assert job_label("merge", {"source": "/tmp/dump", "dry_run": True}, root_name="iPhone") \

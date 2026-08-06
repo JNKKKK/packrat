@@ -1,9 +1,8 @@
-"""Read-only snapshot queries (§3, §11) — safe anytime, never blocked by a job.
+"""Read-only snapshot queries — safe anytime, never blocked by a job.
 
 These back ``status``/``roots`` and the TUI stat panels. They open a **read-only**
 connection so they never contend with the single writer (WAL allows concurrent
-readers). Kept deliberately thin in M0 — the collection is empty until M1 scan —
-but the shapes match §11 so later milestones fill them in without changing the API.
+readers). Kept deliberately thin — the collection is empty until the first scan.
 """
 
 from __future__ import annotations
@@ -16,10 +15,10 @@ def _ro():
 
 
 def collection_stats() -> dict:
-    """App-wide collection stats — the dashboard **Collection** box (§1.1) alone.
+    """App-wide collection stats — the dashboard **Collection** box alone.
 
-    Split out of the old monolithic ``status_snapshot`` so the TUI can poll it on its
-    OWN cadence (§12): these are O(collection) aggregations (COUNT over 100K+ assets,
+    Split out of the monolithic ``status_snapshot`` so the TUI can poll it on its
+    OWN cadence: these are O(collection) aggregations (COUNT over 100K+ assets,
     SUM over every file_instance, a JSON-scan for lifetime-deduped) that only move when
     a scan/dedup COMPLETES — decoupling them from the fast-changing jobs list keeps a
     3 s job poll from re-aggregating the whole collection every tick. No maximized view
@@ -79,7 +78,7 @@ def live_jobs() -> dict:
     lazy-loaded a page at a time (:func:`recent_jobs`). **Pending reviews are NOT here
     either** — a review is ``review_runs`` state, not a job (its own resource,
     :func:`pending_reviews` / ``GET /reviews``). ``running`` is at most one row (the
-    single-worker queue, §3); ``queued`` is uncapped and paginated client-side.
+    single-worker queue); ``queued`` is uncapped and paginated client-side.
     """
     conn = _ro()
     try:
@@ -92,7 +91,7 @@ def live_jobs() -> dict:
             "SELECT id, type, started_at, params_json FROM jobs "
             "WHERE status='interrupted' ORDER BY id DESC LIMIT 20"
         ).fetchall()
-        # The durable FIFO backlog (§3), oldest-first, each annotated with why it
+        # The durable FIFO backlog, oldest-first, each annotated with why it
         # waits: 'blocked' when its owned root is held (read from the catalog via the
         # shared root_holder), else runnable ('waiting for worker'). Computed here so
         # `status`/TUI show the same reasons the live queue enforces at dequeue.
@@ -134,18 +133,18 @@ def pending_reviews() -> list[dict]:
 
 
 def status_snapshot() -> dict:
-    """Global rollup (§11) — the CLI ``status`` / ``--json`` shape.
+    """Global rollup — the CLI ``status`` / ``--json`` shape.
 
     A COMPOSITION of the decomposed reads (:func:`collection_stats`, :func:`live_jobs`,
     :func:`pending_reviews`, :func:`roots_snapshot`) so the CLI keeps its one-call,
-    everything-in-one-dict contract while the TUI polls each concern separately (§12).
+    everything-in-one-dict contract while the TUI polls each concern separately.
     """
     return {**collection_stats(), **live_jobs(),
             "pending_reviews": pending_reviews(), "roots": roots_snapshot()}
 
 
 def _annotate_queued_row(conn, row) -> dict:
-    """Add ``label`` + ``blocked`` to a queued ``jobs`` row (§3/§12).
+    """Add ``label`` + ``blocked`` to a queued ``jobs`` row.
 
     A job is *blocked* when its **owned** root is held by a pending review / open
     merge — the same predicate the queue applies at dequeue. Ownership is narrower
@@ -175,12 +174,12 @@ def _annotate_queued_row(conn, row) -> dict:
 
 
 def _queued_with_reasons(conn, root_id: int | None = None) -> list[dict]:
-    """Backlog rows (dequeue order) + a per-job blocked reason (§3/§12).
+    """Backlog rows (dequeue order) + a per-job blocked reason.
 
-    Ordered ``priority DESC, enqueued_at, id`` — the SAME order the queue dequeues in
-    (§3), so the displayed backlog matches what will actually run next (a prioritized
+    Ordered ``priority DESC, enqueued_at, id`` — the SAME order the queue dequeues in,
+    so the displayed backlog matches what will actually run next (a prioritized
     job appears at the front). With ``root_id`` set, only that root's queued jobs
-    (``jobs.root_id`` = it) — the per-root detail view (§12); without it, the whole
+    (``jobs.root_id`` = it) — the per-root detail view; without it, the whole
     backlog (global Queue panel).
     """
     sql = (
@@ -208,25 +207,25 @@ class _DBShim:
 
 
 def roots_snapshot() -> list[dict]:
-    """Per-root list (§11): id, name, path, kind, enabled, asset count, scan recency.
+    """Per-root list: id, name, path, kind, enabled, asset count, scan recency.
 
     ``instance_count`` counts physical files; ``asset_count`` distinct content in
     the root. ``photos``/``videos`` split ``asset_count`` by media type (distinct
-    assets, same as ``root_detail``) — they back the M6 Roots ``[s]`` sort cycle.
-    ``last_full_scan_at`` is stamped only by ``scan --full`` (§8 A2 step 11); a plain
+    assets, same as ``root_detail``) — they back the Roots ``[s]`` sort cycle.
+    ``last_full_scan_at`` is stamped only by ``scan --full``; a plain
     incremental scan does not move it. ``last_scan_at`` is the general scan recency —
     ``MAX(file_instances.last_seen_at)``, bumped by *every* scan (incremental or full)
-    on every present file (§8 A2 step 4/9), so it answers "when was this root last
+    on every present file, so it answers "when was this root last
     scanned" without a schema column. ``last_dedup_at`` is the newest *successful*
-    dedup (the same all-stages-or-already-clean ``completed`` rule as ``root_detail``
-    / §11, via :func:`_last_completed_at`). ``last_probe_at`` + ``probe_new_count`` are
-    the probe signal (§8 A2b). Together these drive the M6 4-state status dot (§12):
+    dedup (the same all-stages-or-already-clean ``completed`` rule as ``root_detail``,
+    via :func:`_last_completed_at`). ``last_probe_at`` + ``probe_new_count`` are
+    the probe signal. Together these drive the 4-state status dot:
     ``probe_new_count`` (>0 → ◐ new-files, outranks all) + ``last_scan_at`` +
     ``last_dedup_at`` (dedup>scan → ◉ green, else ◉ yellow, else ○ never).
 
     Order is ``r.id`` ascending (registration order) — unchanged, since this also
     backs ``packrat status``/``roots list``; the TUI sorts client-side over the
-    snapshot (M6 Roots §2), so no server-side reorder is needed.
+    snapshot, so no server-side reorder is needed.
     """
     conn = _ro()
     try:
@@ -252,8 +251,8 @@ def roots_snapshot() -> list[dict]:
         out = []
         for r in rows:
             d = dict(r)
-            # Newest successful dedup — same 'completed' success rule as root_detail
-            # (§11), so the TUI dot never disagrees with the detail view. Trash roots
+            # Newest successful dedup — same 'completed' success rule as root_detail,
+            # so the TUI dot never disagrees with the detail view. Trash roots
             # are never deduped, so this stays NULL for them (→ they render no dot).
             d["last_dedup_at"] = _last_completed_at(conn, r["id"], "dedup")
             out.append(d)
@@ -263,7 +262,7 @@ def roots_snapshot() -> list[dict]:
 
 
 def resolve_root_id(root_arg: str) -> int | None:
-    """Resolve a user-supplied ``root_arg`` (path-then-name, §11) to a root **id**, or None.
+    """Resolve a user-supplied ``root_arg`` (path-then-name) to a root **id**, or None.
 
     The one place name/path→id resolution lives, backing ``GET /roots/resolve?q=`` — so
     the id-keyed resource routes (``/roots/{id}`` etc.) can be addressed cleanly while the
@@ -279,7 +278,7 @@ def resolve_root_id(root_arg: str) -> int | None:
 
 
 def root_detail(root_arg: str) -> dict | None:
-    """One root's detail by name/path for the CLI ``packrat status <root>`` (§11).
+    """One root's detail by name/path for the CLI ``packrat status <root>``.
 
     Resolves ``root_arg`` (path-then-name) then delegates to :func:`root_detail_by_id`.
     The TUI addresses the id-keyed route directly (it holds the id from the roots list).
@@ -295,7 +294,7 @@ def root_detail(root_arg: str) -> dict | None:
 
 
 def root_detail_by_id(root_id: int) -> dict | None:
-    """One root's detail by **id** — backs ``GET /roots/{id}`` (§11 resource model).
+    """One root's detail by **id** — backs ``GET /roots/{id}`` (resource model).
 
     Same payload as :func:`root_detail`; keyed by the canonical id rather than a
     name/path resolve, so the TUI (which holds the id) reads it without a resolve hop.
@@ -341,14 +340,14 @@ def _root_detail_from_match(conn, match) -> dict:
     if pending is not None:
         pending_dict = dict(pending)
         pending_dict["counts"] = _review_counts(conn, pending)
-    # Recency of the last SUCCESSFUL review per type (§11 "deduped/cleaned <age>"):
+    # Recency of the last SUCCESSFUL review per type ("deduped/cleaned <age>"):
     # the newest `completed` run's confirmed_at. A dedup run is `completed` only after
     # it went through ALL stages (or was already clean — both land status='completed'
     # via _finalize_completed / the already-clean path). A `cancelled` run does NOT
     # count. NULL → never (successfully) deduped/cleaned.
     last_dedup_at = _last_completed_at(conn, rid, "dedup")
     last_cleanup_at = _last_completed_at(conn, rid, "cleanup-perceptual")
-    # The root's live queue view (§12 root detail): the job running ON this root
+    # The root's live queue view (root detail): the job running ON this root
     # (if any), plus this root's queued backlog with blocked reasons. Both key off
     # jobs.root_id, so a `scan --all` (root_id NULL) isn't attributed to any root.
     running_row = conn.execute(
@@ -361,7 +360,7 @@ def _root_detail_from_match(conn, match) -> dict:
     queued_here = _queued_with_reasons(conn, root_id=rid)
     # Most-recent persisted scan result for this root + its problem files, so
     # `status <root>` can re-render the last scan's banner + undecodable/error
-    # paths (the §scan-results read path). Newest by job_id.
+    # paths. Newest by job_id.
     last_scan = conn.execute(
         "SELECT * FROM scan_results WHERE root_id=? ORDER BY job_id DESC LIMIT 1",
         (rid,),
@@ -370,7 +369,7 @@ def _root_detail_from_match(conn, match) -> dict:
     # NOT read from the frozen last-scan snapshot — a `cleanup --undecodable` or a
     # decoder-upgrade rescan changes the set without necessarily writing a fresh
     # snapshot, so the frozen rows go stale (they'd keep listing files just deleted).
-    # This mirrors what scan itself persists (§8 A2 Phase 5 re-derives the same way),
+    # This mirrors what scan itself persists (Phase 5 re-derives the same way),
     # only computed at read time so `status` always reflects the root as it is now.
     undec_rows = conn.execute(
         "SELECT DISTINCT fi.path, a.media_type, a.decode_error detail "
@@ -396,17 +395,17 @@ def _root_detail_from_match(conn, match) -> dict:
     return {
         "id": rid, "name": match["name"], "path": match["path"], "kind": match["kind"],
         "enabled": match["enabled"], "last_full_scan_at": match["last_full_scan_at"],
-        # Probe signal (§8 A2b): last_probe_at (recency) + probe_new_count (the dot
-        # driver — >0 means unscanned files await a scan; §12 rung 1).
+        # Probe signal: last_probe_at (recency) + probe_new_count (the dot
+        # driver — >0 means unscanned files await a scan).
         "last_probe_at": match["last_probe_at"],
         "probe_new_count": match["probe_new_count"],
-        # Dedup-dirty signal (§12 rung 3): 1 ⇒ scanned content awaiting a (re-)dedup.
+        # Dedup-dirty signal: 1 ⇒ scanned content awaiting a (re-)dedup.
         "needs_dedup": match["needs_dedup"],
         "last_scan_at": last_scan_at,
         "photos": photos, "videos": videos, "instances": instances,
         "size_bytes": size_bytes,             # total on-disk bytes of this root's files
         "pending_review": pending_dict,
-        "last_dedup_at": last_dedup_at,       # newest completed dedup (§11 "deduped <age>")
+        "last_dedup_at": last_dedup_at,       # newest completed dedup ("deduped <age>")
         "last_cleanup_at": last_cleanup_at,   # newest completed perceptual-cleanup
         "running_job": running_dict,
         "queued_jobs": queued_here,
@@ -419,7 +418,7 @@ def _root_detail_from_match(conn, match) -> dict:
 
 
 def _resolve_root_ro(conn, root_arg: str):
-    """Resolve ``root_arg`` (path-then-name, §11) against an open RO connection."""
+    """Resolve ``root_arg`` (path-then-name) against an open RO connection."""
     from . import fsutil
 
     rows = conn.execute("SELECT * FROM roots").fetchall()
@@ -434,14 +433,14 @@ def _resolve_root_ro(conn, root_arg: str):
 
 
 def cleanup_exact_preview(root_arg: str, mode: str = "exact") -> dict | None:
-    """Count a library root's files a one-shot ``cleanup`` mode would delete (§6.2, §9.1).
+    """Count a library root's files a one-shot ``cleanup`` mode would delete.
 
     Backs the CLI's typed confirmation — the count the user approves before the apply
     job deletes. Read-only + stable (the preview job commits any refresh before this
     runs). ``mode``:
     - ``exact`` → files whose asset is ``trashed`` (byte-identical trash re-appearances);
-    - ``undecodable`` → the folder's ``undecodable=1`` **active** files (§9.1).
-    ``network`` is how many sit on a non-recyclable network share (permanent, §10).
+    - ``undecodable`` → the folder's ``undecodable=1`` **active** files.
+    ``network`` is how many sit on a non-recyclable network share (permanent).
     Returns ``None`` if the root doesn't resolve; raises nothing on a trash root (the
     handler rejects that separately). ``perceptual`` mode has no count-confirm (it stages
     for review), so it is not a valid ``mode`` here.
@@ -470,7 +469,7 @@ def cleanup_exact_preview(root_arg: str, mode: str = "exact") -> dict | None:
 
 
 def _last_completed_at(conn, root_id: int, run_type: str) -> str | None:
-    """`confirmed_at` of the newest `completed` review run of ``run_type`` for a root (§11).
+    """`confirmed_at` of the newest `completed` review run of ``run_type`` for a root.
 
     "Completed" is the success marker: a dedup run reaches it only after going through
     all stages (or being already clean); a perceptual-cleanup after its confirm. A
@@ -487,7 +486,7 @@ def _last_completed_at(conn, root_id: int, run_type: str) -> str | None:
 
 
 def _review_counts(conn, run) -> dict:
-    """Actionable count breakdown for a pending review run's *current* stage (§11).
+    """Actionable count breakdown for a pending review run's *current* stage.
 
     ``run`` is the run's ``review_runs`` row (id, run_type, stage, + the analyze-time PDQ
     threshold snapshot columns). Scoped to ``stage`` (the run's cursor) so the numbers
@@ -502,7 +501,7 @@ def _review_counts(conn, run) -> dict:
       (delete on confirm) + staged perceptual candidates.
 
     ``network`` counts how many files in the stage's **default delete set** sit on a
-    non-recyclable network share (deleted PERMANENTLY, no Recycle Bin — §10), so the
+    non-recyclable network share (deleted PERMANENTLY, no Recycle Bin), so the
     confirm surface (CLI + TUI) warns before an irreversible delete. It keys off each
     action's ``default_action`` — the fate of a file **if the user does nothing** — NOT
     every candidate path:
@@ -513,10 +512,10 @@ def _review_counts(conn, run) -> dict:
       ``network=0`` — fixing the false "N deleted PERMANENTLY" over files the user is
       *keeping* (the reported bug). Deleting one is the deliberate act of removing its
       shortcut, resolved authoritatively at ``--confirm`` (which re-reads shortcut
-      presence and prints its own accurate permanent-delete summary, §8 B Phase 6).
+      presence and prints its own accurate permanent-delete summary, Phase 6).
     We deliberately do **not** stat the on-disk shortcuts here: this is a read-only
     snapshot polled by the TUI, and eager per-candidate stats (esp. over SMB) are exactly
-    what the lazy-liveness design avoids (§8 B). (For default-KEEP the default-set count is
+    what the lazy-liveness design avoids. (For default-KEEP the default-set count is
     a lower bound on what a confirm might delete; the authoritative, shortcut-accurate
     warning is the confirm job.)
     """
@@ -548,7 +547,7 @@ def _review_counts(conn, run) -> dict:
         members = sum(1 for r in rows if r["kind"] == "perceptual")
         out = {"to_delete_exact": exact, "groups": len(groups), "members": members,
                "network": network}
-        # Rich per-stage breakdown for the Review box + CLI log (§8 B, review_stats): the
+        # Rich per-stage breakdown for the Review box + CLI log (review_stats): the
         # shared stats_for_stage dispatch picks the compute (stage 1 = delete split; stages
         # 2/3 = perceptual bundle), stashed under the stageN key rootdetail's lines_for_stage
         # reads. The histogram bins come from the run's ANALYZE-TIME threshold snapshot
@@ -604,7 +603,7 @@ def _reconcile_review_state(conn, job_type: str, params: dict, result: dict):
     if row is None:
         # Older jobs (frozen before ``run_id`` was recorded) / fallback: the newest run
         # for this root+type. At most one run is ever ``pending`` per root (partial-unique
-        # index, §4), so this resolves the live review unambiguously.
+        # index), so this resolves the live review unambiguously.
         root_id = params.get("root_id")
         if root_id is not None:
             row = conn.execute(
@@ -620,7 +619,7 @@ def _reconcile_review_state(conn, job_type: str, params: dict, result: dict):
 
 
 def _job_dict(row, conn=None) -> dict:
-    """Shape a ``jobs`` row for a client: add a derived display ``label`` (§12).
+    """Shape a ``jobs`` row for a client: add a derived display ``label``.
 
     The label is computed from ``type`` + ``params_json`` (the params→label rule,
     :mod:`packrat.jobs.labels`), with the root name resolved from ``root_id`` when set.
@@ -675,7 +674,7 @@ _TERMINAL_SQL = " status IN (" + ",".join(f"'{s}'" for s in _TERMINAL_STATUSES) 
 
 
 def recent_jobs(limit: int = 20, offset: int = 0, *, terminal_only: bool = False) -> list[dict]:
-    """Recent job runs for the TUI 'recent jobs' list (§12), newest-first.
+    """Recent job runs for the TUI 'recent jobs' list, newest-first.
 
     By default includes ``queued`` rows (the backlog) and terminal history — the CLI
     ``jobs list`` shape. ``terminal_only=True`` restricts to finished jobs (the TUI Queue
@@ -711,11 +710,11 @@ def jobs_count(*, terminal_only: bool = False) -> int:
 
 def root_jobs(root_id: int, limit: int = 50, offset: int = 0, *,
               terminal_only: bool = False) -> list[dict]:
-    """One root's jobs — current (queued/running) + history, newest-first (§12).
+    """One root's jobs — current (queued/running) + history, newest-first.
 
     Keys off ``jobs.root_id`` (the root a job concerns). A ``scan --all`` has no
     ``root_id`` so it doesn't appear here per-root — its per-root outcome lives in
-    ``scan_results`` (§4), surfaced separately by ``status <root>``. ``offset`` pages
+    ``scan_results``, surfaced separately by ``status <root>``. ``offset`` pages
     this root's history like :func:`recent_jobs`; ``terminal_only`` filters to finished
     jobs (the History section — running/queued render from the snapshot).
     """
@@ -757,7 +756,7 @@ def job_detail(job_id: int) -> dict | None:
 
 
 def job_problem_files(job_id: int) -> list[dict]:
-    """The undecodable / read-error files recorded by a scan job (§4, §12 result card).
+    """The undecodable / read-error files recorded by a scan job (result card).
 
     Backs the scan result card's problem-file list — the exact paths + reasons behind
     its ``undecodable``/``read_errors`` counts (``scan_problem_files``, keyed to the

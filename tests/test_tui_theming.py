@@ -1,10 +1,10 @@
-"""Color-role tests — assert the ROLE a cell carries, never a concrete hex (§Theming).
+"""Color-role tests — assert the ROLE a cell carries, never a concrete hex.
 
 Geometry is colorless (the golden frames are plain text — color is applied
 post-layout); color correctness is this separate, cheaper test: a running span →
 ``running``, a ``◉`` deduped dot → ``success``, a trash count → ``dim``. Asserting
 the *role* (not the hex) means a theme retune never breaks a test — roles are
-stable, colors are free to change (component-plan §Theming).
+stable, colors are free to change.
 """
 
 from __future__ import annotations

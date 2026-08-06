@@ -1,7 +1,7 @@
-/* packrat TUI stylesheet (M6).
+/* packrat TUI stylesheet.
  *
- * The ONE stylesheet: the app frame now fills the whole terminal (responsive,
- * Level B) and text/borders are colored by semantic ROLE. The frame is a single
+ * The ONE stylesheet: the app frame fills the whole terminal (responsive)
+ * and text/borders are colored by semantic ROLE. The frame is a single
  * pre-composed Static whose text is laid out (by packrat.tui.geometry) to the live
  * terminal size, so this file just makes the Static fill the screen and exposes the
  * background. Deliberately minimal (component-plan Non-goals: closed role set). */
@@ -24,8 +24,8 @@ Screen {
     background: ansi_default;
 }
 
-/* Modal overlay (§Modals): a centered inset over a dimmed backdrop — never
- * resizes/escapes the fixed frame (§12). The inset is an EXPLICIT fixed size that
+/* Modal overlay: a centered inset over a dimmed backdrop — never
+ * resizes/escapes the fixed frame. The inset is an EXPLICIT fixed size that
  * matches the pre-composed box (packrat.tui.modals MODAL_W×MODAL_H = 60×11).
  * `auto` collapsed the container to 0×0 (it couldn't measure the plain-text
  * Static), which made the modal invisible — only the acrylic showed through. */

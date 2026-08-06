@@ -1,12 +1,12 @@
-"""Modals & overlays (component-plan §Modals) — a reusable centered inset.
+"""Modals & overlays — a reusable centered inset.
 
 ``Modal`` is a Textual :class:`~textual.screen.ModalScreen` pushed onto the same
 screen stack, so it layers over the current screen, ``Esc`` pops it back to exactly
-where you were, and the parent keeps its state. It honors the fixed frame (§12): a
+where you were, and the parent keeps its state. It honors the fixed frame: a
 centered bordered inset over a dimmed backdrop, never resizing the 100×24 canvas.
 
 Three typed variants compose the same pure builders (no new rendering machinery):
-- :class:`ConfirmModal` — a message + ``[y]/[n]`` (or a typed-count field for the §6
+- :class:`ConfirmModal` — a message + ``[y]/[n]`` (or a typed-count field for the
   delete-set confirm, where the network permanent-delete warning shows). Returns a
   bool via the screen-dismiss result.
 - :class:`MessageModal` — a dismissable notice (a ``RootError``, a transient
@@ -15,7 +15,7 @@ Three typed variants compose the same pure builders (no new rendering machinery)
 
 Result flows back by Textual's screen-dismiss (``push_screen(..., callback)``), so a
 modal that gates a CLI verb (typed-count confirm → ``cleanup … --confirm``) stays a
-linear "ask, then act" flow and the §1.6 rule holds (the modal only gathers input).
+linear "ask, then act" flow (the modal only gathers input).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from .colorize import colorize
 from .framing import box
 from .layout import fit, wrap_cells
 
-# Modal inset size — a centered panel well inside the 100×24 frame (§12).
+# Modal inset size — a centered panel well inside the 100×24 frame.
 MODAL_W = 60
 MODAL_H = 11
 
@@ -57,7 +57,7 @@ def trash_refresh_modal_lines(root_name: str, footer: str) -> list[str]:
     mascot = render.trash_refresh_mascot_lines(root_name, width=inner_w)
     # Keep the prompt to ONE line so the footer always survives the clip: the mascot
     # (5) + blank + prompt (1) + blank + footer (1) = 8 ≤ MODAL_H-2 (9). Middle-elide a
-    # long NAS root name so its drive + leaf stay legible (§12 path rule).
+    # long NAS root name so its drive + leaf stay legible (path rule).
     prompt = middle_elide(f"Absorb + empty {root_name} now?", inner_w)
     body = mascot + ["", prompt, ""]
     fitted = fit(body + [footer], MODAL_H - 2, mode="clip")
@@ -97,7 +97,7 @@ class Modal(ModalScreen):
         with Vertical(id="modal"):
             # markup=False — pre-composed plain text; brackets are literal (see
             # FrameScreen.compose for why markup parsing corrupts the frame).
-            # colorize applies theme role colors post-layout (§Theming).
+            # colorize applies theme role colors post-layout.
             yield Static(self._render_masked(modal_lines(
                 self.title, self.message, self.footer, extra=self.extra_lines())),
                 id="modal-frame", markup=False)
@@ -128,7 +128,7 @@ class MessageModal(Modal):
 
 
 class ConfirmModal(Modal):
-    """A yes/no confirm, or a typed-count confirm for the §6 delete-set gate.
+    """A yes/no confirm, or a typed-count confirm for the delete-set gate.
 
     ``count`` (when set) makes it a typed-count modal: the user types the exact
     number to confirm (the network permanent-delete warning shows in ``extra``);
@@ -196,7 +196,7 @@ class ConfirmModal(Modal):
 
 
 class TrashRefreshModal(Modal):
-    r"""The trash-root confirm: a packrat-with-a-trash-can mascot + ``[y]/[n]`` (§6.1).
+    r"""The trash-root confirm: a packrat-with-a-trash-can mascot + ``[y]/[n]``.
 
     Shown when the user picks a **trash** root (Dashboard roots box / RootsMax) —
     a trash root has no detail screen, its only action is *refresh the collection*.

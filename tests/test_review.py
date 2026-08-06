@@ -1,4 +1,4 @@
-"""review.py — audit-write atomicity + root-name sanitization (§8.1)."""
+"""review.py — audit-write atomicity + root-name sanitization."""
 
 from __future__ import annotations
 

@@ -1,29 +1,29 @@
-r"""The §5.3 perceptual matching engine — pure fingerprint math, no file I/O.
+r"""The perceptual matching engine — pure fingerprint math, no file I/O.
 
-A single **scope-agnostic** near-dup matcher, run only by ``dedup`` (§8 B) and
-``cleanup --perceptual`` (§6.2). It reads the PDQ signatures ``scan`` already
+A single **scope-agnostic** near-dup matcher, run only by ``dedup`` and
+``cleanup --perceptual``. It reads the PDQ signatures ``scan`` already
 stored (``phash`` for photos, ``vphash`` for video frames) and reports which
 assets are perceptual near-dups of which — it never touches the filesystem and
-never uses CLIP (semantic ≠ duplicate, §5).
+never uses CLIP (semantic ≠ duplicate).
 
-Two media, two decision rules (§5.3):
+Two media, two decision rules:
 
 - **Photo** — the single signal is PDQ Hamming distance. A pair matches iff
   ``distance ≤ match.t_photo_edit`` (the wider cutoff — the match decision). The
   matcher reports the raw distance; the *caller* (dedup) bands it into review
-  stages with ``t_photo_recompress`` (§8 B). Photo quality is *stored* but never
+  stages with ``t_photo_recompress``. Photo quality is *stored* but never
   gates a photo out of matching (a photo has exactly one PDQ; gating it would make
-  the asset silently invisible to dedup — §5.3 annotate-never-gate).
+  the asset silently invisible to dedup — annotate-never-gate).
 - **Video** — durations within tolerance (the ``duration_tol_s`` / ``duration_tol_pct``
   pre-filter) **and** at least ``video.frame_match_fraction`` of *comparable*
   (quality-gated) frame-pairs match within ``t_match_video``, with at least
   ``video.min_comparable_frames`` comparable pairs. Frames are compared
   **frame-index-aligned** (frame k of A vs frame k of B), valid because both were
   sampled at the same relative timeline positions and the duration pre-filter keeps
-  their lengths close (§5.3).
+  their lengths close.
 
 **Edges are canonical-ordered** (``asset_a < asset_b``) so an undirected pair has
-exactly one row (§4). ``find_matches`` compares a *target* set against a *pool*
+exactly one row. ``find_matches`` compares a *target* set against a *pool*
 and skips self-pairs; when a pair is discovered from both directions (both assets
 in the target set) it is emitted once, keeping the smaller distance.
 
@@ -42,7 +42,7 @@ from .config import VideoConfig
 
 log = logging.getLogger("packrat.matcher")
 
-# PDQ is 256 bits = 32 packed bytes (np.packbits form scan stores — §4/M2).
+# PDQ is 256 bits = 32 packed bytes (np.packbits form scan stores).
 _PDQ_BYTES = 32
 
 # Byte popcount lookup table, built once on first use (keeps numpy import lazy).
@@ -63,7 +63,7 @@ def _popcount_table():
 # ---------------------------------------------------------------------------
 @dataclass
 class PhotoSig:
-    """One photo asset's PDQ signature (§5.3)."""
+    """One photo asset's PDQ signature."""
 
     asset_id: int
     bits: bytes  # 32-byte packed PDQ
@@ -72,7 +72,7 @@ class PhotoSig:
 
 @dataclass
 class VideoSig:
-    """One video asset's per-frame PDQ signatures + duration (§5.3)."""
+    """One video asset's per-frame PDQ signatures + duration."""
 
     asset_id: int
     duration_s: float | None
@@ -112,14 +112,14 @@ def hamming(a: bytes, b: bytes) -> int:
 
 
 # ---------------------------------------------------------------------------
-# photo matching (§5.3) — single PDQ signal, brute-force numpy Hamming
+# photo matching — single PDQ signal, brute-force numpy Hamming
 # ---------------------------------------------------------------------------
 def match_photos(targets: list[PhotoSig], pool: list[PhotoSig], t_match: int) -> list[Edge]:
-    """Return near-dup edges between ``targets`` and ``pool`` (photo, §5.3).
+    """Return near-dup edges between ``targets`` and ``pool`` (photo).
 
     Each target is Hamming-compared against the whole pool at once (packed-byte
     XOR + popcount table). Self-pairs are skipped; a pair found from both sides is
-    emitted once with the smaller distance. Quality never gates (§5.3).
+    emitted once with the smaller distance. Quality never gates.
     """
     if not targets or not pool:
         return []
@@ -155,10 +155,10 @@ def match_photos(targets: list[PhotoSig], pool: list[PhotoSig], t_match: int) ->
 
 
 # ---------------------------------------------------------------------------
-# video matching (§5.3) — duration pre-filter + frame-aligned majority vote
+# video matching — duration pre-filter + frame-aligned majority vote
 # ---------------------------------------------------------------------------
 def _durations_close(d1: float | None, d2: float | None, cfg: VideoConfig) -> bool:
-    """The §5.3 duration pre-filter: ``|d1−d2| ≤ max(tol_s, tol_pct%·min(d1,d2))``."""
+    """The duration pre-filter: ``|d1−d2| ≤ max(tol_s, tol_pct%·min(d1,d2))``."""
     if d1 is None or d2 is None:
         return False
     tol = max(cfg.duration_tol_s, cfg.duration_tol_pct / 100.0 * min(d1, d2))
@@ -195,7 +195,7 @@ def _video_pair_score(a: VideoSig, b: VideoSig, cfg: VideoConfig, t_match: int) 
         if d <= t_match:
             matching += 1
     if comparable < cfg.min_comparable_frames:
-        return None  # insufficient evidence beats a coin-flip (§5.3)
+        return None  # insufficient evidence beats a coin-flip
     if matching / comparable < cfg.frame_match_fraction:
         return None
     return round(dist_sum / comparable)
@@ -204,7 +204,7 @@ def _video_pair_score(a: VideoSig, b: VideoSig, cfg: VideoConfig, t_match: int) 
 def match_videos(
     targets: list[VideoSig], pool: list[VideoSig], cfg: VideoConfig, t_match: int
 ) -> list[Edge]:
-    """Return near-dup edges between ``targets`` and ``pool`` (video, §5.3).
+    """Return near-dup edges between ``targets`` and ``pool`` (video).
 
     Pre-filters by duration (avoids the all-pairs blowup), then votes over
     frame-aligned comparable frame-pairs. Self-pairs skipped; a pair found from
@@ -236,13 +236,13 @@ def match_videos(
 # top-level: match a target set against a pool (both media)
 # ---------------------------------------------------------------------------
 def find_matches(targets: Signatures, pool: Signatures, config) -> list[Edge]:
-    """Run the §5.3 matcher for ``targets`` against ``pool``; return all edges.
+    """Run the matcher for ``targets`` against ``pool``; return all edges.
 
     ``config`` is the frozen job :class:`~packrat.config.Config` — supplies
     ``match.t_photo_edit`` (the photo match cutoff) / ``match.t_match_video`` and
     the ``video.*`` knobs. Photo and video are matched independently (a photo never
     matches a video). The caller bands the returned photo distances into review
-    stages via ``t_photo_recompress`` (§8 B); the matcher itself does no banding.
+    stages via ``t_photo_recompress``; the matcher itself does no banding.
     """
     edges = match_photos(targets.photos, pool.photos, config.match.t_photo_edit)
     edges += match_videos(targets.videos, pool.videos, config.video, config.match.t_match_video)
@@ -253,11 +253,11 @@ def find_matches(targets: Signatures, pool: Signatures, config) -> list[Edge]:
 # DB reader (dedup/cleanup use this to load signatures)
 # ---------------------------------------------------------------------------
 def load_signatures(db, *, asset_ids=None, statuses=("active",)) -> Signatures:
-    """Load photo + video signatures for a set of assets (§5.3 matcher input).
+    """Load photo + video signatures for a set of assets (matcher input).
 
     ``asset_ids`` restricts to those assets (a set/iterable of ids); ``None`` loads
     every asset in ``statuses``. ``statuses`` filters ``assets.status`` — dedup
-    passes ``('active',)`` (trashed excluded, §5); ``cleanup --perceptual`` passes
+    passes ``('active',)`` (trashed excluded); ``cleanup --perceptual`` passes
     ``('trashed',)``. Undecodable assets have no perceptual rows so they simply
     contribute nothing. Reads ``phash``/``vphash`` only — no file I/O.
     """
@@ -303,7 +303,7 @@ def load_signatures(db, *, asset_ids=None, statuses=("active",)) -> Signatures:
 
 
 def asset_qualities(db, asset_ids, *, min_frame_quality: int = 0) -> dict[int, int]:
-    """Per-asset PDQ quality scalar for the review low-confidence hint (§5.3).
+    """Per-asset PDQ quality scalar for the review low-confidence hint.
 
     Photo → the asset's single ``phash.quality``. Video → the MIN over frames that
     clear ``min_frame_quality`` (the frames the matcher would actually compare — a

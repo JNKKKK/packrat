@@ -4,7 +4,7 @@ The offline demo (``packrat --offline``) uses :mod:`packrat.tui.demo` (rich data
 11 roots, 9 queued, 12 recent, every job shape) so a person can exercise every
 screen and action without a daemon. These tests lock in that (a) each paginating
 list spans >1 page and pages navigably, and (b) every action key opens its real
-modal and surfaces the CLI verb it maps to (§1.6). Actions are no-ops on state by
+modal and surfaces the CLI verb it maps to. Actions are no-ops on state by
 design (the chosen "modal describing the flow" behavior) — we assert the verb text.
 """
 
@@ -74,7 +74,7 @@ def test_demo_has_multipage_datasets():
     assert len(demo.ROOTS) >= 6           # > one Roots page (5/page)
     assert len(demo.QUEUED) >= 5
     assert len(demo.RECENT) >= 8
-    # every job shape is represented for §5 card coverage
+    # every job shape is represented for card coverage
     statuses = {j["status"] for j in demo.RECENT}
     assert {"done", "error", "interrupted"} <= statuses
 
@@ -117,7 +117,7 @@ def test_dashboard_roots_box_pages_and_stays_fixed():
 
 
 def test_queue_has_independent_per_section_paginators():
-    """Each of the 3 sections (Queued, History) has its OWN paginator (§4 redesign)."""
+    """Each of the 3 sections (Queued, History) has its OWN paginator."""
     async def scenario(app, pilot):
         await pilot.press("q")
         await pilot.press("q")                 # QueueMax
@@ -268,8 +268,8 @@ def test_modal_swallows_unbound_keys_no_crash():
     """Keys a modal doesn't bind must not leak to the screen beneath (or crash).
 
     Regression for the ``No screens on stack`` abort: pressing ``c`` repeatedly
-    (or other queue-action keys) while a confirm modal is open used to bubble to
-    the Dashboard, re-push modals, and underflow the stack. The modal now swallows
+    (or other queue-action keys) while a confirm modal is open must not bubble to
+    the Dashboard, re-push modals, and underflow the stack. The modal swallows
     unbound keys, so the stack stays intact.
     """
     async def scenario(app, pilot):
@@ -439,7 +439,7 @@ async def _select_trash_root_in_rootsmax(app, pilot):
 
 
 def test_trash_root_opens_mascot_modal_not_detail():
-    """[Enter] on a TRASH root opens the mascot refresh modal, never RootDetailScreen (§6.1)."""
+    """[Enter] on a TRASH root opens the mascot refresh modal, never RootDetailScreen."""
     async def scenario(app, pilot):
         await _select_trash_root_in_rootsmax(app, pilot)
         await pilot.press("enter")
@@ -457,7 +457,7 @@ def test_trash_root_opens_mascot_modal_not_detail():
 
 
 def test_trash_root_confirm_maps_to_refresh_verb():
-    """Confirming the mascot modal ([y]) surfaces `packrat trash refresh <root>` (§1.6)."""
+    """Confirming the mascot modal ([y]) surfaces `packrat trash refresh <root>`."""
     async def scenario(app, pilot):
         await _select_trash_root_in_rootsmax(app, pilot)
         await pilot.press("enter")
@@ -570,7 +570,7 @@ def test_root_detail_enter_opens_selected_job_card():
 
 
 def test_root_detail_enter_inert_while_review_focused():
-    """[Enter] must NOT open a job card while the Review box is focused (§12).
+    """[Enter] must NOT open a job card while the Review box is focused.
 
     [Enter] result is a Jobs-panel action (and the unfocused default); the Review box
     has its own [o]/[g]/[k] shortcuts and its footer never advertises [Enter], so
@@ -642,7 +642,7 @@ def test_root_detail_review_hints_dim_when_unfocused():
     _drive(scenario)
 
 
-# --- actions → modal → CLI verb (§1.6) -------------------------------------
+# --- actions → modal → CLI verb -------------------------------------
 def test_root_detail_scan_dedup_merge_verbs():
     async def scenario(app, pilot):
         await pilot.press("r")
@@ -657,7 +657,7 @@ def test_root_detail_scan_dedup_merge_verbs():
         await pilot.pause()
         assert _scr(app) == "RootDetailScreen", _scr(app)
         assert "packrat scan" in _toast_text(app), _toast_text(app)
-        # [d] opens the master-preference picker (§8 B --prefer-internal); [Enter] takes
+        # [d] opens the master-preference picker (--prefer-internal); [Enter] takes
         # the default (prefer external) and surfaces the dedup verb toast.
         await pilot.press("d")
         await pilot.pause()
@@ -668,7 +668,7 @@ def test_root_detail_scan_dedup_merge_verbs():
         assert "packrat dedup" in _toast_text(app), _toast_text(app)
         await pilot.press("m")
         await pilot.pause()
-        assert _scr(app) == "MergePickerScreen"        # [m] → §3.3 picker, not a notice
+        assert _scr(app) == "MergePickerScreen"        # [m] → merge picker, not a notice
     _drive(scenario)
 
 
@@ -712,7 +712,7 @@ def test_root_detail_no_cleaned_never_label():
 
 
 def test_merge_picker_opens_and_paginates():
-    """[m] opens the §3.3 merge picker; the registered-root list paginates + Tab
+    """[m] opens the merge picker; the registered-root list paginates + Tab
     switches to the external-folder variant."""
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
@@ -928,7 +928,7 @@ def test_add_root_tab_navigates_fields():
 
 def test_add_root_full_toggles_and_reaches_verb():
     """[Space] on the --full field toggles it, and register surfaces `--full` in the verb.
-    (--embed is deferred to M7, so the form no longer offers it.)"""
+    (--embed is deferred, so the form does not offer it.)"""
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("a")
         # Tab to the --full field (path→name→kind→scan→full) and toggle it on.
@@ -1002,7 +1002,7 @@ def test_job_card_covers_every_shape():
 
 
 def test_scan_card_scrolls_problem_files():
-    """A scan card lists its undecodable/read-error files and ↑/↓ scrolls them (§12)."""
+    """A scan card lists its undecodable/read-error files and ↑/↓ scrolls them."""
     from packrat.tui.frames import JobCard
 
     async def scenario(app, pilot):

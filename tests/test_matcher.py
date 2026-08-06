@@ -1,4 +1,4 @@
-"""The §5.3 perceptual matching engine (matcher.py) — photo + video decision rules.
+"""The perceptual matching engine (matcher.py) — photo + video decision rules.
 
 Pure fingerprint math; no DB or files needed for the core functions. We build PDQ
 blobs by hand (32 packed bytes) so we control exact Hamming distances.
@@ -59,7 +59,7 @@ def test_match_photos_canonical_order_and_dedup_both_directions():
 def test_match_photos_quality_never_gates():
     base = _bits(10)
     close = _bits(10, flip=4)
-    # Even a zero-quality photo must still match (§5.3 annotate-never-gate).
+    # Even a zero-quality photo must still match (annotate-never-gate).
     targets = [matcher.PhotoSig(1, base, quality=0)]
     pool = [matcher.PhotoSig(2, close, quality=0)]
     assert len(matcher.match_photos(targets, pool, t_match=32)) == 1
@@ -107,7 +107,7 @@ def test_match_videos_fraction_gate():
 
 def test_find_matches_uses_t_photo_edit_as_cutoff():
     # A pair at distance 20 is inside t_photo_edit (32) but outside t_photo_recompress
-    # (10) — find_matches must still MATCH it (banding into stages is dedup's job, §8 B).
+    # (10) — find_matches must still MATCH it (banding into stages is dedup's job).
     cfg = Config()
     base, mid = _bits(7), _bits(7, flip=20)
     edges = matcher.find_matches(

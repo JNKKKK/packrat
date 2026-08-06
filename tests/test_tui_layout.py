@@ -1,9 +1,9 @@
-"""Invariant tests for the pure TUI layout layer (§12 fixed-layout rules).
+"""Invariant tests for the pure TUI layout layer (fixed-layout rules).
 
 These are the cheap, high-value "invariant net" that catches the whole class of
-"window grew / border eaten / column misaligned" bugs §12 exists to prevent:
+"window grew / border eaten / column misaligned" bugs the fixed-layout rules exist to prevent:
 ``len(row(w, …)) == w`` for any cells, ``fit(…, budget).rows`` is always exactly
-``budget``, and the §12 middle-elide / status-dot rules. The pure functions need
+``budget``, and the middle-elide / status-dot rules. The pure functions need
 no Textual runtime, so these run as plain string assertions.
 """
 
@@ -94,7 +94,7 @@ def test_row_right_align_cell():
     assert out == " " * 9 + "9"
 
 
-# --- middle_elide: §12 path rule ------------------------------------------
+# --- middle_elide: path rule ------------------------------------------
 def test_middle_elide_keeps_head_and_tail():
     p = (
         r"W:\[Nekomoe kissaten&VCB-Studio] Yahari Ore no Seishun Lovecome "
@@ -202,7 +202,7 @@ def test_fit_width_hard_truncates():
     assert fit_width("abcdef", 3) == "abc"
 
 
-# --- status_dot: the 4-state ladder (§12 / TODO Part C) --------------------
+# --- status_dot: the 4-state ladder --------------------
 # Signature: status_dot(kind, probe_new_count, last_scan_at, last_dedup_at, needs_dedup)
 #   -> (glyph, role). Green/yellow now key off the needs_dedup event flag (set by a scan/
 #   merge that indexed new content, cleared by a completed dedup), NOT a scan-vs-dedup
@@ -230,7 +230,7 @@ def test_status_dot_dirty_flag_forces_yellow():
 
 
 def test_status_dot_noop_rescan_after_dedup_stays_green():
-    # THE FIX (§12): a scan LATER than the last dedup but that indexed nothing new
+    # THE FIX: a scan LATER than the last dedup but that indexed nothing new
     # (needs_dedup=0) must STAY ◉ green — the old recency rule wrongly flipped it yellow.
     assert tokens.status_dot("library", 0, "2024-03-01", "2024-02-01", 0) == (
         tokens.DOT_DEDUPED, "success")

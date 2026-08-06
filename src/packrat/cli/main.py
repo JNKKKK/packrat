@@ -1,21 +1,21 @@
-"""``packrat`` CLI entrypoint (Typer) — thin client onto the daemon (§3, §11).
+"""``packrat`` CLI entrypoint (Typer) — thin client onto the daemon.
 
-Current surface (M1–M5):
-- ``packrat roots register|list`` — declare/list roots (§8 A1, §11).
-- ``packrat scan`` — walk a root and fingerprint it (§8 A2).
-- ``packrat probe`` — cheap discovery: count new/changed files, no fingerprint (§8 A2b).
-- ``packrat dedup`` — 3-stage dedup of one folder (§8 B).
-- ``packrat merge`` — copy new files into a folder by exact hash (§8 C).
-- ``packrat cleanup`` / ``trash refresh`` / ``untrash`` — the trash model (§6).
-- ``packrat status`` — global rollup / per-root detail (read-only, never blocked, §11).
-- ``packrat jobs list|cancel|prioritize`` — inspect/steer the work queue (§3, §11);
+Commands:
+- ``packrat roots register|list`` — declare/list roots.
+- ``packrat scan`` — walk a root and fingerprint it.
+- ``packrat probe`` — cheap discovery: count new/changed files, no fingerprint.
+- ``packrat dedup`` — 3-stage dedup of one folder.
+- ``packrat merge`` — copy new files into a folder by exact hash.
+- ``packrat cleanup`` / ``trash refresh`` / ``untrash`` — the trash model.
+- ``packrat status`` — global rollup / per-root detail (read-only, never blocked).
+- ``packrat jobs list|cancel|prioritize`` — inspect/steer the work queue;
   ``jobs cancel`` with no id cancels the running job.
-- ``packrat daemon start|stop|restart|status`` — lifecycle/troubleshooting (§11).
-- ``packrat smoke-test`` — the §9.1 decode smoke test.
-- ``packrat`` (no args) — the TUI placeholder (full TUI is M6, §12); ``--nsfw`` masks
+- ``packrat daemon start|stop|restart|status`` — lifecycle/troubleshooting.
+- ``packrat smoke-test`` — the decode smoke test.
+- ``packrat`` (no args) — the TUI; ``--nsfw`` masks
   adult-content keywords (EN/CN) in on-screen root names/paths (display-only privacy).
 
-Every job-submitting command auto-spawns the daemon on first use (§3), submits,
+Every job-submitting command auto-spawns the daemon on first use, submits,
 and streams; Ctrl-C detaches the view without stopping the job.
 """
 
@@ -80,7 +80,7 @@ def daemon_start():
 
 
 def _force_kill_orphan(*, reason: str) -> bool:
-    """Force-terminate an orphaned daemon by its fixed port, self-healing a stale token (§3).
+    """Force-terminate an orphaned daemon by its fixed port, self-healing a stale token.
 
     The daemon binds a fixed loopback port as its single-instance lock, so whatever
     listens there IS the packrat daemon — safe to kill by port when the token no longer
@@ -165,7 +165,7 @@ def daemon_restart():
             if resp.get("running_job"):
                 typer.echo("stopping daemon — the in-flight job is left interrupted (resumable).")
         # Wait for the old daemon to stop serving and free the port; a new spawn
-        # can't bind until it does (the port bind is the single-instance lock, §3).
+        # can't bind until it does (the port bind is the single-instance lock).
         # (A force-kill already confirmed the process is gone, so the wait is quick.)
         if not forced:
             deadline = time.monotonic() + 15.0
@@ -232,7 +232,7 @@ def status(
     """Print collection state (read-only, never blocked by a running job)."""
     client = _client_or_spawn()
     if root:
-        # Resolve the user handle (name/path) → id, then read the id-keyed resource (§11).
+        # Resolve the user handle (name/path) → id, then read the id-keyed resource.
         try:
             rid = client.resolve_root(root)
             if rid is None:
@@ -252,7 +252,7 @@ def status(
         typer.echo(f"  assets: {d['photos'] + d['videos']} (photos {d['photos']} · videos {d['videos']})")
         typer.echo(f"  files: {d['instances']}")
         typer.echo(f"  last scan: {_short_ts(d.get('last_scan_at'))}")
-        # Last SUCCESSFUL dedup (all stages, or already-clean) — §11 "deduped <age>".
+        # Last SUCCESSFUL dedup (all stages, or already-clean) — "deduped <age>".
         dd = d.get("last_dedup_at")
         typer.echo(f"  last dedup: {_short_ts(dd)}" if dd else "  last dedup: never")
         cc = d.get("last_cleanup_at")
@@ -349,13 +349,13 @@ def roots_register(
     ignore: List[str] = typer.Option([], "--ignore", help="Extra ignore glob (repeatable)."),
     scan: bool = typer.Option(False, "--scan", help="After registering, immediately scan the root."),
     full: bool = typer.Option(False, "--full", help="With --scan, do a full (re-fingerprint) scan."),
-    embed: bool = typer.Option(False, "--embed", help="With --scan, also run the CLIP pass (implies --scan; M7)."),
+    embed: bool = typer.Option(False, "--embed", help="With --scan, also run the CLIP pass (implies --scan)."),
     detach: bool = typer.Option(False, "--detach", help="With --scan, submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
     """Declare a folder as a root (metadata-only, instantaneous)."""
     client = _client_or_spawn()
-    do_scan = scan or embed  # --embed implies --scan (§8 A1)
+    do_scan = scan or embed  # --embed implies --scan
     try:
         resp = client.register_root(
             path, name=name, kind=kind, ignore_globs=list(ignore),
@@ -467,14 +467,14 @@ def jobs_prioritize(
 
 
 # ---------------------------------------------------------------------------
-# scan — walk a registered root and fingerprint it (§8 A2)
+# scan — walk a registered root and fingerprint it
 # ---------------------------------------------------------------------------
 @app.command("scan")
 def scan(
     path: Optional[str] = typer.Argument(None, help="A registered root (path or --name). Omit with --all."),
     all_roots: bool = typer.Option(False, "--all", help="Scan every enabled root."),
     full: bool = typer.Option(False, "--full", help="Ignore the fast-path; re-fingerprint everything."),
-    embed: bool = typer.Option(False, "--embed", help="Also compute CLIP embeddings (deferred to M7)."),
+    embed: bool = typer.Option(False, "--embed", help="Also compute CLIP embeddings (not yet implemented)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Enumerate + report what would be indexed; write nothing."),
     profile: bool = typer.Option(False, "--profile", help="Report where time went: NAS transfer vs CPU vs decode."),
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
@@ -498,7 +498,7 @@ def scan(
 
 
 # ---------------------------------------------------------------------------
-# probe — cheap discovery: are there new files here worth a scan? (§8 A2b)
+# probe — cheap discovery: are there new files here worth a scan?
 # ---------------------------------------------------------------------------
 @app.command("probe")
 def probe(
@@ -507,7 +507,7 @@ def probe(
     detach: bool = typer.Option(False, "--detach", help="Submit and return without streaming."),
     json_out: bool = typer.Option(False, "--json"),
 ):
-    """Walk a root and count new/changed files WITHOUT fingerprinting (fast; §8 A2b).
+    """Walk a root and count new/changed files WITHOUT fingerprinting (fast).
 
     Probe is scan's cheap discovery half: it enumerates the root and counts files a scan
     would (re)fingerprint — no hashing, decode, or PDQ, no catalog writes beyond a
@@ -544,7 +544,7 @@ def probe(
 
 
 # ---------------------------------------------------------------------------
-# dedup — analyze/stage/confirm one registered folder (§8 B)
+# dedup — analyze/stage/confirm one registered folder
 # ---------------------------------------------------------------------------
 @app.command("dedup")
 def dedup(
@@ -595,7 +595,7 @@ def dedup(
 
 
 # ---------------------------------------------------------------------------
-# merge — copy new files into a destination folder (§8 C)
+# merge — copy new files into a destination folder
 # ---------------------------------------------------------------------------
 @app.command("merge")
 def merge(
@@ -626,7 +626,7 @@ def merge(
 
 
 # ---------------------------------------------------------------------------
-# cleanup — remove trashed content from a library folder (§6.2)
+# cleanup — remove trashed content from a library folder
 # ---------------------------------------------------------------------------
 @app.command("cleanup")
 def cleanup(
@@ -729,7 +729,7 @@ def _mode_flag(mode: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# trash — refresh the registered trash folders (§6.1)
+# trash — refresh the registered trash folders
 # ---------------------------------------------------------------------------
 @trash_app.command("refresh")
 def trash_refresh(
@@ -758,7 +758,7 @@ def trash_refresh(
 
 
 # ---------------------------------------------------------------------------
-# untrash — forget content from trash memory by presenting the file (§6.3)
+# untrash — forget content from trash memory by presenting the file
 # ---------------------------------------------------------------------------
 @app.command("untrash")
 def untrash(
@@ -811,7 +811,7 @@ def dev_clear_db(
 
 
 # ---------------------------------------------------------------------------
-# smoke test (§9.1)
+# smoke test
 # ---------------------------------------------------------------------------
 @app.command("smoke-test")
 def smoke_test(
@@ -835,7 +835,7 @@ def smoke_test(
 
 
 # ---------------------------------------------------------------------------
-# no-args → TUI (M6, §12) — the default face of the tool.
+# no-args → TUI — the default face of the tool.
 # ---------------------------------------------------------------------------
 @app.callback(invoke_without_command=True)
 def _root(
@@ -854,7 +854,7 @@ def _root(
         raise typer.Exit(0)
     if ctx.invoked_subcommand is not None:
         return
-    # No subcommand → launch the TUI (§12). It auto-spawns the daemon (like every
+    # No subcommand → launch the TUI. It auto-spawns the daemon (like every
     # other verb) and renders a `daemon ○ down` state rather than crashing if it
     # can't reach one; `--offline` renders bundled sample data with no daemon.
     from ..tui.app import run as run_tui
@@ -874,7 +874,7 @@ def _client_or_spawn() -> DaemonClient:
 
 
 def _run_streamed_job(client, submit, *, verb: str, label: str, detach: bool, json_out: bool):
-    """Submit a job, then either detach or stream it to completion (§3, §11).
+    """Submit a job, then either detach or stream it to completion.
 
     The shared tail of every mutating CLI verb: call ``submit()`` (a thunk that returns
     the new job id) and map a :class:`DaemonError` to ``cannot <verb>: …`` + exit 1;
@@ -899,7 +899,7 @@ def _run_streamed_job(client, submit, *, verb: str, label: str, detach: bool, js
 
 
 def _is_auth_error(exc: DaemonError) -> bool:
-    """True if a ``DaemonError`` is a 401 (token rejected) — the orphaned-daemon signal (§3).
+    """True if a ``DaemonError`` is a 401 (token rejected) — the orphaned-daemon signal.
 
     ``DaemonError`` messages are ``"<status>: <body>"`` (see ``client._post``); a leading
     ``401`` means ``/health`` answered but our token didn't match, i.e. a daemon from a
@@ -928,7 +928,7 @@ _FAILED_STATUSES = {"error", "cancelled", "interrupted"}
 
 
 def _exit_if_failed(final: str) -> None:
-    """Exit non-zero when a streamed job ended in a non-success terminal state (§11).
+    """Exit non-zero when a streamed job ended in a non-success terminal state.
 
     ``stream_job`` returns the durable terminal status; a mutating command must
     propagate a failed/cancelled/interrupted job as a non-zero exit so scripts and CI
@@ -940,12 +940,12 @@ def _exit_if_failed(final: str) -> None:
 
 
 def _review_verb(pr: dict) -> str:
-    """The CLI verb that confirms/cancels a pending review run (§11)."""
+    """The CLI verb that confirms/cancels a pending review run."""
     return "cleanup" if pr.get("run_type") == "cleanup-perceptual" else "dedup"
 
 
 def _review_count_summary(pr: dict) -> str:
-    """A one-line actionable count for a pending review run (§11 status).
+    """A one-line actionable count for a pending review run.
 
     dedup: ``N to delete (exact) · G groups / M members (near-dup, default-keep)``.
     cleanup: ``X exact-trash (will delete) · P perceptual candidates (staged)``.
@@ -962,8 +962,8 @@ def _scan_recency(r: dict) -> str:
     """A short scan-recency suffix for a root row.
 
     Uses ``last_scan_at`` (max ``last_seen_at`` — bumped by *any* scan) as the
-    primary signal, so a plain incremental scan no longer reads as "never
-    scanned". ``never scanned`` means no scan has touched a file here yet. Full
+    primary signal, so a plain incremental scan counts as a scan.
+    ``never scanned`` means no scan has touched a file here yet. Full
     scans (``scan --full``, the integrity backstop) aren't distinguished in this
     one-line view — see ``packrat status <root>`` for the last-full-scan detail.
     """
@@ -981,7 +981,7 @@ def _short_ts(ts: str | None) -> str:
 
 
 def _print_last_scan(d: dict) -> None:
-    """Render the root's most-recent persisted scan result + problem files (§scan-results)."""
+    """Render the root's most-recent persisted scan result + problem files."""
     ls = d.get("last_scan")
     if not ls:
         return

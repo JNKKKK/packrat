@@ -13,26 +13,26 @@ dependencies = [
     "uvicorn>=0.27",
     "typer>=0.12",
     "httpx>=0.27",
-    # TUI (M6, §12). The default face of the tool — `packrat` no-args launches it.
+    # TUI. The default face of the tool — `packrat` no-args launches it.
     # Pure-Python, no wheel risk; a lean core dep so the primary entrypoint always
     # installs. Renders the read-model snapshots + SSE stream the daemon already
-    # exposes; adds no backend (PLAN §12).
+    # exposes; adds no backend.
     "textual>=0.60",
-    # dedup/cleanup (M3+) staging + deletion. Windows-only: pywin32 gives the
-    # IShellLink COM used to create Explorer-previewable .lnk shortcuts (§8 B
-    # Phase 4, PLAN §14 #4 spike), send2trash the move-to-Recycle-Bin (§8 B
-    # Phase 6). Platform-marked so a non-Windows dev install stays importable.
+    # dedup/cleanup staging + deletion. Windows-only: pywin32 gives the
+    # IShellLink COM used to create Explorer-previewable .lnk shortcuts,
+    # send2trash the move-to-Recycle-Bin. Platform-marked so a non-Windows
+    # dev install stays importable.
     "pywin32>=312; sys_platform == 'win32'",
     "send2trash>=2.1.0",
-    # Periodic-job scheduler (§3 "Scheduler (APScheduler → interval scans)", now
-    # realized — §8 A2b probe is its first client). Pure-Python, no wheel risk → safe
-    # for the lean core (unlike the media extras). BackgroundScheduler owns its own
-    # daemon thread, slotting into the daemon lifecycle where JobQueue's thread does.
+    # Periodic-job scheduler (APScheduler → interval scans); probe is its first
+    # client. Pure-Python, no wheel risk → safe for the lean core (unlike the
+    # media extras). BackgroundScheduler owns its own daemon thread, slotting
+    # into the daemon lifecycle where JobQueue's thread does.
     "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]
-# Fingerprinting / decode stack — needed by `scan` (M1+) and the §9.1 smoke test.
+# Fingerprinting / decode stack — needed by `scan` and the decode smoke test.
 media = [
     "blake3>=0.4",
     "numpy>=1.26",
@@ -43,7 +43,7 @@ media = [
     "pdqhash>=0.2.5",
     "rawpy>=0.21",
 ]
-# Opt-in semantic embeddings (M7). Heavy; only for `scan --embed`.
+# Opt-in semantic embeddings (not yet implemented). Heavy; only for `scan --embed`.
 embed = [
     "torch>=2.2",
     "open-clip-torch>=2.24",

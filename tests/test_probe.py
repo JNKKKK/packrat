@@ -1,4 +1,4 @@
-"""probe job (§8 A2b) — cheap discovery: count new/changed WITHOUT fingerprinting.
+"""probe job — cheap discovery: count new/changed WITHOUT fingerprinting.
 
 Drives the real probe handler through a ``JobQueue`` + ``Database`` against tiny
 real PNGs (like test_scan), plus the submit-dedup + dequeue-gate behaviors. Requires
@@ -70,7 +70,7 @@ def _result(database, job_id):
 # ---------------------------------------------------------------------------
 def test_probe_counts_new_and_writes_no_fingerprints(queue_and_db, tiny_photos):
     """A probe on a never-scanned root counts every candidate new + writes ZERO catalog
-    rows (no assets/instances/phash) — only the per-root probe signal (§8 A2b)."""
+    rows (no assets/instances/phash) — only the per-root probe signal."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     before = _fingerprint_counts(database)
@@ -97,7 +97,7 @@ def test_probe_of_scanned_root_finds_nothing_new(queue_and_db, tiny_photos):
     _run(q, database, "scan", {"root_id": root["id"]})
     jid = _run(q, database, "probe", {"root_id": root["id"]})
     assert _result(database, jid)["new_count"] == 0
-    # A found-nothing probe still stamps last_probe_at + writes count 0 (§8 A2b).
+    # A found-nothing probe still stamps last_probe_at + writes count 0.
     row = database.query_one("SELECT last_probe_at, probe_new_count FROM roots WHERE id=?",
                              (root["id"],))
     assert row["probe_new_count"] == 0 and row["last_probe_at"] is not None
@@ -122,7 +122,7 @@ def test_probe_sees_a_new_file_after_scan(queue_and_db, tiny_photos):
 # scan clears the count
 # ---------------------------------------------------------------------------
 def test_scan_clears_probe_new_count(queue_and_db, tiny_photos):
-    """A completed scan CONSUMES the probe signal → probe_new_count back to 0 (§8 A2b)."""
+    """A completed scan CONSUMES the probe signal → probe_new_count back to 0."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     _run(q, database, "probe", {"root_id": root["id"]})
@@ -134,7 +134,7 @@ def test_scan_clears_probe_new_count(queue_and_db, tiny_photos):
 
 
 def test_dry_run_scan_does_not_clear_count(queue_and_db, tiny_photos):
-    """A --dry-run scan changes nothing — it must not clear the probe signal (§8 A2b)."""
+    """A --dry-run scan changes nothing — it must not clear the probe signal."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     _run(q, database, "probe", {"root_id": root["id"]})
@@ -147,7 +147,7 @@ def test_dry_run_scan_does_not_clear_count(queue_and_db, tiny_photos):
 # offline root writes nothing
 # ---------------------------------------------------------------------------
 def test_probe_offline_root_writes_no_signal(queue_and_db, tmp_path):
-    """An unreadable/offline root must never be recorded as "0 new files" (§8 A2b/§10.1)."""
+    """An unreadable/offline root must never be recorded as "0 new files"."""
     q, database = queue_and_db
     missing = tmp_path / "lib"
     missing.mkdir()
@@ -168,7 +168,7 @@ def test_probe_offline_root_writes_no_signal(queue_and_db, tmp_path):
 # trash roots are never probed
 # ---------------------------------------------------------------------------
 def test_probe_rejects_trash_root(queue_and_db, tmp_path):
-    """probe never inspects a trash root (§6.1) — the job errors."""
+    """probe never inspects a trash root — the job errors."""
     q, database = queue_and_db
     tdir = tmp_path / "trash"
     tdir.mkdir()
@@ -192,7 +192,7 @@ def _two_roots(database, tmp_path):
 
 
 def test_submit_dedup_skips_second_queued_probe(queue_and_db, tmp_path):
-    """A 2nd probe for the same root while one is queued coalesces to the queued id (§8 A2b)."""
+    """A 2nd probe for the same root while one is queued coalesces to the queued id."""
     q, database = queue_and_db
     rid, _ = _two_roots(database, tmp_path)
     q.submit("sleeper", {"steps": 200, "delay_s": 0.05})   # occupy the worker
@@ -237,7 +237,7 @@ def test_submit_dedup_is_probe_only(queue_and_db, tmp_path):
 # ---------------------------------------------------------------------------
 def test_probe_waits_for_busy_root(queue_and_db, tiny_photos):
     """probe owns its root, so a probe on a root with a pending review is held in the
-    backlog (blocked), then runs once the holder clears (§3 dequeue gate / §8 A2b)."""
+    backlog (blocked), then runs once the holder clears (dequeue gate)."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     # Open a pending dedup review on the root → it "owns" the root.
@@ -264,7 +264,7 @@ def test_submit_dedup_allows_fresh_probe_after_running(queue_and_db, tiny_photos
     """A fresh queued probe AFTER one started running is legitimate (files may have arrived).
 
     Dedup matches only a QUEUED probe, never a running one — so a probe submitted while a
-    prior probe is mid-run is NOT coalesced (§8 A2b)."""
+    prior probe is mid-run is NOT coalesced."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     # Start a real (slow-ish, but real) probe and, while it runs, submit another for the

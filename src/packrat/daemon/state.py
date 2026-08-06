@@ -1,4 +1,4 @@
-"""Daemon runtime state: pid + bound port (§3, §11 ``daemon status``).
+"""Daemon runtime state: pid + bound port (``daemon status``).
 
 Written by the daemon at startup (after it binds and writes the token), read by
 clients to find the API and by ``daemon status``. Kept separate from the token
@@ -16,7 +16,7 @@ from .. import paths
 from ..util import now_iso
 
 #: Fixed loopback port for the daemon API. The auto-spawn handshake binds this
-#: port as the single-instance lock (§3): whoever binds it is the daemon.
+#: port as the single-instance lock: whoever binds it is the daemon.
 DEFAULT_PORT = 51789
 HOST = "127.0.0.1"
 
@@ -102,9 +102,9 @@ def _pid_alive_windows(pid: int) -> bool:
 
 
 def pid_on_port(port: int = DEFAULT_PORT) -> int | None:
-    """PID of the process LISTENING on ``port`` (loopback), or ``None`` (§3 self-heal).
+    """PID of the process LISTENING on ``port`` (loopback), or ``None`` (self-heal).
 
-    The daemon binds a **fixed** loopback port as its single-instance lock (§3), so
+    The daemon binds a **fixed** loopback port as its single-instance lock, so
     whatever listens there IS the packrat daemon — nothing else uses this port. Used to
     force-stop an **orphaned** daemon whose token no longer matches ours (e.g. one
     spawned under a since-deleted ``PACKRAT_HOME`` during testing): the authed
@@ -149,7 +149,7 @@ def pid_on_port(port: int = DEFAULT_PORT) -> int | None:
 
 
 def terminate_pid(pid: int, *, timeout_s: float = 5.0) -> bool:
-    """Forcibly terminate a process by pid; return ``True`` once it's gone (§3 self-heal).
+    """Forcibly terminate a process by pid; return ``True`` once it's gone (self-heal).
 
     Cross-platform: ``taskkill /F`` on Windows, ``SIGTERM`` then ``SIGKILL`` on POSIX.
     Polls up to ``timeout_s`` for the process to exit. An already-dead / invalid pid is

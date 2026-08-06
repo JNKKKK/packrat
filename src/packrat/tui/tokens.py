@@ -1,4 +1,4 @@
-"""Design tokens — the single source of truth for the M6 TUI (§12).
+"""Design tokens — the single source of truth for the TUI.
 
 **Values only, no Textual import.** This module holds pure constants — the
 reference window size, column widths, glyphs, semantic color *roles*, and the
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# --- Fixed window (§12 "Fixed layout", a hard requirement) ------------------
+# --- Fixed window ("Fixed layout", a hard requirement) ------------------
 # Every interface renders inside this identical region; navigation swaps content
 # in place, never resizing the frame. The generator renders every mockup into the
 # same W×H frame to mechanically demonstrate the rule.
@@ -33,7 +33,7 @@ ROOTS_W = (CW - 2) - COLLECTION_W - GAP
 
 # --- Glyphs (each one terminal cell — align in a monospace TUI font) --------
 # Root freshness/health dot — a 4-state signal where COLOR (not just shape) carries
-# meaning (§12 / TODO Part C): ◉ is BOTH green (deduped) and yellow (need dedup), so
+# meaning (TODO Part C): ◉ is BOTH green (deduped) and yellow (need dedup), so
 # `status_dot` returns a (glyph, role) pair and the colorizer paints the role. The
 # `probe_new_count` signal outranks every scan/dedup state (rung 1).
 DOT_DEDUPED = "◉"     # ◉ solid  — GREEN: deduped after the latest scan (recency-relative)
@@ -48,7 +48,7 @@ ELLIPSIS = "…"      # … one cell (middle-elide), NOT "..." (3 cells)
 CHECK = "✓"         # ✓ applied stage / done
 CROSS = "✗"         # ✗ error
 
-# Progress-bar cells (§1.4/§4/§5.1 — "███░░░").
+# Progress-bar cells ("███░░░").
 BAR_FILL = "█"      # █
 BAR_EMPTY = "░"     # ░
 
@@ -57,17 +57,17 @@ BAR_EMPTY = "░"     # ░
 LIGHT_BOX = ("┌", "┐", "└", "┘", "─", "│")  # ┌ ┐ └ ┘ ─ │
 HEAVY_BOX = ("┏", "┓", "┗", "┛", "━", "┃")  # ┏ ┓ ┗ ┛ ━ ┃
 
-# --- Liveness cadence (component-plan §Data & liveness) ---------------------
+# --- Liveness cadence ---------------------
 # The light poll timer is the backstop that surfaces work started in another
 # terminal (no local SSE); the SSE stream drives the live bar/counts directly.
 POLL_INTERVAL_S = 3.0
 # The collection stats + roots list only change when a scan/dedup COMPLETES (and are
 # refreshed immediately then, via the SSE job-finished → refresh_data path). They are
 # O(collection) aggregations, so we poll them on a much slower backstop cadence rather
-# than re-aggregating the whole collection on every 3 s live tick (§12 decomposition).
+# than re-aggregating the whole collection on every 3 s live tick.
 STATS_POLL_INTERVAL_S = 30.0
 # Trailing window (seconds) of SSE progress samples the TUI-side ETA averages the
-# observed rate over (§ cross-cutting "ETA is computed TUI-side").
+# observed rate over ("ETA is computed TUI-side").
 ETA_WINDOW_S = 8.0
 # Minimum gap (seconds) between live re-renders driven by SSE progress. A scan emits
 # one `progress` event PER FILE (hundreds/sec on a local disk); re-laying-out +
@@ -83,7 +83,7 @@ LOGO_ANIM_INTERVAL_S = 0.15   # ~7 fps color sweep (cheap: only the top section 
 LOGO_GEM_SWAP_TICKS = 20      # swap the gem glyph every ~3 s (20 × 0.15)
 LOGO_GRADIENT_STEP = 0.045    # gradient phase advanced per tick (full loop ≈ 3.3 s)
 
-# --- Color roles (the token layer, §Theming) --------------------------------
+# --- Color roles (the token layer) --------------------------------
 # A widget tags a span with a semantic ROLE, never a raw color; the Theme decides
 # the color. This is the closed vocabulary a widget is allowed to reference.
 ROLES = (
@@ -105,7 +105,7 @@ ROLES = (
 
 @dataclass(frozen=True)
 class Theme:
-    """One ``role → color`` table (component-plan §Theming, "theme layer").
+    """One ``role → color`` table (the "theme layer").
 
     Colors are Textual color names / hex strings. Widgets never name a color —
     only a role — so adding a theme or recoloring never touches a widget. The
@@ -122,7 +122,7 @@ class Theme:
 
 
 # The v1 theme. A `dark` / `high-contrast` variant is a later table, not new
-# machinery (component-plan Non-goals: theming is minimal, a closed set of roles).
+# machinery (theming is minimal, a closed set of roles).
 DEFAULT_THEME = Theme(
     name="default",
     colors={
@@ -160,7 +160,7 @@ GEM_GRADIENT = (
 
 def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at,
                needs_dedup=None) -> tuple[str, str]:
-    """The 4-state freshness dot for a root as a ``(glyph, role)`` pair (§12 / TODO Part C).
+    """The 4-state freshness dot for a root as a ``(glyph, role)`` pair (TODO Part C).
 
     Color, not just shape, carries meaning: ``◉`` is BOTH green (deduped) and yellow
     (need-dedup), so this returns the semantic **role** the colorizer paints, not a bare
@@ -176,13 +176,13 @@ def status_dot(kind: str, probe_new_count, last_scan_at, last_dedup_at,
     4. else                      → ``◉`` green — scanned AND deduped, nothing dirty since.
 
     **Why an event flag, not a recency test.** Rung 3 keys off the ``needs_dedup`` signal
-    (set when a scan/merge indexes NEW content, cleared when a dedup completes — §12 /
-    ``roots.needs_dedup``), NOT the old ``last_dedup_at > last_scan_at`` comparison. That
-    comparison was wrong: ``last_scan_at = MAX(file_instances.last_seen_at)`` bumps on EVERY
-    walked file, so a no-op re-scan (found nothing new) flipped a fully-deduped root back to
-    yellow. With the flag, a no-op scan doesn't set it, so green→green holds; a scan that
-    finds new content sets it → yellow, until the next dedup clears it. ``last_dedup_at``
-    now only gates "ever deduped?" (rung 3's OR), which also makes the ``needs_dedup=0``
+    (set when a scan/merge indexes NEW content, cleared when a dedup completes —
+    ``roots.needs_dedup``), NOT a ``last_dedup_at > last_scan_at`` comparison. Such a
+    comparison would be wrong: ``last_scan_at = MAX(file_instances.last_seen_at)`` bumps on
+    EVERY walked file, so a no-op re-scan (found nothing new) would flip a fully-deduped root
+    back to yellow. With the flag, a no-op scan doesn't set it, so green→green holds; a scan
+    that finds new content sets it → yellow, until the next dedup clears it. ``last_dedup_at``
+    only gates "ever deduped?" (rung 3's OR), which also makes the ``needs_dedup=0``
     retrofit default self-correct: a scanned-but-never-deduped legacy root still reads yellow.
 
     A found-nothing probe (``count == 0``) skips rung 1; a completed scan zeroes

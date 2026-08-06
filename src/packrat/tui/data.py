@@ -1,4 +1,4 @@
-"""Data & liveness — when the dict changes and who pushes it (component-plan §Data).
+"""Data & liveness — when the dict changes and who pushes it.
 
 Widgets are pure ``dict → frame``; this module holds the pure, unit-testable
 time/ETA helpers the app uses when rendering live data (no Textual, no clock calls):
@@ -6,7 +6,7 @@ time/ETA helpers the app uses when rendering live data (no Textual, no clock cal
 - :func:`reltime` — an ISO timestamp → the compact "2h ago" / "today 11:31" /
   "Jul 12" / "now" strings the mockups use, given an explicit ``now`` (never the
   wall clock, so golden tests stay deterministic).
-- :class:`EtaEstimator` — the TUI-side ETA (§ cross-cutting "ETA is computed
+- :class:`EtaEstimator` — the TUI-side ETA ("ETA is computed
   TUI-side"): ``(total − done) / rate`` over a short trailing window of SSE
   progress samples, blank until enough has streamed. The daemon leaves
   ``ProgressEvent.eta_s`` unset; this fills it.
@@ -34,7 +34,7 @@ def same_day(ts: str | None, now: str | None) -> bool:
 def result_of(job: dict) -> dict:
     """Parse a job row's ``result_json`` to a dict (``{}`` if absent/malformed).
 
-    The one place the TUI decodes the daemon's compact outcome summary (§4/§12) —
+    The one place the TUI decodes the daemon's compact outcome summary —
     job cards, the queue history line, and the offline demo all read it through here
     instead of re-writing the ``json.loads(... or "{}")`` guard.
     """
@@ -98,7 +98,7 @@ class EtaEstimator:
 
     Rate = Δdone/Δt over samples within :data:`ETA_WINDOW_S`; ETA = remaining/rate.
     Degrades to ``None`` (blank) until ≥2 samples span enough time — a pure
-    presentation estimate, never authoritative (§ cross-cutting).
+    presentation estimate, never authoritative.
     """
 
     window_s: float = ETA_WINDOW_S

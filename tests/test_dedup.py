@@ -1,4 +1,4 @@
-r"""dedup (§8 B) 3-stage sequence: exact → recompression → minor-edit.
+r"""dedup 3-stage sequence: exact → recompression → minor-edit.
 
 Drives the real dedup handler through a ``JobQueue`` + ``Database`` (as test_scan
 does), against real PNGs/JPEGs so the PDQ path runs. A JPEG-80 recompress of a PNG
@@ -168,7 +168,7 @@ def test_dedup_already_clean_autocompletes(queue_and_db, tmp_path):
 
 
 def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
-    """An already-clean dedup counts as successful → sets last_dedup_at (§11)."""
+    """An already-clean dedup counts as successful → sets last_dedup_at."""
     from packrat import queries
 
     q, database = queue_and_db
@@ -180,7 +180,7 @@ def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
     _scan_root(q, database, root["id"])
 
     assert queries.root_detail(str(lib))["last_dedup_at"] is None  # never deduped yet
-    # The scan marked the root dedup-dirty (indexed new content) — §12 rung 3.
+    # The scan marked the root dedup-dirty (indexed new content) — rung 3.
     assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
                               (root["id"],))["needs_dedup"] == 1
     _run(q, database, "dedup", root_id=root["id"])                 # already clean → completed
@@ -197,7 +197,7 @@ def test_dedup_already_clean_records_last_dedup(queue_and_db, tmp_path):
 
 
 def test_dedup_cancel_does_not_count_as_deduped(queue_and_db, tmp_path):
-    """A cancelled dedup run must NOT set last_dedup_at (only completed counts, §11)."""
+    """A cancelled dedup run must NOT set last_dedup_at (only completed counts)."""
     from packrat import queries
 
     q, database = queue_and_db
@@ -272,10 +272,10 @@ def test_dedup_stage1_exact_then_advances_to_stage2(queue_and_db, tmp_path):
         (root["id"],),
     )
     assert run_final["status"] == "completed"
-    # The full 3-stage completion consumes the dedup-dirty signal (→ ◉ green; §12 rung 3).
+    # The full 3-stage completion consumes the dedup-dirty signal (→ ◉ green; rung 3).
     assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
                               (root["id"],))["needs_dedup"] == 0
-    # Went through all stages → recorded as the last successful dedup (§11).
+    # Went through all stages → recorded as the last successful dedup.
     from packrat import queries
     assert queries.root_detail(str(lib))["last_dedup_at"] == run_final["confirmed_at"]
     # The victim's file is gone and its asset is trashed (perceptual discard).
@@ -408,8 +408,8 @@ def test_dedup_keep_suggested_rejected_on_non_stage2(queue_and_db, tmp_path):
 
 
 def test_dedup_analyze_snapshots_match_thresholds_on_run(packrat_home, tmp_path):
-    """Analyze snapshots the config's PDQ thresholds onto the review_runs row (§8 B
-    follow-up), so the CLI log and the TUI poll both read ONE analyze-time source and a
+    """Analyze snapshots the config's PDQ thresholds onto the review_runs row, so the
+    CLI log and the TUI poll both read ONE analyze-time source and a
     later config edit can't retroactively rewrite the run's histogram bands. Driven under a
     NON-default config to prove the values are config-derived, not hardcoded."""
     import dataclasses
@@ -440,7 +440,7 @@ def test_dedup_analyze_snapshots_match_thresholds_on_run(packrat_home, tmp_path)
 
 def test_dedup_stage2_reports_lead_pick_stats(queue_and_db, tmp_path):
     """Analyze logs the keep-lead breakdown (the shared review_stats block: photo column
-    + format decision) — the same text the TUI Review box renders (§8 B)."""
+    + format decision) — the same text the TUI Review box renders."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -496,7 +496,7 @@ def test_dedup_result_summary_omits_exact_when_not_stage1(queue_and_db, tmp_path
 @win_only
 def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
     """A crash between apply and stage-next (stage_phase='applied') → re-confirm advances,
-    it does NOT re-delete (§8 B Phase 7 resumable window)."""
+    it does NOT re-delete (Phase 7 resumable window)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -542,7 +542,7 @@ def test_dedup_confirm_resumes_from_applied_phase(queue_and_db, tmp_path):
 
 def test_reconcile_interrupted_dry_run_spares_unrelated_pending_review(queue_and_db, tmp_path):
     """An interrupted dedup --dry-run must NOT roll back a real pending review on the
-    same root (§8 B). dry-run owns no root, so it can run alongside a pending review;
+    same root. dry-run owns no root, so it can run alongside a pending review;
     reconcile treating it like an interrupted analyze would delete that review's staging.
     """
     import json as _json
@@ -579,7 +579,7 @@ def test_reconcile_interrupted_dry_run_spares_unrelated_pending_review(queue_and
 
 def test_dedup_multistage_deleted_totals_do_not_double_count(queue_and_db, tmp_path):
     """Each per-stage confirm job reports ONLY its own deletions (drain-on-report), so
-    the lifetime metric summing across a run's confirm jobs never double-counts (§8 B)."""
+    the lifetime metric summing across a run's confirm jobs never double-counts."""
     import json as _json
 
     q, database = queue_and_db
@@ -615,7 +615,7 @@ def test_dedup_multistage_deleted_totals_do_not_double_count(queue_and_db, tmp_p
 
 @win_only
 def test_dedup_stage2_marks_lossless_original_as_lead(queue_and_db, tmp_path):
-    """Stage 2 suggests the lossless original over a same-resolution recompression (§8 B).
+    """Stage 2 suggests the lossless original over a same-resolution recompression.
 
     A resize shifts PDQ into stage 3; the real stage-2 case is a same-resolution
     recompression. The format rank must rank the PNG master above the JPEG."""
@@ -651,7 +651,7 @@ def test_dedup_stage2_marks_lossless_original_as_lead(queue_and_db, tmp_path):
 
 @win_only
 def test_dedup_stage3_has_no_lead(queue_and_db, tmp_path):
-    """Stage 3 (minor edits) is deliberately unranked — no _suggested marker (§8 B)."""
+    """Stage 3 (minor edits) is deliberately unranked — no _suggested marker."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -710,7 +710,7 @@ def test_dedup_confirm_aborts_if_stage_folder_missing(queue_and_db, tmp_path):
 
 @win_only
 def test_dedup_second_analyze_held_while_pending(queue_and_db, tmp_path):
-    """§3: a second analyze on a root with a pending run is ENQUEUED + held, not rejected.
+    """A second analyze on a root with a pending run is ENQUEUED + held, not rejected.
 
     It is not run (its owned root is held → dequeue-gate skips it), so it sits `queued`
     and `blocked_reason` names the holder. A confirm/cancel owns no root → runnable.
@@ -737,7 +737,7 @@ def test_dedup_second_analyze_held_while_pending(queue_and_db, tmp_path):
 
 
 def test_dedup_held_analyze_wakes_after_root_freed(queue_and_db, tmp_path):
-    """A held analyze auto-runs once the pending run it waited on is cancelled (§3 pump).
+    """A held analyze auto-runs once the pending run it waited on is cancelled (pump).
 
     Verifies the finish-pump both starts the next job AND unblocks the one that was
     waiting on the freed root — no separate wake signal.
@@ -768,7 +768,7 @@ def test_dedup_held_analyze_wakes_after_root_freed(queue_and_db, tmp_path):
 
 
 def test_runnable_job_passes_blocked_head_of_queue(queue_and_db, tmp_path):
-    """§3 runnable-first: a blocked job at the head must NOT stall a runnable one behind it.
+    """Runnable-first: a blocked job at the head must NOT stall a runnable one behind it.
 
     With a pending dedup holding root A, submit `scan A` (blocked) THEN `scan B`
     (runnable, different root). The blocked scan A stays queued; scan B jumps it and
@@ -799,7 +799,7 @@ def test_runnable_job_passes_blocked_head_of_queue(queue_and_db, tmp_path):
 
 
 def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
-    """`status` counts reflect the run's CURRENT stage, not all-time rows (§11).
+    """`status` counts reflect the run's CURRENT stage, not all-time rows.
 
     A dedup run keeps its confirmed stage-1 `review_actions` rows after advancing, so
     an unscoped count would report already-deleted exact dups as still 'to delete'.
@@ -834,7 +834,7 @@ def test_status_counts_scope_to_current_dedup_stage(queue_and_db, tmp_path):
 
 
 def test_root_detail_shows_pending_review_and_queued_jobs(queue_and_db, tmp_path):
-    """§12 root detail: pending review + this root's queued backlog (blocked reasons)."""
+    """Root detail: pending review + this root's queued backlog (blocked reasons)."""
     q, database = queue_and_db
     from packrat import queries
 
@@ -861,7 +861,7 @@ def test_root_detail_shows_pending_review_and_queued_jobs(queue_and_db, tmp_path
 
 
 def test_scan_held_on_root_with_pending_dedup(queue_and_db, tmp_path):
-    """§3: a manual scan of a root under review is ENQUEUED + held (not rejected)."""
+    """A manual scan of a root under review is ENQUEUED + held (not rejected)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -881,7 +881,7 @@ def test_scan_held_on_root_with_pending_dedup(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# reconcile — analyze rollback vs. mid-sequence resume (§3)
+# reconcile — analyze rollback vs. mid-sequence resume
 # ---------------------------------------------------------------------------
 def _fake_interrupted_dedup(database, root_id, *, stage, stage_phase, confirm=False):
     database.execute(
@@ -945,7 +945,7 @@ def test_reconcile_keeps_applied_phase_run_pending(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# --prefer-internal (§8 B): stage-1 survivor flip + run-scoped persistence
+# --prefer-internal: stage-1 survivor flip + run-scoped persistence
 # ---------------------------------------------------------------------------
 def _cross_root_dup(tmp_path, database, q):
     """Register an internal + external root sharing one byte-identical photo; scan both.
@@ -998,7 +998,7 @@ def test_dedup_stage1_prefer_internal_deletes_external(queue_and_db, tmp_path):
 
 def test_dedup_prefer_internal_persists_across_confirm(queue_and_db, tmp_path):
     """The flag is stored on the run at analyze and read from the row, NOT re-passed on
-    confirm — a bare --confirm keeps applying the run's policy (§8 B run-scoped)."""
+    confirm — a bare --confirm keeps applying the run's policy (run-scoped)."""
     q, database = queue_and_db
     ri, _re = _cross_root_dup(tmp_path, database, q)
     _run(q, database, "dedup", root_id=ri["id"], prefer_internal=True)

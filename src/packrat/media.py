@@ -1,19 +1,19 @@
-r"""Per-file fingerprinting — the pixels/bytes half of ``scan`` (§8 A2, §5, §9.1).
+r"""Per-file fingerprinting — the pixels/bytes half of ``scan``.
 
 This module turns one file on disk into the values ``scan`` persists:
-- **content hash** — BLAKE3 of the raw bytes (§5.1). Format-agnostic; the identity
+- **content hash** — BLAKE3 of the raw bytes. Format-agnostic; the identity
   key. Always computed; never fails on a decodable-or-not file.
-- **metadata** — dimensions / duration / capture time, best-effort (§8 A2 step 7).
-- **perceptual signature** (M2, §5.3) — photo: one 256-bit PDQ + quality; video:
+- **metadata** — dimensions / duration / capture time, best-effort.
+- **perceptual signature** — photo: one 256-bit PDQ + quality; video:
   duration + per-frame PDQ (+ quality) at ``video.sample_frames`` timeline
-  midpoints. Both gate on a decoded RGB array (§9.1 "decode is the gate").
+  midpoints. Both gate on a decoded RGB array ("decode is the gate").
   **Transport streams (.ts/.m2ts/.mts)** need two extra robustness steps the plain
   mp4/mov path doesn't: they often report no container/stream duration (recovered by
   a demux-only ``_duration_by_demux`` pass) and often break mid-file seeking (so
   sampling falls back from ``_sample_by_seek`` to a single-pass ``_sample_sequential``
   decode). Both only engage when the fast path under-delivers, so mp4/mov are unaffected.
 
-**Graceful failure is mandatory (§9.1).** Bytes hash first, so a file that won't
+**Graceful failure is mandatory.** Bytes hash first, so a file that won't
 decode still gets identity; the caller records it ``undecodable=1`` with a
 ``decode_error`` and no ``phash``/``vphash``. Nothing in here raises past the hash.
 
@@ -23,7 +23,7 @@ runtime (and non-``media`` installs) import this module fine; a scan without the
 
 Decode paths (HEIC/AVIF opener registration, RAW embedded-preview preference,
 first-frame for animated stills, PyAV timeline sampling) are lifted from the
-confirmed M0 smoke test (:mod:`packrat.smoke`) — see the §9.1 wheel notes.
+confirmed smoke test (:mod:`packrat.smoke`) — see the wheel notes.
 """
 
 from __future__ import annotations
@@ -39,16 +39,16 @@ from .profiling import NULL_PROFILER
 
 log = logging.getLogger("packrat.media")
 
-_HASH_CHUNK = 1 << 20  # 1 MiB streaming reads (§10.1 bandwidth-bound over SMB)
+_HASH_CHUNK = 1 << 20  # 1 MiB streaming reads (bandwidth-bound over SMB)
 
 
 # ---------------------------------------------------------------------------
-# media-type classification (by EXTENSION, never by decoding — §8 A2 step 7)
+# media-type classification (by EXTENSION, never by decoding)
 # ---------------------------------------------------------------------------
 def media_type_of(name: str) -> str | None:
     """``'photo'`` / ``'video'`` by extension, or ``None`` if not allowlisted media.
 
-    RAW extensions classify as ``photo`` (they decode to a still — §9.1). The
+    RAW extensions classify as ``photo`` (they decode to a still). The
     caller has already applied the allowlist; this only assigns the type column.
     """
     e = ext_of(name)
@@ -60,18 +60,18 @@ def media_type_of(name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# content hash — always runs (§5.1)
+# content hash — always runs
 # ---------------------------------------------------------------------------
 def hash_file(path: str, *, medium: str = "photo", profiler=NULL_PROFILER) -> str:
-    """Stream a file through BLAKE3, returning the hex digest (§5.1).
+    """Stream a file through BLAKE3, returning the hex digest.
 
     Used for the **video** path and the photo-fallback (files too big to buffer).
-    Uses the long-path-safe form for the actual open (§8 A1). Raises on an I/O
+    Uses the long-path-safe form for the actual open. Raises on an I/O
     error — an unreadable file has no identity and the caller records it as an
     error (distinct from *undecodable*, which still has a hash).
 
     When profiling, each ``read()`` is timed into ``(medium, io)`` (the byte
-    transfer — disk or network, §10.1) and each ``update()`` into ``(medium,
+    transfer — disk or network) and each ``update()`` into ``(medium,
     hash)`` (pure CPU) — a clean transfer-vs-CPU split on the one step that touches
     every byte. The default no-op profiler makes this a plain loop.
     """
@@ -97,7 +97,7 @@ def hash_file(path: str, *, medium: str = "photo", profiler=NULL_PROFILER) -> st
 
 
 def hash_bytes(data: bytes, *, medium: str = "photo", profiler=NULL_PROFILER) -> str:
-    """BLAKE3 of an in-memory buffer (§5.1) — the **photo pipeline** consumer path.
+    """BLAKE3 of an in-memory buffer — the **photo pipeline** consumer path.
 
     The producer already read the bytes off disk/NAS (timed as ``io``), so this is
     *pure CPU*: timed into ``(medium, hash)`` with no I/O to blur it.
@@ -113,7 +113,7 @@ def hash_bytes(data: bytes, *, medium: str = "photo", profiler=NULL_PROFILER) ->
 # ---------------------------------------------------------------------------
 @dataclass
 class FrameSig:
-    """One sampled video frame's PDQ (§5.3)."""
+    """One sampled video frame's PDQ."""
 
     frame_index: int
     t_offset_s: float
@@ -125,7 +125,7 @@ class FrameSig:
 class Fingerprint:
     """Everything scan persists for one file besides its ``file_instances`` row.
 
-    ``undecodable`` + ``decode_error`` mirror the §4 asset columns. For a photo
+    ``undecodable`` + ``decode_error`` mirror the asset columns. For a photo
     ``phash_bits``/``phash_quality`` are set (unless undecodable); for a video
     ``frames`` holds the per-frame PDQ rows and ``duration_s`` the clip length.
     """
@@ -139,7 +139,7 @@ class Fingerprint:
     captured_at: str | None = None
     undecodable: bool = False
     decode_error: str | None = None
-    #: Video codec name (h264|hevc|av1|…) for the §8 B video keep-lead weight. Video only.
+    #: Video codec name (h264|hevc|av1|…) for the video keep-lead weight. Video only.
     codec: str | None = None
     # photo perceptual
     phash_bits: bytes | None = None
@@ -149,12 +149,12 @@ class Fingerprint:
 
 
 # ---------------------------------------------------------------------------
-# decode (lifted from the confirmed M0 smoke test — §9.1)
+# decode (lifted from the confirmed smoke test)
 # ---------------------------------------------------------------------------
 def _register_heif_openers() -> None:
     """Enable HEIC + AVIF decode. pillow-heif ≥1.4 covers both via one call.
 
-    (M0 gotcha: ``register_avif_opener`` was dropped in 1.4 — guard it.)
+    (Gotcha: ``register_avif_opener`` was dropped in 1.4 — guard it.)
     """
     try:
         import pillow_heif  # type: ignore
@@ -171,7 +171,7 @@ def _register_heif_openers() -> None:
 def _decode_still(
     path: str, *, data: bytes | None = None, profiler=NULL_PROFILER
 ) -> tuple["object", str | None]:
-    """Return ``(RGB numpy array, captured_at|None)`` for a photo/RAW still (§9.1).
+    """Return ``(RGB numpy array, captured_at|None)`` for a photo/RAW still.
 
     ``data`` (in-memory bytes) is the **photo pipeline** path: the producer already
     read the file, so decode runs from RAM — timed into ``(photo, decode)`` as
@@ -180,7 +180,7 @@ def _decode_still(
     bytes and is therefore mixed I/O+CPU — still bucketed as decode.
 
     ``path``'s extension decides RAW vs regular either way. Capture time comes from
-    PIL EXIF (no ``exiftool`` subprocess — §10.1); RAW uses rawpy's embedded
+    PIL EXIF (no ``exiftool`` subprocess); RAW uses rawpy's embedded
     preview and skips EXIF (best-effort).
     """
     import numpy as np
@@ -194,7 +194,7 @@ def _decode_still(
             raw_src = BytesIO(data) if data is not None else fsutil.extended(path)
             with rawpy.imread(raw_src) as raw:
                 try:
-                    thumb = raw.extract_thumb()  # prefer embedded preview (§9.1)
+                    thumb = raw.extract_thumb()  # prefer embedded preview
                     if thumb.format == rawpy.ThumbFormat.JPEG:
                         from PIL import Image
 
@@ -215,12 +215,12 @@ def _decode_still(
         with Image.open(src) as img:
             captured_at = _exif_capture_time(img)
             if getattr(img, "is_animated", False):
-                img.seek(0)  # first frame for animated GIF / multi-page TIFF (§9.1)
+                img.seek(0)  # first frame for animated GIF / multi-page TIFF
             return np.asarray(img.convert("RGB")), captured_at
 
 
 def _exif_capture_time(img) -> str | None:
-    """Best-effort capture time from an open PIL image's EXIF (§8 A2 step 7).
+    """Best-effort capture time from an open PIL image's EXIF.
 
     Reads ``DateTimeOriginal`` (0x9003), falling back to ``DateTime`` (0x0132),
     normalizing EXIF's ``YYYY:MM:DD HH:MM:SS`` to ISO. Never raises.
@@ -265,9 +265,9 @@ def _downscale_for_pdq(arr, max_edge: int):
 def _pdq(arr, *, max_edge: int = 0, medium: str = "photo", profiler=NULL_PROFILER) -> tuple[bytes, int]:
     """Compute PDQ over an RGB array; return ``(32-byte packed bits, quality)``.
 
-    Downscales to ``max_edge`` first (§ profiler finding — PDQ was the largest
-    scan bucket, dominated by full-res input). Pure CPU + a small resize, timed
-    into ``(medium, pdq)`` when profiling (§10.1 CPU signal).
+    Downscales to ``max_edge`` first (PDQ was the largest scan bucket, dominated
+    by full-res input). Pure CPU + a small resize, timed
+    into ``(medium, pdq)`` when profiling (CPU signal).
     """
     import numpy as np
     import pdqhash  # type: ignore
@@ -282,15 +282,15 @@ def _pdq(arr, *, max_edge: int = 0, medium: str = "photo", profiler=NULL_PROFILE
 def _probe_video(
     path: str, cfg: VideoConfig, *, max_edge: int = 0, profiler=NULL_PROFILER
 ) -> tuple[float | None, int | None, int | None, str | None, str | None, list[FrameSig]]:
-    """Decode a video: return ``(duration_s, width, height, captured_at, codec, frames)`` (§5.3).
+    """Decode a video: return ``(duration_s, width, height, captured_at, codec, frames)``.
 
     Samples ``cfg.sample_frames`` frames at segment midpoints ``t_k = dur·(k+0.5)/N``.
     For each target time we seek to the preceding keyframe then decode forward to
     the first frame at/after the target (seek lands on a keyframe, not the exact
     pts). Per-frame PDQ + quality is stored for *every* decoded frame; the
-    ``min_frame_quality`` gate is a *matching*-time filter (M3), not a scan-time
-    drop (§5.3: frames are "stored, but flagged"). ``codec`` is the video stream's
-    codec name (``h264``/``hevc``/``av1``/…) for the §8 B video keep-lead weight.
+    ``min_frame_quality`` gate is a *matching*-time filter, not a scan-time
+    drop (frames are "stored, but flagged"). ``codec`` is the video stream's
+    codec name (``h264``/``hevc``/``av1``/…) for the video keep-lead weight.
     """
     import av  # type: ignore
 
@@ -306,13 +306,13 @@ def _probe_video(
         codec = (vs.codec_context.name or None) if vs.codec_context else None
         # Transport streams (.ts/.m2ts/.mts) and other header-less muxes routinely report NO
         # stream/container duration. Without a timeline we'd fall through to a single frame
-        # below → too few comparable frames to ever match (§5.3 min_comparable_frames), so the
+        # below → too few comparable frames to ever match (min_comparable_frames), so the
         # clip is catalogued but invisible to dedup. `_video_duration_s` prefers the stream
         # duration, then the container's, then a demux-only fallback (packet headers, not
         # pixels, in its OWN container so THIS one stays pristine) — only when neither native
         # source exists. Timed as "io", NOT "decode": the fallback reads packet headers off
         # disk/SMB and decodes no pixels, so it belongs in the byte-transfer bucket, not the
-        # CPU decode bucket the profiler distinguishes (§profiler-metrics).
+        # CPU decode bucket the profiler distinguishes.
         with profiler.timer("video", "io"):
             duration_s = _video_duration_s(
                 vs.duration, tb, container.duration, av.time_base,
@@ -336,7 +336,7 @@ def _probe_video(
             # on any shortfall (not just below min_comparable_frames) matters: a partial 5–11
             # frame seek result is still a thinner, sparser signal than the full n, and the
             # matcher aligns two clips by frame_index — so more frames = more comparable pairs
-            # = higher recall on borderline near-dups (§5.3). The sequential pass is cheap
+            # = higher recall on borderline near-dups. The sequential pass is cheap
             # relative to a missed dup, and only runs when the fast seek path under-delivered.
             if len(frames) < n:
                 seq = _sample_sequential(container, vs, tb, targets, max_edge=max_edge,
@@ -344,11 +344,11 @@ def _probe_video(
                 if len(seq) > len(frames):
                     frames = seq
 
-        # Guarantee ≥1 frame so the asset is "fully fingerprinted" (§8 A2 — a vphash row must
+        # Guarantee ≥1 frame so the asset is "fully fingerprinted" (a vphash row must
         # exist, else every scan re-decodes it). Covers a still-unknown duration AND a clip that
         # is decodable but yielded nothing above: decode the first frame from the start. Such a
         # clip still won't have enough comparable frames to dedup, but it's catalogued once and
-        # skipped by the fast-path (a truly undecodable file yields nothing → undecodable, §9.1).
+        # skipped by the fast-path (a truly undecodable file yields nothing → undecodable).
         if not frames:
             with profiler.timer("video", "decode"):
                 try:
@@ -406,7 +406,7 @@ def _sample_sequential(container, vs, tb, targets, *, max_edge, profiler) -> lis
     When a clip has FEWER real frames than targets (short/low-fps, or targets past the last
     frame), one decoded frame is the nearest to several targets: it is emitted under EACH such
     target's index — PDQ'd once, reused — so the slot count stays == the number of satisfied
-    targets rather than collapsing. Matching aligns by frame_index (§5.3), so filling every
+    targets rather than collapsing. Matching aligns by frame_index, so filling every
     covered slot with the same frame preserves alignment with a full-count peer instead of
     leaving gaps that shrink the comparable-pair set."""
     frames: list[FrameSig] = []
@@ -435,7 +435,7 @@ def _sample_sequential(container, vs, tb, targets, *, max_edge, profiler) -> lis
 
 
 def _video_duration_s(stream_dur, tb, container_dur, container_tb, *, demux_dur) -> float | None:
-    """Pick a video's duration (seconds) from the available sources, best-first (§5.3).
+    """Pick a video's duration (seconds) from the available sources, best-first.
 
     Order: the video **stream** duration (``stream_dur`` in ``tb`` units) → the **container**
     duration (``container_dur`` in ``container_tb`` units, i.e. ``av.time_base``) → the
@@ -455,7 +455,7 @@ def _video_duration_s(stream_dur, tb, container_dur, container_tb, *, demux_dur)
 
 
 def _duration_by_demux(path: str) -> float | None:
-    """Estimate a video's LENGTH (seconds) from its packet timestamps (§5.3 fallback).
+    """Estimate a video's LENGTH (seconds) from its packet timestamps (fallback).
 
     For containers that report no stream/container duration (transport streams, truncated
     captures), open a **separate short-lived container** and demux the video stream WITHOUT
@@ -499,7 +499,7 @@ def _duration_by_demux(path: str) -> float | None:
 
 
 def _video_capture_time(container) -> str | None:
-    """Best-effort capture time from a PyAV container's metadata (§8 A2 step 7).
+    """Best-effort capture time from a PyAV container's metadata.
 
     Reads the ``creation_time`` tag most containers carry; normalizes to a bare
     ISO datetime. Never raises.
@@ -526,7 +526,7 @@ def fingerprint(
     content_hash: str | None = None,
     profiler=NULL_PROFILER,
 ) -> Fingerprint:
-    """Hash + (optionally) decode + perceptual-hash one file by **path** (§8 A2 5–8).
+    """Hash + (optionally) decode + perceptual-hash one file by **path**.
 
     The path-based entry point — used for videos and the photo-fallback (oversized
     files). Always hashes (or reuses ``content_hash``). The photo pipeline instead
@@ -542,16 +542,16 @@ def fingerprint(
 
 
 def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
-    r"""Best-effort metadata (dims / duration / captured_at / codec) — **no PDQ** (§8 C step 11).
+    r"""Best-effort metadata (dims / duration / captured_at / codec) — **no PDQ**.
 
     Used by ``merge`` to fill a ``new`` asset's display columns when it registers a
     just-copied file, *without* the expensive perceptual pass: a later ``scan``/``dedup``
     of the dest backfills ``phash``/``vphash`` (and re-derives these metadata columns
-    via the not-yet-fingerprinted backfill exception, §8 A2 step 6). So this is a
+    via the not-yet-fingerprinted backfill exception). So this is a
     lightweight header read, not a full decode+hash.
 
     A merge-created asset is **not-yet-fingerprinted** (``undecodable=0``, no phash yet)
-    — *not* undecodable (§4). So this never sets ``undecodable``: on any probe failure it
+    — *not* undecodable. So this never sets ``undecodable``: on any probe failure it
     just leaves the metadata fields ``None`` and returns (the backfill scan sorts out
     real decodability). Never raises. ``content_hash`` is left blank — the caller supplies
     the frozen hash from the merge plan.
@@ -570,7 +570,7 @@ def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
                 fp.codec = (vs.codec_context.name or None) if vs.codec_context else None
                 # Same duration-source ladder as _probe_video (incl. the .ts demux fallback),
                 # so a merged transport stream gets a real duration in its display column
-                # rather than NULL — one seam, consistent across both probe paths (§5.3).
+                # rather than NULL — one seam, consistent across both probe paths.
                 fp.duration_s = _video_duration_s(
                     vs.duration, tb, container.duration, av.time_base,
                     demux_dur=lambda: _duration_by_demux(path))
@@ -598,14 +598,14 @@ def probe_metadata(path: str, media_type: str, config) -> Fingerprint:
 def fill_perceptual(
     fp: Fingerprint, path: str, config, *, data: bytes | None = None, profiler=NULL_PROFILER
 ) -> Fingerprint:
-    """Decode and fill ``fp``'s perceptual/metadata fields in place (M2, §5.3).
+    """Decode and fill ``fp``'s perceptual/metadata fields in place.
 
     ``data`` (photo pipeline) decodes from RAM; otherwise from ``path``. A decode
     failure sets ``undecodable=1`` + ``decode_error`` and leaves the perceptual
-    fields empty (§9.1) — never raises past here. Capture time / dimensions come
-    from the same decode pass (no ``exiftool`` subprocess, §10.1).
+    fields empty — never raises past here. Capture time / dimensions come
+    from the same decode pass (no ``exiftool`` subprocess).
     """
-    # Downscale-before-PDQ edge (§ profiler finding). Full-res dimensions are read
+    # Downscale-before-PDQ edge. Full-res dimensions are read
     # from the decoded array *before* PDQ downscales its own copy, so stored
     # width/height stay original — only the hash input shrinks.
     max_edge = config.match.pdq_max_edge
@@ -629,7 +629,7 @@ def fill_perceptual(
             fp.captured_at = captured_at
             bits, quality = _pdq(arr, max_edge=max_edge, medium="photo", profiler=profiler)
             fp.phash_bits, fp.phash_quality = bits, quality
-    except Exception as exc:  # noqa: BLE001 - undecodable: keep the hash, flag it (§9.1)
+    except Exception as exc:  # noqa: BLE001 - undecodable: keep the hash, flag it
         fp.undecodable = True
         fp.decode_error = f"{type(exc).__name__}: {exc}"[:500]
         fp.phash_bits = fp.phash_quality = None

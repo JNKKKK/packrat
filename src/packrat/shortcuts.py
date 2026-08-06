@@ -1,4 +1,4 @@
-r"""Windows shell primitives for dedup/cleanup staging (§8 B Phase 4/6, §14 #4).
+r"""Windows shell primitives for dedup/cleanup staging.
 
 Two operations the review workflow needs, kept behind thin wrappers so their
 Windows-only deps import lazily (the runtime stays importable on a non-Windows
@@ -8,13 +8,13 @@ dev box, per :mod:`packrat.paths`):
   ``IShellLink`` COM interface. Explorer shows the target's thumbnail/preview for
   such a shortcut, which is the whole point of staging shortcuts instead of copies
   (no extra disk, live preview). Confirmed working from the daemon's worker thread
-  (spike, §14 #4): pure COM, **not** ``win32com.client.Dispatch``.
+  (spike): pure COM, **not** ``win32com.client.Dispatch``.
 - :func:`recycle` — move a file to the Recycle Bin via ``send2trash``. ⚠ It must
   be given the **plain** canonical path — the ``\\?\`` extended form is rejected
   (spike). On a NAS/SMB share there is no Recycle Bin, so this deletes
-  **permanently** (§10); callers warn before confirming.
+  **permanently**; callers warn before confirming.
 
-The confirm path keys off shortcut *presence* (§8 B Phase 5), so it never needs to
+The confirm path keys off shortcut *presence*, so it never needs to
 resolve a ``.lnk`` back to its target.
 """
 
@@ -26,7 +26,7 @@ log = logging.getLogger("packrat.shortcuts")
 
 
 def create_shortcut(lnk_path: str, target_path: str) -> None:
-    r"""Create a ``.lnk`` at ``lnk_path`` pointing at ``target_path`` (§8 B Phase 4).
+    r"""Create a ``.lnk`` at ``lnk_path`` pointing at ``target_path``.
 
     Both paths are plain (non-extended) canonical strings. COM is initialized for
     the calling thread for the duration of the call (idempotent + refcounted, so
@@ -54,11 +54,11 @@ def create_shortcut(lnk_path: str, target_path: str) -> None:
 
 
 def recycle(path: str) -> None:
-    r"""Move ``path`` to the Recycle Bin (§8 B Phase 6, §10).
+    r"""Move ``path`` to the Recycle Bin.
 
     ``path`` must be the **plain** canonical form (send2trash rejects ``\\?\``).
-    On a network/SMB root there is no Recycle Bin → this is a **permanent** delete
-    (§10); the caller warns first. Raises ``FileNotFoundError`` if the file is gone
+    On a network/SMB root there is no Recycle Bin → this is a **permanent** delete;
+    the caller warns first. Raises ``FileNotFoundError`` if the file is gone
     (the confirm path stats first, so this is a belt-and-suspenders signal).
     """
     from send2trash import send2trash  # type: ignore

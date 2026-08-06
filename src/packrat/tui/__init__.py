@@ -1,9 +1,9 @@
-"""packrat TUI (M6, §12) — the default face of the tool.
+"""packrat TUI — the default face of the tool.
 
 A Textual app that renders the daemon's read-model snapshots + SSE progress
-stream into a full-terminal set of interfaces (§12). It adds no backend and issues
+stream into a full-terminal set of interfaces. It adds no backend and issues
 no privileged operation of its own: every action maps to an existing CLI verb /
-daemon endpoint (design tenet §1.6).
+daemon endpoint.
 
 Layered as a **pure render core + thin Textual widgets**:
 - :mod:`packrat.tui.tokens`    — pure values (sizes, glyphs, color roles, Theme).

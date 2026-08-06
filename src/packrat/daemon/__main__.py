@@ -1,7 +1,7 @@
 """Entrypoint for the detached daemon process: ``python -m packrat.daemon``.
 
 Spawned by :func:`packrat.daemon.spawn.spawn_daemon`. Binding the loopback port
-inside :func:`run_daemon` is the single-instance lock (§3): if the port is taken,
+inside :func:`run_daemon` is the single-instance lock: if the port is taken,
 this process exits and the client connects to the winner.
 
 Logging goes to a **date-rotating** ``daemon.log`` (rolls at local midnight into
@@ -72,7 +72,7 @@ def _setup_logging() -> None:
 
     uvicorn's **access** logger is also nudged to ``WARNING`` here as a fallback (it
     emits one record per HTTP request, and the TUI/CLI poll ``/health``/``/jobs``/
-    ``/status`` continuously — the per-poll spam that previously filled the log). Note
+    ``/status`` continuously — the per-poll spam that would otherwise fill the log). Note
     this ``setLevel`` alone does *not* stick under a live server: uvicorn's
     ``configure_logging()`` resets ``uvicorn.access`` back to its ``log_level`` during
     ``server.run()``. The authoritative kill is ``access_log=False`` on the

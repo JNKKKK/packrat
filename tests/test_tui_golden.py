@@ -2,7 +2,7 @@
 
 The builders are pure (``dict → lines``) rendered from :mod:`packrat.tui.fixtures`;
 wrapped in the shared ``framing.screen`` they must produce an exact-size frame with
-the expected content. These assert the fixed-frame invariant (§12: 100×24 at the
+the expected content. These assert the fixed-frame invariant (100×24 at the
 reference size, every row full width) plus the key content/layout of each screen —
 no Textual pilot needed, just plain string checks.
 """
@@ -47,7 +47,7 @@ def test_dashboard_idle_structural():
 
 
 def test_dashboard_running_structural():
-    """§1.2 (work in flight): structural checks, not byte-exact.
+    """Work in flight: structural checks, not byte-exact.
 
     The mockup's queue preview uses hand-authored positional numbering + shortened
     reasons that don't derive cleanly from the data model, so we assert the frame's
@@ -60,11 +60,11 @@ def test_dashboard_running_structural():
     rows = built.split("\n")
     assert len(rows) == 24 and all(len(r) == 100 for r in rows)
     assert "▶ scan iPhone" in built and "ETA" in built
-    assert "█" in built and "░" in built          # the visual progress bar (§6)
+    assert "█" in built and "░" in built          # the visual progress bar
     assert "67%" in built and "8,912/13,204" in built
     # The dashboard queue box is now ~1/4 of the split (Roots:Queue 3:1) → 2 rows at the
     # reference size, so the running bar + a "… N more" truncation marker show; the full
-    # backlog (blocked reasons, waiting rows) lives in the maximized §4 Queue view.
+    # backlog (blocked reasons, waiting rows) lives in the maximized Queue view.
     assert "more" in built                         # the truncated-preview marker
 
 
@@ -96,7 +96,7 @@ def test_add_root_form_structural():
     assert "Register a new root" in built
     assert "(•) library" in built and "( ) trash" in built     # Kind radio
     assert "[x] scan immediately after registering" in built
-    # --full is a togglable checkbox (unchecked here); --embed is gone (deferred to M7).
+    # --full is a togglable checkbox (unchecked here); --embed is gone (deferred).
     assert "[ ] --full" in built
     assert "--embed" not in built
     assert r"\\tubie_nas\Res-v2\NewPhone" in built             # the typed path
@@ -110,10 +110,10 @@ def test_add_root_form_full_checked():
     assert "[x] --full" in built
 
 
-# --- §3 / §4 / §5: fixed-size structural checks ----------------------------
+# --- fixed-size structural checks ----------------------------
 # These interfaces carry
 # hand-authored illustrative detail in the mockups, so we assert the fixed-frame
-# invariant + key content rather than byte-equality (same policy as §1.2).
+# invariant + key content rather than byte-equality (same policy as the work-in-flight test).
 def _fixed(frame: str) -> list[str]:
     return _fixed_at(frame, 100, 24)
 
@@ -134,7 +134,7 @@ def test_root_detail_pending_fits_and_shows_review():
     built = screen(f"packrat · {d['name']}", detail_body(d, now=NOW, jobs=jobs),
                    detail_header_right(d), footer="Esc")
     _fixed(built)
-    # 3-column stats header: packrat mascot | counts | scan/dedup dates (§3)
+    # 3-column stats header: packrat mascot | counts | scan/dedup dates
     assert "(>📁<)" in built                       # the 📁-clutching mascot
     assert "assets" in built and "92,110" in built  # photo count in the counts column
     assert "last scan" in built and "last dedup" in built
@@ -144,7 +144,7 @@ def test_root_detail_pending_fits_and_shows_review():
     assert "⚠ dedup — awaiting review (stage 2 of 3)" in built
     assert "240 to delete (exact) · 18 groups / 47 members" in built
     assert "[o] open in Explorer" in built
-    # Stage-2 dedup offers the bulk keep-suggested confirm (§8 B --keep-suggested).
+    # Stage-2 dedup offers the bulk keep-suggested confirm (--keep-suggested).
     assert "[b] confirm · keep suggested" in built
     # A blank spacer row sits between the stats block and the Review box.
     rows = built.split("\n")
@@ -237,7 +237,7 @@ def test_root_detail_stage3_review_shows_histogram_and_makeup():
 
 def test_root_detail_review_height_is_ratio_capped():
     """The Review box never exceeds half the shared interior (review:jobs ≤ 1:1), and a
-    calm root collapses the box to a single row — the responsive-height contract (§3)."""
+    calm root collapses the box to a single row — the responsive-height contract."""
     from packrat.tui.geometry import Geometry
     from packrat.tui.screens.rootdetail import _detail_split
 
@@ -263,7 +263,7 @@ def test_queue_interface_fits_and_has_three_sections():
     assert "[Q]UEUED (RUNS TOP-DOWN):" in built     # focused → uppercased
     assert "[H]istory:" in built
     assert "▶ #418 scan iPhone" in built
-    assert "█" in built and "░" in built             # Running row shows the bar (§6)
+    assert "█" in built and "░" in built             # Running row shows the bar
     # each section has its OWN paginator (independent windows) → two "page i/N"
     assert built.count("page ") >= 2
 
@@ -277,7 +277,7 @@ def test_scan_result_card_fits():
 
 
 def test_scan_result_card_lists_problem_files():
-    """A scan card with undecodable/read-error files lists their paths + reasons (§12)."""
+    """A scan card with undecodable/read-error files lists their paths + reasons."""
     j = fixtures.SCAN_DONE
     built = screen(jobcard.card_title(j),
                    jobcard.card_body(j, now=NOW, problem_files=fixtures.SCAN_PROBLEM_FILES),
@@ -343,7 +343,7 @@ def test_already_clean_dedup_card():
     assert "already clean" in built
 
 
-# --- §3.3 merge picker -----------------------------------------------------
+# --- merge picker -----------------------------------------------------
 def test_merge_picker_registered_root_variant():
     dest = fixtures.root_detail_clean()          # Camera
     sources = merge_sources(fixtures.ROOTS, dest["name"])

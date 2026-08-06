@@ -1,4 +1,4 @@
-"""Video stage-2 keep-lead ranking (§8 B): resolution → bitrate band → codec → raw bitrate.
+"""Video stage-2 keep-lead ranking: resolution → bitrate band → codec → raw bitrate.
 
 Unit-level: drives ``dedup._pick_lead`` + the band/effective-bitrate helpers with
 synthetic rank rows, so no video decode is needed. The codec-weight fixes the
@@ -113,7 +113,7 @@ def test_video_lead_same_codec_raw_bitrate_breaks_band_tie():
 
 
 # ---------------------------------------------------------------------------
-# internal/external keep-preference tiebreak (§8 B --prefer-internal)
+# internal/external keep-preference tiebreak (--prefer-internal)
 # ---------------------------------------------------------------------------
 def _mixed_members(*specs):
     """specs: (asset_id, root_id) — build members spanning internal (root 1) + external."""
@@ -194,7 +194,7 @@ def test_video_lead_config_weights_override():
 
 
 # ---------------------------------------------------------------------------
-# photo keep-lead (§8 B): resolution → format rank → file size
+# photo keep-lead: resolution → format rank → file size
 # ---------------------------------------------------------------------------
 def _photo_members(*specs):
     """specs: (id, ext) pairs → [(id, instance-dict)] with the ext in the path."""
@@ -232,7 +232,7 @@ def test_photo_lead_resolution_dominates():
 
 
 def test_photo_lead_lossless_beats_lossy():
-    """At equal resolution a lossless master outranks a lossy sibling regardless of size (§8 B)."""
+    """At equal resolution a lossless master outranks a lossy sibling regardless of size."""
     cfg = Config()
     m = _photo_members((1, "png"), (2, "jpg"))
     rank = _photo_rank(
@@ -243,7 +243,7 @@ def test_photo_lead_lossless_beats_lossy():
 
 
 def test_photo_lead_heic_master_beats_jpeg_export():
-    """A HEIC master outranks its JPEG export at equal resolution (§8 B).
+    """A HEIC master outranks its JPEG export at equal resolution.
 
     HEIC/AVIF are efficient-lossy (format rank 1) vs JPEG's 0, so an iPhone HEIC
     original beats its JPEG export even when the JPEG's file is larger — file size
@@ -259,7 +259,7 @@ def test_photo_lead_heic_master_beats_jpeg_export():
 
 
 def test_photo_lead_size_breaks_tie_within_format():
-    """Same resolution + same format → the larger (less-compressed) file wins (§8 B)."""
+    """Same resolution + same format → the larger (less-compressed) file wins."""
     cfg = Config()
     m = _photo_members((1, "jpg"), (2, "jpg"))
     rank = _photo_rank(
@@ -270,7 +270,7 @@ def test_photo_lead_size_breaks_tie_within_format():
 
 
 # ---------------------------------------------------------------------------
-# keep-lead DECISION LEVEL (drives the stage-2 lead-pick stats, §8 B)
+# keep-lead DECISION LEVEL (drives the stage-2 lead-pick stats)
 # ---------------------------------------------------------------------------
 def test_lead_level_resolution():
     cfg = Config()

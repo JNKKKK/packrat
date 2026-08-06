@@ -1,9 +1,9 @@
-"""HTTP client the CLI/TUI use to drive the daemon (§3).
+"""HTTP client the CLI/TUI use to drive the daemon.
 
 Thin wrapper over ``httpx`` that attaches the loopback token and exposes the
 daemon endpoints. SSE streaming is handled by :meth:`DaemonClient.stream_job`,
 which yields decoded progress events; a dropped stream is the caller's cue to
-reconnect (job state is durable — §3).
+reconnect (job state is durable).
 """
 
 from __future__ import annotations
@@ -73,14 +73,14 @@ class DaemonClient:
         return self._get(f"/jobs/{job_id}")
 
     def job_problem_files(self, job_id: int) -> list[dict]:
-        """A scan job's undecodable/read-error files (paths + reasons, §12 card)."""
+        """A scan job's undecodable/read-error files (paths + reasons; result card)."""
         return self._get(f"/jobs/{job_id}/problem-files")["problem_files"]
 
     def list_jobs(self, limit: int = 20) -> list[dict]:
         return self._get(f"/jobs?limit={limit}")["jobs"]
 
     def history_page(self, limit: int, offset: int) -> tuple[list[dict], int]:
-        """One page of finished jobs + the true total (TUI Queue History, §12 lazy load).
+        """One page of finished jobs + the true total (TUI Queue History, lazy load).
 
         ``terminal_only`` so the page matches the History section (running/queued come
         from the snapshot). Returns ``(jobs, total)`` — ``total`` drives ``page K/N``
@@ -89,7 +89,7 @@ class DaemonClient:
         return r["jobs"], r.get("total", len(r["jobs"]))
 
     def root_history_page(self, root_id: int, limit: int, offset: int) -> tuple[list[dict], int]:
-        """One page of a root's terminal job history + true total (root-detail History, §12).
+        """One page of a root's terminal job history + true total (root-detail History).
 
         Hits the id-keyed ``/roots/{id}/history`` resource (always terminal — the root's
         live running/queued come from ``root_detail``)."""
@@ -100,11 +100,11 @@ class DaemonClient:
         return bool(self._post(f"/jobs/{job_id}/cancel", {})["cancelled"])
 
     def prioritize_job(self, job_id: int) -> bool:
-        """Bump a queued job to the front of the dequeue order (§11 ``jobs prioritize``)."""
+        """Bump a queued job to the front of the dequeue order (``jobs prioritize``)."""
         return bool(self._post(f"/jobs/{job_id}/prioritize", {})["prioritized"])
 
     def cancel_queued(self) -> int:
-        """Drop every queued job from the backlog (§12 ``[x]``); returns count dropped."""
+        """Drop every queued job from the backlog (``[x]``); returns count dropped."""
         return int(self._post("/jobs/cancel-queued", {})["dropped"])
 
     def stream_job(self, job_id: int) -> Iterator[dict]:
@@ -134,7 +134,7 @@ class DaemonClient:
         full: bool = False,
         embed: bool = False,
     ) -> dict:
-        """Register a root (§8 A1). Returns ``{root, job_id}`` (``job_id`` set with --scan).
+        """Register a root. Returns ``{root, job_id}`` (``job_id`` set with --scan).
 
         A ``RootError`` from the daemon comes back as HTTP 400 → :class:`DaemonError`
         carrying the validation message.
@@ -158,10 +158,10 @@ class DaemonClient:
         dry_run: bool = False,
         profile: bool = False,
     ) -> int:
-        """Submit a scan job (§8 A2); returns the job id.
+        """Submit a scan job; returns the job id.
 
-        Always enqueued (§3 durable queue) — a busy worker / held root no longer
-        rejects, so the only failure is a validation error (:class:`DaemonError`).
+        Always enqueued (durable queue) — a busy worker / held root does not
+        reject, so the only failure is a validation error (:class:`DaemonError`).
         """
         return int(self._post(
             "/scan",
@@ -172,7 +172,7 @@ class DaemonClient:
     def submit_probe(
         self, root: str | None = None, *, all_roots: bool = False
     ) -> list[int]:
-        """Submit a probe job (§8 A2b); returns the per-root job id(s) (always enqueued).
+        """Submit a probe job; returns the per-root job id(s) (always enqueued).
 
         A single ``root`` (path/--name) probes that one root; ``--all`` fans out to one
         ``probe <root>`` per enabled library root (the daemon does the fan-out). The
@@ -193,7 +193,7 @@ class DaemonClient:
         keep_suggested: bool = False,
         prefer_internal: bool = False,
     ) -> int:
-        """Submit a dedup job (§8 B); returns the job id (always enqueued, §3)."""
+        """Submit a dedup job; returns the job id (always enqueued)."""
         return int(self._post(
             "/dedup",
             {"root": folder, "confirm": confirm, "cancel": cancel, "dry_run": dry_run,
@@ -210,7 +210,7 @@ class DaemonClient:
         dry_run: bool = False,
         apply: bool = False,
     ) -> int:
-        """Submit a cleanup job (§6.2, §9.1); returns the job id (always enqueued, §3).
+        """Submit a cleanup job; returns the job id (always enqueued).
 
         ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable``.
         """
@@ -221,11 +221,11 @@ class DaemonClient:
         )["job_id"])
 
     def cleanup_preview(self, folder: str, mode: str = "exact") -> dict:
-        """Read-only count for a one-shot cleanup mode's confirm (§6.2, §9.1)."""
+        """Read-only count for a one-shot cleanup mode's confirm."""
         return self._get("/cleanup/preview", params={"root": folder, "mode": mode})
 
     def submit_merge(self, source: str, into: str, *, dry_run: bool = False) -> int:
-        """Submit a merge job (§8 C); returns the job id (always enqueued, §3).
+        """Submit a merge job; returns the job id (always enqueued).
 
         ``into`` is the ``--into`` dest (a root name or a subfolder path); the daemon
         resolves it to the containing library root. A ``RootError`` (dest under no
@@ -236,7 +236,7 @@ class DaemonClient:
         )["job_id"])
 
     def submit_trash_refresh(self, root: str | None = None) -> int:
-        """Submit a ``trash refresh`` job (§6.1); returns the job id (always enqueued).
+        """Submit a ``trash refresh`` job; returns the job id (always enqueued).
 
         ``root`` (path/--name) scopes the refresh to a single trash root; ``None``
         refreshes every trash root. A non-trash / unknown root comes back as HTTP
@@ -245,24 +245,24 @@ class DaemonClient:
         return int(self._post("/trash/refresh", {"root": root})["job_id"])
 
     def submit_untrash(self, path: str, *, dry_run: bool = False) -> int:
-        """Submit an ``untrash`` job (§6.3); returns the job id (always enqueued)."""
+        """Submit an ``untrash`` job; returns the job id (always enqueued)."""
         return int(self._post("/untrash", {"path": path, "dry_run": dry_run})["job_id"])
 
-    # -- snapshots (§12 resource model) ----------------------------------
+    # -- snapshots (resource model) --------------------------------------
     def stats(self) -> dict:
-        """App-wide collection summary — the dashboard Collection box (§1.1). Cheap to poll
+        """App-wide collection summary — the dashboard Collection box. Cheap to poll
         rarely; only moves when a scan/dedup completes. Collection aggregations only (no
         jobs/roots/reviews — those are their own resources)."""
         return self._get("/stats")
 
     def live_jobs(self) -> dict:
         """Live job state (running + queued + interrupted), one consistent read — the
-        dashboard Queue box + maximized Queue live sections (§12). Pure jobs: reviews are
+        dashboard Queue box + maximized Queue live sections. Pure jobs: reviews are
         a separate resource (:meth:`reviews`)."""
         return self._get("/jobs/live")
 
     def reviews(self) -> list[dict]:
-        """Open review runs across all roots (§8 B/§6.2) — the ``/reviews`` resource. A
+        """Open review runs across all roots — the ``/reviews`` resource. A
         review is review_runs state, not a job, so it's read separately from /jobs/live."""
         return self._get("/reviews")["reviews"]
 
@@ -270,9 +270,9 @@ class DaemonClient:
         return self._get("/roots")["roots"]
 
     def status_snapshot(self) -> dict:
-        """The composed global rollup for ``packrat status`` (no args) — the old ``/status``
-        dict shape, now assembled CLIENT-SIDE from the decomposed resources (§12): /stats +
-        /jobs/live + /reviews + /roots. The daemon no longer serves a combined snapshot;
+        """The composed global rollup for ``packrat status`` (no args) — the ``/status``
+        dict shape, assembled CLIENT-SIDE from the decomposed resources: /stats +
+        /jobs/live + /reviews + /roots. The daemon does not serve a combined snapshot;
         the CLI is a human summary (not a hot path), so composing here keeps its rich
         output while the endpoints stay single-concern."""
         live = self.live_jobs()
@@ -286,7 +286,7 @@ class DaemonClient:
         }
 
     def resolve_root(self, arg: str) -> int | None:
-        """Resolve a user handle (name/path) to a root id via ``/roots/resolve`` (§11), or
+        """Resolve a user handle (name/path) to a root id via ``/roots/resolve``, or
         None if nothing matches. The one name/path→id hop before the id-keyed routes."""
         try:
             return int(self._get("/roots/resolve", params={"q": arg})["id"])
@@ -296,7 +296,7 @@ class DaemonClient:
             raise
 
     def root_detail(self, root_id: int) -> dict | None:
-        """One root's detail by id via ``GET /roots/{id}`` (§11), or None if unknown."""
+        """One root's detail by id via ``GET /roots/{id}``, or None if unknown."""
         try:
             return self._get(f"/roots/{root_id}")["root_detail"]
         except DaemonError as exc:

@@ -1,4 +1,4 @@
-"""Periodic scheduler (§3) — probe-all fan-out + PeriodicScheduler wiring (§8 A2b).
+"""Periodic scheduler — probe-all fan-out + PeriodicScheduler wiring.
 
 Two layers, tested independently:
 - the probe-all task's ``submit`` is a plain ``(queue, db) -> None`` — tested with a
@@ -64,7 +64,7 @@ def test_probe_all_skips_trash_and_disabled_roots(packrat_home, tmp_path):
         libid = register(d, str(lib))["id"]
         trash = tmp_path / "trash"
         trash.mkdir()
-        register(d, str(trash), kind="trash")               # trash → never probed (§6.1)
+        register(d, str(trash), kind="trash")               # trash → never probed
         disabled = tmp_path / "off"
         disabled.mkdir()
         offid = register(d, str(disabled))["id"]
@@ -187,7 +187,7 @@ def test_scheduler_start_skips_one_bad_task_but_arms_the_rest(packrat_home, tmp_
 
 def test_probe_all_uses_the_shared_sweep_set(packrat_home, tmp_path):
     """The scheduler fan-out targets EXACTLY roots.enabled_library_root_ids — the same set
-    the daemon's /probe --all endpoint uses (§8 A2b), so scheduled + manual sweeps can't
+    the daemon's /probe --all endpoint uses, so scheduled + manual sweeps can't
     drift. Asserts the thunk's submitted ids equal the shared helper's output."""
     d = _db(packrat_home)
     try:
@@ -207,7 +207,7 @@ def test_probe_all_uses_the_shared_sweep_set(packrat_home, tmp_path):
 
 def test_probe_trigger_floors_near_zero_interval():
     """A misconfigured near-zero probe_interval_hours (0 meant as 'off') is clamped to the
-    minimum interval, so it can't fire a fan-out every few seconds (§6 footgun fix)."""
+    minimum interval, so it can't fire a fan-out every few seconds (footgun fix)."""
     cfg = Config(schedule=ScheduleConfig(probe_interval_hours=0.0))
     trig = _probe_trigger(cfg)
     # IntervalTrigger stores its period as a timedelta; assert it hit the floor.
@@ -225,6 +225,6 @@ def test_probe_trigger_respects_a_sane_interval():
 
 
 def test_probe_all_is_the_registered_task():
-    """The registry ships the probe-all task (its first client — §8 A2b)."""
+    """The registry ships the probe-all task (its first client)."""
     assert PROBE_ALL_TASK in PERIODIC_TASKS
     assert PROBE_ALL_TASK.name == "probe-all"

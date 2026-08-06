@@ -1,12 +1,12 @@
-"""Decode smoke test (§9.1) — "decode is the gate".
+"""Decode smoke test — "decode is the gate".
 
 Runs one real sample of every allowlisted extension (plus the RAW group) through
 the ``decode → hash → perceptual → embed`` path and reports, per file, which
 stages succeeded. This is the only check that truly resolves the ⚠ cells in the
-§9.1 matrix — whether *this* Windows wheel of ``pillow-heif`` / ``rawpy`` /
+decode matrix — whether *this* Windows wheel of ``pillow-heif`` / ``rawpy`` /
 ``pdqhash`` handles *your* camera's CR3 or *that* AVIF encoder's output.
 
-Design (matches §9.1 "decode is the gate"):
+Design (matches "decode is the gate"):
 - **Hash (BLAKE3)** is format-agnostic — it hashes raw bytes, so it runs on every
   file including ones that won't decode.
 - **Perceptual (PDQ)** and **embed (CLIP)** both gate on a *decoded RGB array*.
@@ -17,7 +17,7 @@ Design (matches §9.1 "decode is the gate"):
 Optional deps are imported lazily; a missing dep is reported as ``skipped
 (dep missing)`` rather than crashing, so the harness is useful even before the
 full ``media`` extra is installed. The embed stage is skipped unless the
-``embed`` extra + a CUDA/CPU torch is present (it's opt-in, §7).
+``embed`` extra + a CUDA/CPU torch is present (it's opt-in).
 
 **Sample generation.** :func:`generate_samples` synthesizes one file per photo
 and video extension in-memory (a detailed RGB gradient re-saved in each container;
@@ -119,7 +119,7 @@ def _gradient_image(size: int = 256):
     """A detailed RGB gradient — varied pixels so PDQ yields a meaningful hash.
 
     A flat/near-black image produces a low-quality, spuriously-colliding PDQ
-    signature (the §5.3 quality caveat), so the fixture deliberately has detail.
+    signature (the quality caveat), so the fixture deliberately has detail.
     """
     import numpy as np
     from PIL import Image
@@ -231,7 +231,7 @@ def _decode_image(path: Path):
 
         with rawpy.imread(str(path)) as raw:
             try:
-                # Prefer the embedded preview (fast, matches viewers — §9.1).
+                # Prefer the embedded preview (fast, matches viewers).
                 thumb = raw.extract_thumb()
                 if thumb.format == rawpy.ThumbFormat.JPEG:
                     from io import BytesIO
@@ -437,7 +437,7 @@ def _report_inventory(deps: dict, json_out: bool) -> None:
     if json_out:
         print(json.dumps({"deps": deps}, indent=2))
         return
-    print("packrat decode smoke test (§9.1)")
+    print("packrat decode smoke test")
     print("no samples folder given — reporting dependency availability only.\n")
     for name, ok in deps.items():
         print(f"  {'✅' if ok else '❌'} {name}")
@@ -456,7 +456,7 @@ def _report_results(results, deps, all_exts, files, json_out) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        print("packrat decode smoke test (§9.1)\n")
+        print("packrat decode smoke test\n")
         print(f"deps: " + "  ".join(f"{'✅' if v else '❌'}{k}" for k, v in deps.items()))
         print()
         header = f"{'file':40s} {'kind':6s} " + " ".join(f"{s:10s}" for s in STAGES)
@@ -472,13 +472,13 @@ def _report_results(results, deps, all_exts, files, json_out) -> int:
         if missing:
             print(f"\nno sample for: {', '.join(missing)}")
         # Highlight the ⚠ cells the test exists to resolve.
-        print("\n⚠ cells to confirm (§9.1): avif, heic/heif, RAW (esp. cr3), and the pdqhash wheel.")
+        print("\n⚠ cells to confirm: avif, heic/heif, RAW (esp. cr3), and the pdqhash wheel.")
 
     # Exit non-zero if hash/decode/PERCEPTUAL hard-FAILED on a present sample. A 'skip'
     # (a missing optional dep) is NOT a failure. Perceptual is included because a broken
     # `pdqhash` wheel that crashes on decoded pixels (fail, not skip) is exactly a ⚠ cell
-    # this gate exists to catch (§9.1) — "non-zero on any format failure" (§11). Embed
-    # stays advisory (opt-in, §7) and never gates the exit code.
+    # this gate exists to catch — "non-zero on any format failure". Embed
+    # stays advisory (opt-in) and never gates the exit code.
     hard_fail = any(
         r.stages.get(stage) == "fail"
         for r in results for stage in ("hash", "decode", "perceptual")

@@ -1,4 +1,4 @@
-"""The Dashboard screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The Dashboard screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .jobcard import JobCard
 
 
 # ---------------------------------------------------------------------------
-# Dashboard (§1) — the default screen + focus→maximize state machine
+# Dashboard — the default screen + focus→maximize state machine
 # ---------------------------------------------------------------------------
 class Dashboard(FrameScreen):
     BINDINGS = [
@@ -29,7 +29,7 @@ class Dashboard(FrameScreen):
         Binding("right", "page(1)", show=False),
         Binding("enter", "drill", show=False),
         Binding("escape", "unfocus", show=False),
-        # Queue-focus actions (§1.4 footer) — only meaningful when Queue is focused.
+        # Queue-focus actions (footer) — only meaningful when Queue is focused.
         Binding("c", "cancel", show=False),
         Binding("p", "prioritize", show=False),
         Binding("x", "cancel_all", show=False),
@@ -71,7 +71,7 @@ class Dashboard(FrameScreen):
     def _colorize(self, frame: str):
         # Apply the base theme colors, then sweep the gem's gradient on top so the held
         # stone glints — and tint the "· N assets hoarded ·" count the SAME color so the
-        # number glints with the gem (post-layout, live widget only — §Theming).
+        # number glints with the gem (post-layout, live widget only).
         from ..colorize import (gem_gradient_color, recolor_dot_legend, recolor_gem,
                                recolor_hoard_count, recolor_root_dots, shade_box_title)
         # Base colors + the ▸-selected-row emphasis (inherited from FrameScreen), then
@@ -80,7 +80,7 @@ class Dashboard(FrameScreen):
         text = super()._colorize(frame)
         # ◉ is green (deduped) OR yellow (need-dedup) — recolor each Roots-box row's dot to
         # its true role (the glyph pass can't split one glyph into two colors). Uses the
-        # SAME sorted+masked roots the body was built from (dashboard default sort 0 → §12).
+        # SAME sorted+masked roots the body was built from (dashboard default sort 0).
         from .. import render
         roots = render.sort_roots(self.app.view(self.app.snapshot.get("roots", [])), 0)
         recolor_root_dots(text, frame, roots)
@@ -129,7 +129,7 @@ class Dashboard(FrameScreen):
     def action_page(self, delta: int) -> None:
         # ←/→ pages the focused box and moves the cursor to the FIRST item on the
         # new page (so the ▸ is never left behind on the previous page). Both the
-        # Roots and Queue boxes page in place; the full backlog is also in §4.
+        # Roots and Queue boxes page in place; the full backlog is also in the Queue interface.
         self._sync_lens()
         geo = self._geo
         fs = self.focus_state

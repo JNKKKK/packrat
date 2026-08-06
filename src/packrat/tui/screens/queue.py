@@ -1,4 +1,4 @@
-"""Queue interface (§4) — three INDEPENDENT fixed-height sections.
+"""Queue interface — three INDEPENDENT fixed-height sections.
 
 **Running** (the single active job), **Queued** (the durable backlog in dequeue
 order, each with its blocked reason), and **History** (``recent_jobs`` terminal
@@ -89,7 +89,7 @@ def queue_body(running: dict | None, queued: list[dict], history: list[dict],
                history_cursor: int = 0, history_page: int = 0,
                history_total_pages: int | None = None,
                running_cursor: int = 0) -> list[str]:
-    """Build the §4 body — three fixed-height sections, each independently paged.
+    """Build the body — three fixed-height sections, each independently paged.
 
     ``geo`` sizes each section's window (Queued/History grow on a taller terminal)
     and the paginator width. Rows lay out to ``geo``'s content width.
@@ -97,7 +97,7 @@ def queue_body(running: dict | None, queued: list[dict], history: list[dict],
     **History paging has two modes.** When ``history_total_pages is None`` (legacy /
     the golden fixtures), ``history`` is the FULL terminal-job list and this slices it
     client-side to page ``history_page``. When ``history_total_pages`` is given
-    (lazy-loading, §12), ``history`` is ALREADY the single page fetched server-side
+    (lazy-loading), ``history`` is ALREADY the single page fetched server-side
     (``limit``/``offset``); the window renders it as-is and the paginator shows
     ``history_page``/``history_total_pages`` — the TRUE total, though only one page of
     rows is in memory."""
@@ -140,7 +140,7 @@ def queue_body(running: dict | None, queued: list[dict], history: list[dict],
 
 
 def header_line(label: str, state, width: int, cur_page: int, total: int) -> str:
-    """A section header with its ``page i/N`` right-aligned on the same line (§4)."""
+    """A section header with its ``page i/N`` right-aligned on the same line."""
     return row(width, [Cell(header(label, state), grow=1),
                        Cell(f"page {cur_page}/{total}", align="right")], gap=2)
 

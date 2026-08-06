@@ -1,8 +1,8 @@
-"""Root detail interface (§3) — pure body builder over ``root_detail(root)``.
+"""Root detail interface — pure body builder over ``root_detail(root)``.
 
 Renders the 3-column stats header (folder icon | counts | scan/dedup dates), a
-**bordered Review section** (the pending-review case, §3.1, or the no-pending-review
-line, §3.2), and a **bordered Jobs panel** laid out like the Queue interface (§4) —
+**bordered Review section** (the pending-review case, or the no-pending-review
+line), and a **bordered Jobs panel** laid out like the Queue interface —
 three independent Running / Queued / History sections, each with its own paginator.
 
 Both boxes are focus-able (like the dashboard boxes): the R[e]view box is focused by
@@ -22,7 +22,7 @@ from ..layout import Cell, row
 from ..tokens import CURSOR, WARN
 from . import queue as q
 
-# A 5-row packrat mascot (clutching a 📁) for the stats section's first column (§3),
+# A 5-row packrat mascot (clutching a 📁) for the stats section's first column,
 # echoing the dashboard hoard logo. Plain text (no box-drawing) so the colorizer
 # leaves it default and it never reads as a focused-panel heavy border; the 📁 is a
 # wide (2-cell) glyph but `(>📁<)` still measures 8 cells like the other rows, and the
@@ -44,7 +44,7 @@ def detail_header_right(d: dict) -> str:
     return f"{d['path']} · {d['kind']}"
 
 
-#: Overhead rows in the §3 body OUTSIDE the two box interiors: 1 top spacer + ICON_H
+#: Overhead rows in the body OUTSIDE the two box interiors: 1 top spacer + ICON_H
 #: stats + 1 spacer + Review box borders (2) + Jobs box borders (2). The Review and Jobs
 #: INTERIORS share whatever is left (``content_rows − _DETAIL_OVERHEAD``).
 _DETAIL_OVERHEAD = 1 + ICON_H + 1 + 2 + 2   # ref: 11
@@ -72,7 +72,7 @@ def review_content_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool = 
 
 def _split_rows(content_len: int, geo: Geometry) -> tuple[int, int]:
     """Split the shared interior into ``(review_interior, jobs_interior)`` from a review
-    content LINE COUNT (§3) — pure arithmetic, no dict, so callers compute the content
+    content LINE COUNT — pure arithmetic, no dict, so callers compute the content
     once and reuse it (the render path threads the same list into the box).
 
     Review is capped at review:jobs ≤ 1:1 (``S // 2``, odd row → Jobs so History keeps
@@ -98,7 +98,7 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
                 focus: str | None = None, job_focus: str = "history",
                 cursors: dict | None = None, pages: dict | None = None,
                 review_scroll: int = 0, history_total_pages: int | None = None) -> list[str]:
-    """Build the §3 root-detail body for root ``d`` (with its ``jobs`` history).
+    """Build the root-detail body for root ``d`` (with its ``jobs`` history).
 
     Top: the 3-column stats header. Then two focus-able bordered boxes — a **Review
     box** and a **Jobs panel** (Running / Queued / History). ``focus`` is the focused
@@ -108,7 +108,7 @@ def detail_body(d: dict, *, now: str, geo: Geometry = REFERENCE,
     ▸ cursor + paginator page. The Jobs panel fills the remaining vertical space.
 
     ``history_total_pages``: when None (legacy / golden fixtures), ``jobs`` is the FULL
-    job list and History slices it client-side; when given (lazy-loading, §12), ``jobs``
+    job list and History slices it client-side; when given (lazy-loading), ``jobs``
     holds only the History rows for the CURRENT page and the paginator shows the true
     total (running/queued still come from ``d``)."""
     jobs = jobs or []
@@ -146,7 +146,7 @@ def panel_section_rows(d: dict, geo: Geometry) -> dict:
 
 
 def split_jobs(d: dict, jobs: list[dict], *, prefiltered: bool = False) -> dict:
-    """Group the root's jobs into the three panel sections (§3 / §4 parity).
+    """Group the root's jobs into the three panel sections (Queue parity).
 
     Running + queued come from ``root_detail`` (the live view, with blocked reasons);
     History is the terminal jobs from the per-root ``jobs`` list, newest-first. Keyed the
@@ -178,7 +178,7 @@ def _jobs_seps(interior: int) -> int:
 
     The separators are cosmetic; when the panel interior is tight (a full mascot + a
     4-line pending-review box leave it small), we drop them so all THREE section headers
-    stay visible rather than clipping History off the bottom (§12 "trim, don't overflow").
+    stay visible rather than clipping History off the bottom ("trim, don't overflow").
     Roomy = the 4 mandatory lines (3 headers + running line) + 2 separators + ≥1 row each
     window ≤ interior, i.e. interior ≥ 8."""
     return 2 if interior >= 8 else 0
@@ -213,7 +213,7 @@ def _section_state(focused: bool, job_focus: str, section: str) -> str:
 def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, *,
                 focused: bool, job_focus: str, cursors: dict, pages: dict,
                 history_total_pages: int | None = None) -> list[str]:
-    """The bordered Jobs panel — three Queue-style sections in one box (§3).
+    """The bordered Jobs panel — three Queue-style sections in one box.
 
     ``history_total_pages`` (lazy-loading): ``jobs`` is the pre-sliced History page, so
     it renders as-is with the true page count. None → legacy full-list client slicing."""
@@ -258,7 +258,7 @@ def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, 
     body += q.window(sec["history"], h_rows, win_page, cursors.get("history", 0), h_focused,
                      lambda j, c: q.history_line(j, now, c, iw), empty="  (no job history)")
 
-    # Fixed-height interior, then wrap in a heavy (accent) box when focused (§focus).
+    # Fixed-height interior, then wrap in a heavy (accent) box when focused.
     # No maximize here, so drop the [J] key hint once focused → plain "Jobs".
     body = (body + [""] * interior)[:interior]
     title = "Jobs" if focused else "[J]obs"
@@ -266,7 +266,7 @@ def _jobs_panel(d: dict, jobs: list[dict], now: str, width: int, interior: int, 
 
 
 def _stats_columns(d: dict, now: str, width: int) -> list[str]:
-    """The 3-column stats header (§3): mascot | counts | scan/dedup dates.
+    """The 3-column stats header: mascot | counts | scan/dedup dates.
 
     Each of the ``ICON_H`` rows is a :func:`row` of three cells — the mascot art
     (fixed ``ICON_W``), the assets/photos/videos/size counts (fixed ``COUNTS_W``), and
@@ -314,7 +314,7 @@ def review_scroll_max(d: dict, geo: Geometry = REFERENCE) -> int:
 
 def _review_box(content: list[str], cap: int, width: int, *, focused: bool,
                 scroll: int = 0) -> list[str]:
-    """The bordered, focus-able Review section (§3.1/§3.2).
+    """The bordered, focus-able Review section.
 
     ``content`` is the full (unclamped) review lines and ``cap`` its interior height (both
     from :func:`detail_body`'s single build, review:jobs ≤ 1:1). When content exceeds the
@@ -338,7 +338,7 @@ def _hints(text: str, focused: bool) -> str:
 
 def is_stage2_dedup(pr: dict | None) -> bool:
     """True for a dedup review parked at stage 2 (recompression) — the only case where
-    ``--confirm --keep-suggested`` applies (§8 B: keep each group's suggested lead).
+    ``--confirm --keep-suggested`` applies (keep each group's suggested lead).
 
     Stage 1/3 have no suggested leads, and cleanup-perceptual isn't banded into stages,
     so neither offers the bulk keep-suggested action."""
@@ -352,7 +352,7 @@ def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[
     c = pr.get("counts") or {}
     run = pr.get("run_type", "dedup")
     stage = pr.get("stage")
-    # Stage-2 dedup adds the bulk "[b] keep suggested" action (§8 B --keep-suggested):
+    # Stage-2 dedup adds the bulk "[b] keep suggested" action (--keep-suggested):
     # keep each group's suggested lead, ignore shortcut edits. Only shown when it applies.
     if is_stage2_dedup(pr):
         hint = ("[o] open in Explorer   [g] confirm stage   "
@@ -371,7 +371,7 @@ def _review_lines(d: dict, geo: Geometry = REFERENCE, *, focused: bool) -> list[
         # Rich per-stage breakdown from the SHARED review_stats dispatch (the CLI log renders
         # the same bundle the same way): stage 1 = delete split + make-up; stage 2 = keep-lead
         # columns + PDQ histograms + make-up + suggestion split; stage 3 = histogram + make-up
-        # (unranked, no keep-lead). One lines_for_stage call — no per-stage builder ladder (§8 B).
+        # (unranked, no keep-lead). One lines_for_stage call — no per-stage builder ladder.
         from ...review_stats import N_DEDUP_STAGES, lines_for_stage
         header = f"{WARN} {run} — awaiting review (stage {stage} of {N_DEDUP_STAGES})"
         detail = lines_for_stage(c[f"stage{stage}"], stage, _review_text_w(geo) - 2)

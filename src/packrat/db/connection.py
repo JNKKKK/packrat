@@ -1,6 +1,6 @@
-"""SQLite connection management (§4, §10): WAL mode, FK enforcement, init.
+"""SQLite connection management: WAL mode, FK enforcement, init.
 
-The daemon owns a single writer connection (§3 concurrency). WAL lets read-only
+The daemon owns a single writer connection. WAL lets read-only
 queries (``status``, ``roots``, TUI stats) run concurrently with the writer.
 """
 
@@ -55,7 +55,7 @@ def connect(
 
 
 class Database:
-    """The daemon's single write connection, guarded by a lock (§3 single writer).
+    """The daemon's single write connection, guarded by a lock (single writer).
 
     Three daemon threads go through this, all serialized by :attr:`lock`: the **API
     thread** (creating a ``jobs`` row on submit), the **worker thread** (progress + op
@@ -124,7 +124,7 @@ PeriodicScheduler`, which enqueues via ``queue.submit`` → a ``jobs`` insert). 
                 self._txn_depth -= 1
 
     def clear_catalog(self) -> dict[str, int]:
-        """DELETE every catalog row, preserving the schema (dev-only — §clear-db).
+        """DELETE every catalog row, preserving the schema (dev-only).
 
         Empties all data tables (assets/file_instances/phash/…/jobs/roots) inside a
         single transaction under the write lock, so it is safe against the API +
@@ -173,7 +173,7 @@ PeriodicScheduler`, which enqueues via ``queue.submit`` → a ``jobs`` insert). 
         return {t: n for t, n in counts.items() if n}
 
     def backup_to(self, dest: Path | str) -> None:
-        """Online-copy the whole DB to ``dest`` via SQLite's backup API (§10).
+        """Online-copy the whole DB to ``dest`` via SQLite's backup API.
 
         Taken before every destructive apply (dedup/cleanup ``--confirm``, merge
         copy) as the backstop. Uses the live backup API (WAL-safe — a plain file
@@ -190,7 +190,7 @@ PeriodicScheduler`, which enqueues via ``queue.submit`` → a ``jobs`` insert). 
                 target.close()
 
     def backup_labeled(self, label: str) -> str:
-        """Back the DB up to ``backups/<label>-<timestamp>.db`` (§10). Returns the path.
+        """Back the DB up to ``backups/<label>-<timestamp>.db``. Returns the path.
 
         The one place the pre-destructive-apply backup filename is built, so dedup /
         cleanup / merge don't each re-derive the timestamp-suffixing.
@@ -209,21 +209,21 @@ PeriodicScheduler`, which enqueues via ``queue.submit`` → a ``jobs`` insert). 
 
 
 #: Additive columns a `CREATE TABLE IF NOT EXISTS` can't retrofit onto an existing
-#: table (pre-release, no migration runner — §4). Each entry is a column that must
+#: table (pre-release, no migration runner). Each entry is a column that must
 #: exist on an already-created table; :func:`_ensure_added_columns` `ALTER TABLE … ADD
 #: COLUMN`s any that are missing at every ``init_db``, so a live DB gains new columns
 #: without a manual patch and a fresh DB (which gets them from ``SCHEMA_SQL``) skips them.
 #: DEFAULT/nullable only — SQLite's ADD COLUMN forbids a NOT NULL column without a
 #: default, and every value here reads as current behavior on an old row.
 _ADDED_COLUMNS: list[tuple[str, str, str]] = [
-    # (table, column, DDL) — the roots probe-signal columns (§8 A2b / §12 dot).
+    # (table, column, DDL) — the roots probe-signal columns.
     ("roots", "last_probe_at", "TEXT"),
     ("roots", "probe_new_count", "INTEGER NOT NULL DEFAULT 0"),
-    # the dedup-dirty signal (§12 ◉ yellow): 1 ⇒ scanned content awaiting (re-)dedup.
+    # the dedup-dirty signal (◉ yellow): 1 ⇒ scanned content awaiting (re-)dedup.
     # Defaults to 0 on a retrofit; self-heals on the next scan/dedup (a still-yellow root
     # whose last_dedup_at IS NULL is ALSO caught by the ladder's "never deduped" rung).
     ("roots", "needs_dedup", "INTEGER NOT NULL DEFAULT 0"),
-    # per-scan count of files relinked to a new path without re-hashing (§8 A2 step 4a).
+    # per-scan count of files relinked to a new path without re-hashing.
     # Nullable → an old scan_results row predating move detection reads NULL (= "not
     # tracked"), which the renderers show as 0.
     ("scan_results", "moved", "INTEGER"),
@@ -235,8 +235,8 @@ def _ensure_added_columns(conn: sqlite3.Connection) -> None:
 
     Idempotent and cheap: reads each table's ``PRAGMA table_info`` and adds only the
     columns not already present. On a fresh DB ``SCHEMA_SQL`` already created them, so
-    every check is a no-op; on a live DB predating a column this retrofits it (§4 —
-    the pre-release stand-in for a migration runner). Skips a not-yet-created table.
+    every check is a no-op; on a live DB predating a column this retrofits it (the
+    pre-release stand-in for a migration runner). Skips a not-yet-created table.
     """
     tables = {
         r["name"] for r in conn.execute(
@@ -252,11 +252,11 @@ def _ensure_added_columns(conn: sqlite3.Connection) -> None:
 
 
 def init_db(db_file: Path | None = None) -> sqlite3.Connection:
-    """Create the schema if missing and return an open connection (§4).
+    """Create the schema if missing and return an open connection.
 
     ``SCHEMA_SQL`` is the single source of truth — every statement is
     ``CREATE … IF NOT EXISTS``, so this is idempotent: a no-op on an already-current
-    DB, and a full build on a fresh one. There is no migration runner (§4); the
+    DB, and a full build on a fresh one. There is no migration runner; the
     ``schema_version`` marker is stamped into ``meta`` for future use.
 
     :func:`_ensure_added_columns` then retrofits any additive columns a
@@ -280,7 +280,7 @@ def transaction(conn: sqlite3.Connection):
     """Transaction context: commit on success, rollback on exception.
 
     Uses an explicit ``BEGIN`` so a whole unit of work is atomic (important for
-    the "single transaction" writes the plan calls for — §8 A2 step 9, §8 C step 11).
+    the "single transaction" writes the plan calls for).
     """
     conn.execute("BEGIN")
     try:

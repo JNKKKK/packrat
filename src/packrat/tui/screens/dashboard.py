@@ -1,10 +1,10 @@
-"""Dashboard content builder (§1) — the pure lines for the default screen.
+"""Dashboard content builder — the pure lines for the default screen.
 
-Composes the Logo + Collection/Roots row + Queue box into the fixed frame body
-(component-plan §1). Kept as a **pure builder** (snapshot dict → list[str]) so it
+Composes the Logo + Collection/Roots row + Queue box into the fixed frame body.
+Kept as a **pure builder** (snapshot dict → list[str]) so it
 is golden-frame testable without a Textual pilot; the :class:`Dashboard` Textual
 screen (in :mod:`packrat.tui.app`) just displays these lines and owns the
-focus→maximize state machine + key routing (§ Navigation).
+focus→maximize state machine + key routing.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ def dashboard_body(
     queue_page: int = 0,
     gem: str = render.LOGO_GEMS[0],   # the mascot's held gem (cycled by the anim timer)
 ) -> list[str]:
-    """Build the dashboard body lines (§1.1–§1.4), laid out to ``geo`` size.
+    """Build the dashboard body lines, laid out to ``geo`` size.
 
     ``focus`` heavies the focused box's frame + shows a ``▸`` cursor + a title-bar
-    paginator (§focus model). Roots are shown most-recently-registered first (a
+    paginator. Roots are shown most-recently-registered first (a
     TUI-side id-DESC reorder of the id-ascending snapshot), windowed to
     ``geo.dash_roots_rows`` and paged so a long list never overflows the box. At the
     reference size this equals the original fixed layout.
@@ -103,7 +103,7 @@ def _queue_preview(snap: dict, geo: Geometry, *, focused: bool, cursor: int = 0,
     """The dashboard queue box body + its paginator label.
 
     **Unfocused:** a fixed-height truncated preview (running + first few queued,
-    then ``… N more`` — the full backlog lives in the maximized §4). **Focused:** a
+    then ``… N more`` — the full backlog lives in the maximized Queue). **Focused:** a
     windowed, ``▸``-cursored page of the same rows, so ↑/↓ + ←/→ navigate the whole
     backlog in place (the paginator shows ``page i/N``)."""
     budget = geo.dash_queue_rows

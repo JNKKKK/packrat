@@ -1,4 +1,4 @@
-r"""Keep-lead ranking for dedup stage 2 (§8 B) — pure fingerprint/metadata math.
+r"""Keep-lead ranking for dedup stage 2 — pure fingerprint/metadata math.
 
 Given a homogeneous near-dup group (all photo, or all video — a photo never matches
 a video) and a ``rank`` dict of per-asset metadata (``_asset_rank_fields`` in
@@ -27,7 +27,7 @@ Ranking keys (best = greatest tuple, all components DESC):
   at equal resolution+codec is a clean quality dial, the video analogue of file ``size``
   within one photo format. It sits last, so it never reverses the cross-codec decision.
 
-Ties on the full ranking key fall to the internal/external keep-preference (§8 B): in a
+Ties on the full ranking key fall to the internal/external keep-preference: in a
 *mixed* group (an internal copy and an external copy tied on everything) the external copy
 is the keep-lead by default, or the internal copy under ``--prefer-internal``. A coin-flip
 on the smallest normcase path decides only among copies on the *same* side (deterministic
@@ -43,7 +43,7 @@ import os
 from ..config import RAW_EXTS
 from ..ignore import ext_of
 
-#: Photo extensions that are lossless / an original master (§8 B keep-lead).
+#: Photo extensions that are lossless / an original master (keep-lead).
 _LOSSLESS_PHOTO_EXTS = frozenset({"png", "tif", "tiff", "bmp"}) | RAW_EXTS
 
 #: Modern *lossy* codecs that are more efficient than JPEG — a HEIC/AVIF file packs
@@ -54,11 +54,11 @@ _EFFICIENT_LOSSY_PHOTO_EXTS = frozenset({"heic", "heif", "avif"})
 # Ranking-key component labels, best-decision first — what the keep-lead was decided
 # by (the leftmost key component where the lead is uniquely ahead). Index i names the
 # level "decided once you consider key[:i+1]"; a full tuple tie falls to the path
-# tiebreak (`_PATH_TIEBREAK`). Reported as stage-2 lead-pick stats (§8 B).
+# tiebreak (`_PATH_TIEBREAK`). Reported as stage-2 lead-pick stats.
 _PHOTO_LEAD_LEVELS = ("resolution", "resolution + format", "resolution + format + size")
 _VIDEO_LEAD_LEVELS = ("resolution", "resolution + bitrate", "resolution + bitrate + codec",
                       "resolution + bitrate + codec + fine bitrate")
-#: Full-key tie broken by the internal/external preference (§8 B). Sits ABOVE the bare
+#: Full-key tie broken by the internal/external preference. Sits ABOVE the bare
 #: path tiebreak: in a mixed group (both an internal and an external copy tied on the
 #: whole ranking key) the keep-lead goes to the external copy by default, or to the
 #: internal copy under ``--prefer-internal`` — a coin-flip on the path only decides among
@@ -67,7 +67,7 @@ _PREFERENCE_TIEBREAK = "internal/external preference"
 _PATH_TIEBREAK = "path tiebreak (identical rank)"
 
 
-#: Canonical best-first display order of the keep-lead decision levels (§8 B) — the single
+#: Canonical best-first display order of the keep-lead decision levels — the single
 #: source of truth for how the stage-2 lead-pick stats are ordered, used by BOTH the CLI
 #: staging log and the TUI Review box so the two can't drift when a level is added/reworded.
 #: Photo then video (they share the ``resolution`` / path labels; a homogeneous group only
@@ -79,7 +79,7 @@ _ORDERED_LEAD_LEVELS = tuple(dict.fromkeys(
 
 
 def ordered_lead_levels() -> list[str]:
-    """The canonical best-first keep-lead decision-level order (§8 B); see
+    """The canonical best-first keep-lead decision-level order; see
     :data:`_ORDERED_LEAD_LEVELS`.
 
     Returns a FRESH list each call, so a caller that mutates the result can't corrupt the
@@ -88,7 +88,7 @@ def ordered_lead_levels() -> list[str]:
 
 
 def _pref_rank(is_external: bool, prefer_internal: bool) -> int:
-    """Keep-preference rank (higher = preferred to KEEP) for a full-key tie (§8 B).
+    """Keep-preference rank (higher = preferred to KEEP) for a full-key tie.
 
     Default: external is the master, so an external copy outranks an internal one.
     ``--prefer-internal`` flips it (an XOR of the two flags). Only meaningful inside a mixed
@@ -98,7 +98,7 @@ def _pref_rank(is_external: bool, prefer_internal: bool) -> int:
 
 
 def _photo_format_rank(path: str) -> int:
-    """Ordinal photo-format preference for the keep-lead (§8 B), best first.
+    """Ordinal photo-format preference for the keep-lead, best first.
 
     ``2`` lossless/original (png/tif/bmp/RAW) · ``1`` efficient-lossy (heic/heif/avif)
     · ``0`` other lossy (jpg/webp/gif/…). This is the **primary quality signal** after
@@ -116,13 +116,13 @@ def _photo_format_rank(path: str) -> int:
 
 
 def _photo_lead_key(inst, r) -> tuple:
-    """Photo keep-lead ranking key (best = greatest): (pixels, format rank, size). §8 B."""
+    """Photo keep-lead ranking key (best = greatest): (pixels, format rank, size)."""
     pixels = (r.get("width") or 0) * (r.get("height") or 0)
     return (pixels, _photo_format_rank(inst["path"]), r.get("size") or 0)
 
 
 def _video_lead_key(r, config) -> tuple:
-    """Video keep-lead ranking key (best = greatest): (pixels, bitrate band, codec weight, eff). §8 B.
+    """Video keep-lead ranking key (best = greatest): (pixels, bitrate band, codec weight, eff).
 
     The final component is the *raw* (unbanded) effective bitrate. It can only fire once
     the band **and** the codec weight both tie — i.e. same codec, effective bitrates
@@ -138,7 +138,7 @@ def _video_lead_key(r, config) -> tuple:
 
 
 def _group_lead_and_level(members, rank, config, *, root_id=None, prefer_internal=False) -> tuple:
-    """Pick the keep-lead of a stage-2 group AND *why* it won (§8 B).
+    """Pick the keep-lead of a stage-2 group AND *why* it won.
 
     ``members`` is a list of ``(asset_id, instance)`` pairs; ``rank`` maps asset_id →
     the metadata dict (:func:`packrat.jobs.dedup._asset_rank_fields`). Returns
@@ -198,13 +198,13 @@ def _group_lead_and_level(members, rank, config, *, root_id=None, prefer_interna
 
 
 def _pick_lead(members, rank, config, *, root_id=None, prefer_internal=False):
-    """Keep-lead asset id for a stage-2 group (§8 B); see :func:`_group_lead_and_level`."""
+    """Keep-lead asset id for a stage-2 group; see :func:`_group_lead_and_level`."""
     return _group_lead_and_level(members, rank, config,
                                  root_id=root_id, prefer_internal=prefer_internal)[0]
 
 
 def _effective_bitrate(size, duration_s, weight: float) -> float:
-    """size/duration × codec weight (§8 B video keep-lead); raw size × weight if no duration."""
+    """size/duration × codec weight (video keep-lead); raw size × weight if no duration."""
     if not size:
         return 0.0
     if duration_s and duration_s > 0:
@@ -213,13 +213,13 @@ def _effective_bitrate(size, duration_s, weight: float) -> float:
 
 
 def _log_band(value: float, tie_pct: float) -> int:
-    """Quantize a value to a log-scale band so ~equal values tie (§8 B keep-lead).
+    """Quantize a value to a log-scale band so ~equal values tie (keep-lead).
 
     Two values within ``tie_pct`` percent land in the same band → the next ranking
     key decides, instead of a coin-flip on a noisy diff. Log scale so "within X%"
     means the same at any magnitude. ``value<=0`` → a sentinel low band. Used by the
     video keep-lead (effective bitrate → codec weight breaks the tie); the photo
-    keep-lead needs no band (format rank + file size are both clean signals, §8 B).
+    keep-lead needs no band (format rank + file size are both clean signals).
     """
     if value <= 0 or tie_pct <= 0:
         return -1

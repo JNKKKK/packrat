@@ -1,4 +1,4 @@
-"""Filesystem locations packrat owns, all under ``%APPDATA%\\packrat`` (§3, §9.2).
+"""Filesystem locations packrat owns, all under ``%APPDATA%\\packrat``.
 
 Everything the daemon persists outside the collection lives here: the SQLite DB,
 the loopback ``token`` file, ``config.toml``, the review audit trail, and daemon
@@ -22,7 +22,7 @@ def home_dir() -> Path:
 
     Resolution order:
     1. ``$PACKRAT_HOME`` if set (tests, portable installs).
-    2. ``%APPDATA%\\packrat`` on Windows (the documented v1 location, §3).
+    2. ``%APPDATA%\\packrat`` on Windows (the documented v1 location).
     3. ``~/.packrat`` as a cross-platform dev fallback.
     """
     override = os.environ.get(HOME_ENV)
@@ -39,17 +39,17 @@ def home_dir() -> Path:
 
 
 def config_path() -> Path:
-    """``config.toml`` — tunable knobs, auto-created with defaults (§9.2)."""
+    """``config.toml`` — tunable knobs, auto-created with defaults."""
     return home_dir() / "config.toml"
 
 
 def token_path() -> Path:
-    """Loopback API token, written by the daemon before it serves (§3)."""
+    """Loopback API token, written by the daemon before it serves."""
     return home_dir() / "token"
 
 
 def db_path() -> Path:
-    """The SQLite catalog (WAL). The crown jewel (§10)."""
+    """The SQLite catalog (WAL). The crown jewel."""
     return home_dir() / "packrat.db"
 
 
@@ -89,14 +89,14 @@ def daemon_bootstrap_log_path() -> Path:
 
 
 def audit_dir() -> Path:
-    """Root of the review-run audit trail: ``audit/{run_type}/{root}/{run_id}`` (§8.1)."""
+    """Root of the review-run audit trail: ``audit/{run_type}/{root}/{run_id}``."""
     d = home_dir() / "audit"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def backups_dir() -> Path:
-    """DB backups taken before every destructive op (§10)."""
+    """DB backups taken before every destructive op."""
     d = home_dir() / "backups"
     d.mkdir(parents=True, exist_ok=True)
     return d

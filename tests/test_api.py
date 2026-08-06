@@ -1,4 +1,4 @@
-"""Daemon HTTP API: auth, submit, snapshots, SSE (§3), in-process via TestClient."""
+"""Daemon HTTP API: auth, submit, snapshots, SSE, in-process via TestClient."""
 
 from __future__ import annotations
 
@@ -48,14 +48,14 @@ def test_submit_and_status(client):
             break
         time.sleep(0.02)
     assert d["status"] == "done"
-    # Collection summary is its own resource now (§12 resource model); roots is separate.
+    # Collection summary is its own resource now (resource model); roots is separate.
     stats = client.get("/stats", headers=_h()).json()
     assert stats["assets"] == 0
     assert client.get("/roots", headers=_h()).json() == {"roots": []}
 
 
 def test_second_submit_enqueues_not_rejected(client):
-    """§3: a submission while the worker is busy is QUEUED, not rejected (no 409)."""
+    """A submission while the worker is busy is QUEUED, not rejected (no 409)."""
     r1 = client.post(
         "/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h()
     )
@@ -68,7 +68,7 @@ def test_second_submit_enqueues_not_rejected(client):
 
 
 def test_queued_job_runs_after_predecessor(client):
-    """The backlog drains: the queued job runs once the first finishes (§3)."""
+    """The backlog drains: the queued job runs once the first finishes."""
     r1 = client.post(
         "/jobs", json={"type": "sleeper", "params": {"steps": 4, "delay_s": 0.02}}, headers=_h()
     )
@@ -98,7 +98,7 @@ def test_cancel_queued_job_drops_it(client):
 
 
 def test_prioritize_queued_job(client):
-    """POST /jobs/{id}/prioritize bumps a queued job to the front (§11)."""
+    """POST /jobs/{id}/prioritize bumps a queued job to the front."""
     client.post(
         "/jobs", json={"type": "sleeper", "params": {"steps": 50, "delay_s": 0.05}}, headers=_h()
     )
@@ -113,7 +113,7 @@ def test_prioritize_queued_job(client):
 
 
 def test_prioritize_running_job_is_noop(client):
-    """A running (not queued) job can't be prioritized → prioritized:false (§11)."""
+    """A running (not queued) job can't be prioritized → prioritized:false."""
     jid = client.post(
         "/jobs", json={"type": "sleeper", "params": {"steps": 4, "delay_s": 0.05}}, headers=_h()
     ).json()["job_id"]
@@ -142,7 +142,7 @@ def _run_sleepers(client, n: int) -> None:
 
 
 def test_resource_model_endpoints_are_single_concern(client):
-    """Each resource returns ONLY its concern (§12): /stats = collection summary (no jobs/
+    """Each resource returns ONLY its concern: /stats = collection summary (no jobs/
     reviews), /jobs/live = pure jobs (no reviews), /reviews = review runs, /roots = list."""
     stats = client.get("/stats", headers=_h()).json()
     live = client.get("/jobs/live", headers=_h()).json()

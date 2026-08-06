@@ -1,4 +1,4 @@
-r"""The scan ignore set (§8 A1) — what a walk even *looks at*.
+r"""The scan ignore set — what a walk even *looks at*.
 
 Two independent filters, both of which a file must pass to become an asset:
 
@@ -6,7 +6,7 @@ Two independent filters, both of which a file must pass to become an asset:
    (photo + video, plus the RAW group iff ``allowlist.raw``). Anything else is
    ignored outright. Comes from :class:`packrat.config.Config`.
 2. **Ignore globs** — gitignore-style path globs, matched **relative to the root,
-   case-insensitively, with ``/`` as the separator** (§8 A1). Includes the
+   case-insensitively, with ``/`` as the separator**. Includes the
    built-in junk/system exclusions (``Thumbs.db``, ``desktop.ini``, ``.DS_Store``,
    ``.lnk`` shortcuts, and packrat's own ``_packrat_review\`` staging area) plus
    the per-root ``--ignore`` patterns bound at register time.
@@ -15,7 +15,7 @@ Attribute/size-based exclusions (hidden/system attribute, zero-byte) need a
 ``stat``/``DirEntry`` and so are applied by the scan walker via
 :func:`is_junk_dirent`, not here — this module is pure path/glob logic.
 
-Glob semantics (a pragmatic gitignore subset covering the §8 A1 examples):
+Glob semantics (a pragmatic gitignore subset):
 - ``*`` matches within one segment; ``**`` matches across segments; ``?`` one
   non-separator char; ``[abc]`` a char class.
 - A trailing ``/`` matches directories only (``Screenshots/``).
@@ -34,10 +34,10 @@ from .config import Config
 #: Fixed junk filenames excluded regardless of config (compared case-insensitively).
 JUNK_NAMES = frozenset({"thumbs.db", "desktop.ini", ".ds_store"})
 
-#: packrat's own staging area — never index it or the .lnk shortcuts inside (§8 A1).
+#: packrat's own staging area — never index it or the .lnk shortcuts inside.
 REVIEW_DIR = "_packrat_review"
 
-#: Built-in ignore globs folded into every root's set (§8 A1 junk/system list).
+#: Built-in ignore globs folded into every root's set (junk/system list).
 BUILTIN_GLOBS = (
     "*.lnk",             # dedup/cleanup shortcuts
     REVIEW_DIR + "/",    # the review staging tree, at any depth
@@ -116,7 +116,7 @@ def _translate(pattern: str) -> tuple[re.Pattern[str], bool]:
 
 @dataclass
 class IgnoreSet:
-    """Compiled allowlist + ignore globs for one root (§8 A1)."""
+    """Compiled allowlist + ignore globs for one root."""
 
     media_exts: frozenset[str]
     _rules: list[tuple[re.Pattern[str], bool]]
@@ -174,7 +174,7 @@ class IgnoreSet:
 def is_junk_dirent(size: int | None, attrs: int) -> str | None:
     """Classify a file by size/Win32 attributes; return a reason or ``None``.
 
-    Applied by the walker where a ``DirEntry``/``stat`` is in hand (§8 A1
+    Applied by the walker where a ``DirEntry``/``stat`` is in hand (the
     hidden/system/zero-byte exclusions). ``attrs`` is ``stat_result.st_file_attributes``
     (0 when unavailable, e.g. non-Windows).
     """

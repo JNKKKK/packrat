@@ -1,4 +1,4 @@
-"""The AddRootScreen screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The AddRootScreen screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class AddRootScreen(FrameScreen):
         return screen("packrat · Roots · add", body, self.app.header_right,
                       footer=footer, width=geo.w, height=geo.h)
 
-    # -- field navigation (§2.2) -------------------------------------------
+    # -- field navigation --------------------------------------------------
     def action_next_field(self) -> None:
         self.field_idx = (self.field_idx + 1) % len(ADD_ROOT_FIELDS)
         self.refresh_frame()
@@ -118,7 +118,7 @@ class AddRootScreen(FrameScreen):
 
         Fired via ``run_verb(then=…)`` right after the register toast is posted, so
         pressing [Enter] returns the user to the previous page instead of leaving them
-        on a now-submitted form (matching JobCard's back-after-action behavior, §5).
+        on a now-submitted form (matching JobCard's back-after-action behavior).
         Guarded on ``is_active`` + a non-empty stack so a bubbled key can't pop the
         wrong screen."""
         if self.is_active and self.app.screen_stack:

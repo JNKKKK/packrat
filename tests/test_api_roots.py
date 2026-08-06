@@ -1,4 +1,4 @@
-"""Daemon HTTP API for M1: /roots register + /scan (in-process TestClient)."""
+"""Daemon HTTP API: /roots register + /scan (in-process TestClient)."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def test_scan_unknown_root_404(client):
 
 
 def test_root_detail_by_id_and_resolve(client, tiny_photos):
-    """§12 resource model: resolve a name→id (/roots/resolve), then read /roots/{id}."""
+    """Resource model: resolve a name→id (/roots/resolve), then read /roots/{id}."""
     client.post("/roots", json={"path": str(tiny_photos), "name": "Pics", "scan": True}, headers=_h())
     # let the auto-scan finish
     for _ in range(1500):
@@ -121,7 +121,7 @@ def test_root_history_pagination(client, tiny_photos):
     assert all(j["root_name"] == "Pics" for j in p0["jobs"])
 
 
-# --- POST /probe (§8 A2b) ---------------------------------------------------
+# --- POST /probe ------------------------------------------------------------
 def test_probe_by_name(client, tiny_photos):
     client.post("/roots", json={"path": str(tiny_photos), "name": "Pics"}, headers=_h())
     r = client.post("/probe", json={"root": "Pics"}, headers=_h())
@@ -141,7 +141,7 @@ def test_probe_all_fans_out_per_library_root(client, tmp_path):
         p = tmp_path / n
         p.mkdir()
         client.post("/roots", json={"path": str(p), "name": n}, headers=_h())
-    # A trash root must be excluded from the --all fan-out (§6.1).
+    # A trash root must be excluded from the --all fan-out.
     trash = tmp_path / "T"
     trash.mkdir()
     client.post("/roots", json={"path": str(trash), "name": "T", "kind": "trash"}, headers=_h())

@@ -124,7 +124,7 @@ def test_status_root_detail_surfaces_problem_files(queue_and_db, tmp_path):
 def test_report_survives_resume_rerun(queue_and_db, tmp_path):
     """A re-run (the interrupted-scan resume path) fast-path-skips the undecodable
     file, but the report must still list it — it's re-derived from the catalog,
-    not from what this pass touched (§ interrupted-scan review)."""
+    not from what this pass touched."""
     q, database = queue_and_db
     lib = _lib_with_bad(tmp_path)  # good.png + 2 undecodables
     root = register(database, str(lib))

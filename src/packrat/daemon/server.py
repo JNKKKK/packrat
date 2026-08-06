@@ -1,23 +1,23 @@
-"""The daemon HTTP API (§3) — FastAPI on 127.0.0.1 with a loopback token.
+"""The daemon HTTP API — FastAPI on 127.0.0.1 with a loopback token.
 
 Endpoints (all under token auth except ``/health``):
 - ``GET  /health``            — liveness + version (unauthenticated).
 - ``GET  /daemon``            — pid/port/uptime/in-flight job (``daemon status``).
-- ``POST /jobs``              — submit a job; always enqueued (§3 durable queue).
+- ``POST /jobs``              — submit a job; always enqueued (durable queue).
 - ``GET  /jobs``              — recent jobs list.
 - ``GET  /jobs/{id}``         — one job's detail.
-- ``GET  /jobs/{id}/stream``  — SSE progress/state stream (§3).
-- ``POST /jobs/{id}/cancel``  — cooperative cancel (§3).
-- ``POST /jobs/{id}/prioritize`` — bump a queued job to the front (§11).
-- ``GET  /status``            — global rollup snapshot (§11).
-- ``GET  /roots``             — registered roots snapshot (§11).
-- ``POST /roots``             — register a root; optional ``--scan`` (§8 A1).
-- ``POST /scan``              — resolve a root arg + submit a scan job (§8 A2).
-- ``POST /merge``             — resolve ``--into`` + submit a merge job (§8 C).
-- ``POST /shutdown``          — graceful stop (§11 ``daemon stop``).
+- ``GET  /jobs/{id}/stream``  — SSE progress/state stream.
+- ``POST /jobs/{id}/cancel``  — cooperative cancel.
+- ``POST /jobs/{id}/prioritize`` — bump a queued job to the front.
+- ``GET  /status``            — global rollup snapshot.
+- ``GET  /roots``             — registered roots snapshot.
+- ``POST /roots``             — register a root; optional ``--scan``.
+- ``POST /scan``              — resolve a root arg + submit a scan job.
+- ``POST /merge``             — resolve ``--into`` + submit a merge job.
+- ``POST /shutdown``          — graceful stop (``daemon stop``).
 
 :func:`run_daemon` binds the fixed loopback port **first** — the bind is the
-single-instance lock of the auto-spawn handshake (§3): if the port is taken, another
+single-instance lock of the auto-spawn handshake: if the port is taken, another
 daemon already won and this process exits immediately having touched no shared state.
 Only *after* winning the bind does it build the app (:func:`build_app` wires the DB,
 config, queue, and runs startup reconciliation) and write the token — so a losing
@@ -71,7 +71,7 @@ class SubmitJobRequest(BaseModel):
 
 
 class RegisterRootRequest(BaseModel):
-    """Body for ``POST /roots`` (``roots register``, §8 A1). Module-scoped for the
+    """Body for ``POST /roots`` (``roots register``). Module-scoped for the
     same FastAPI type-resolution reason as :class:`SubmitJobRequest`."""
 
     path: str
@@ -84,7 +84,7 @@ class RegisterRootRequest(BaseModel):
 
 
 def _resolve_root_or_400(database, arg: str, *, require_kind: str, verb: str) -> dict:
-    """Resolve a root arg to a row of ``require_kind`` or raise the HTTP error (§8 A1/§11).
+    """Resolve a root arg to a row of ``require_kind`` or raise the HTTP error.
 
     The submit routes that target a specific root (scan/dedup/cleanup/trash-refresh)
     share this: 404 if the arg resolves to no root, 400 if it resolves to the wrong
@@ -113,11 +113,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
     from fastapi import Depends, FastAPI, Header, HTTPException
     from fastapi.responses import StreamingResponse
 
-    # Ensure config exists (auto-create with defaults, §9.2) and init the schema.
+    # Ensure config exists (auto-create with defaults) and init the schema.
     config_mod.ensure_config(config_path)
     db_mod.init_db(db_file).close()
     # The daemon's single shared write connection (accessed from the API thread
-    # and the worker thread; serialized by Database's lock — §3 single writer).
+    # and the worker thread; serialized by Database's lock — single writer).
     shared_conn = db_mod.connect(db_file, check_same_thread=False)
     database = db_mod.Database(shared_conn)
 
@@ -126,16 +126,16 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     queue = JobQueue(database, config_loader=_load_config)
 
-    # Startup reconciliation BEFORE serving any request (§3): flip stale running
+    # Startup reconciliation BEFORE serving any request: flip stale running
     # rows to interrupted + carve out queued destructive applies, then drain the
     # durable queued backlog (pump starts the first runnable job).
     reconcile_on_startup(database)
     queue.pump()
 
-    # The periodic-job scheduler (§3, now realized — §8 A2b probe is its first client).
+    # The periodic-job scheduler (the probe is its first client).
     # Constructed right after the queue + reconcile; started/stopped in the lifespan
     # hooks below, symmetric with the queue. It is just another queue *client* (its jobs
-    # only enqueue), so §3's single-worker invariant is untouched.
+    # only enqueue), so the single-worker invariant is untouched.
     from ..jobs.scheduler import PeriodicScheduler
 
     scheduler = PeriodicScheduler(queue, database, _load_config())
@@ -173,7 +173,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
     # -- jobs --------------------------------------------------------
     @app.post("/jobs", dependencies=[Depends(require_token)])
     def submit_job(body: SubmitJobRequest):
-        # §3: every mutating submission is ENQUEUED (durable backlog) — never rejected
+        # Every mutating submission is ENQUEUED (durable backlog) — never rejected
         # for a busy worker or held root (that is decided at dequeue). Only an unknown
         # job type is a client error.
         try:
@@ -186,7 +186,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
     def list_jobs(limit: int = 20, offset: int = 0, terminal_only: bool = False):
         """Recent jobs, newest-first. ``offset`` + ``terminal_only`` page the TUI Queue
         History (which shows only finished jobs); ``total`` is the true count so the
-        client can render ``page K/N`` while holding one page (§12 lazy history)."""
+        client can render ``page K/N`` while holding one page (lazy history)."""
         return {
             "jobs": queries.recent_jobs(limit, offset, terminal_only=terminal_only),
             "total": queries.jobs_count(terminal_only=terminal_only),
@@ -198,14 +198,14 @@ def build_app(token: str, *, db_file=None, config_path=None):
     @app.get("/jobs/live", dependencies=[Depends(require_token)])
     def jobs_live():
         """Live job state (running + queued + interrupted + pending reviews), one
-        consistent read (§12). Shared by the dashboard Queue box and the maximized Queue
+        consistent read. Shared by the dashboard Queue box and the maximized Queue
         screen; terminal history is lazy-loaded via /jobs, not here. Declared BEFORE the
         /jobs/{job_id} catch-all so 'live' isn't parsed as an int job id."""
         return queries.live_jobs()
 
     @app.get("/jobs/queued", dependencies=[Depends(require_token)])
     def list_queued():
-        """The durable FIFO backlog (§3/§12), oldest-first, with blocked reasons."""
+        """The durable FIFO backlog, oldest-first, with blocked reasons."""
         return {"queued": queries.live_jobs().get("queued", [])}
 
     @app.post("/jobs/cancel-queued", dependencies=[Depends(require_token)])
@@ -222,7 +222,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.get("/jobs/{job_id}/problem-files", dependencies=[Depends(require_token)])
     def job_problem_files(job_id: int):
-        """A scan job's undecodable/read-error files (paths + reasons, §12 result card)."""
+        """A scan job's undecodable/read-error files (paths + reasons; result card)."""
         return {"problem_files": queries.job_problem_files(job_id)}
 
     @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_token)])
@@ -232,13 +232,13 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/jobs/{job_id}/prioritize", dependencies=[Depends(require_token)])
     def prioritize_job(job_id: int):
-        """Bump a queued job to the front of the dequeue order (§11 ``jobs prioritize``)."""
+        """Bump a queued job to the front of the dequeue order (``jobs prioritize``)."""
         ok = queue.prioritize(job_id)
         return {"prioritized": ok}
 
     @app.get("/roots/{root_id}/history", dependencies=[Depends(require_token)])
     def root_history(root_id: int, limit: int = 50, offset: int = 0):
-        """One root's terminal job HISTORY, newest-first, paged (§12 per-root panel).
+        """One root's terminal job HISTORY, newest-first, paged (per-root panel).
 
         Always terminal-only: the root's live running/queued come from GET /roots/{id}
         (root_detail), so this resource is purely finished jobs. ``offset`` pages it;
@@ -259,7 +259,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
         async def event_gen():
             # If the job is already TERMINAL, emit its final state and close so a
-            # late attach doesn't hang forever (SSE degrades gracefully — §3).
+            # late attach doesn't hang forever (SSE degrades gracefully).
             current = queries.job_detail(job_id)
             if current and current["status"] not in ("running", "queued"):
                 yield _sse({"job_id": job_id, "type": "state",
@@ -302,7 +302,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
     # -- read-only snapshots -----------------------------------------
     @app.get("/stats", dependencies=[Depends(require_token)])
     def stats():
-        """App-wide collection summary — the dashboard Collection box (§1.1). Collection
+        """App-wide collection summary — the dashboard Collection box. Collection
         aggregations ONLY (assets/photos/videos/trashed/size/deduped); no jobs, no roots,
         no reviews (those are their own resources — /jobs, /roots, /reviews). Polled on a
         slow cadence; only moves when a scan/dedup completes (queries.collection_stats)."""
@@ -310,7 +310,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.get("/reviews", dependencies=[Depends(require_token)])
     def reviews():
-        """Open review runs across all roots (§8 B/§6.2). A review is review_runs state,
+        """Open review runs across all roots. A review is review_runs state,
         not a job — its own resource, so /jobs/live stays pure jobs. The per-root pending
         review is also on GET /roots/{id}; this is the collection-wide list."""
         return {"reviews": queries.pending_reviews()}
@@ -321,7 +321,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.get("/roots/resolve", dependencies=[Depends(require_token)])
     def resolve_root(q: str):
-        """Resolve a user-supplied name/path to a root id (§11). The ONE place name/path→id
+        """Resolve a user-supplied name/path to a root id. The ONE place name/path→id
         lives, so the id-keyed routes below stay clean while the CLI/TUI accept a human
         handle. Declared BEFORE /roots/{root_id} so 'resolve' isn't parsed as an int id.
         A path with \\/spaces/% is safe — it's the ?q= query value (encoded), not a path
@@ -333,7 +333,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.get("/roots/{root_id}", dependencies=[Depends(require_token)])
     def root_detail(root_id: int):
-        """One root's detail by id (§11): counts, scan/dedup recency, size, the root's
+        """One root's detail by id: counts, scan/dedup recency, size, the root's
         running/queued jobs, and its pending review. History is a separate paged resource
         (/roots/{id}/history)."""
         detail = queries.root_detail_by_id(root_id)
@@ -343,7 +343,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/roots", dependencies=[Depends(require_token)])
     def register_root(body: RegisterRootRequest):
-        """Register a folder as a root (§8 A1); optionally kick off a scan (--scan)."""
+        """Register a folder as a root; optionally kick off a scan (--scan)."""
         try:
             row = roots_mod.register(
                 database, body.path, name=body.name, kind=body.kind,
@@ -353,8 +353,8 @@ def build_app(token: str, *, db_file=None, config_path=None):
             raise HTTPException(status_code=400, detail=str(exc))
         job_id = None
         if body.scan and row["kind"] == "library":
-            # §3: the scan is enqueued (it drains when the worker frees / the root
-            # clears) — never rejected, so there is no "scan_busy" path anymore.
+            # The scan is enqueued (it drains when the worker frees / the root
+            # clears) — never rejected, so there is no "scan_busy" path.
             job_id = queue.submit(
                 "scan",
                 {"root_id": row["id"], "full": body.full, "embed": body.embed},
@@ -363,7 +363,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/scan", dependencies=[Depends(require_token)])
     def submit_scan(body: dict):
-        """Resolve a root arg (path/--name, §11) and submit a scan job (§8 A2).
+        """Resolve a root arg (path/--name) and submit a scan job.
 
         ``--all`` submits with no ``root_id`` (owns no root; iterates + skips busy
         roots). A manual scan resolves the arg here so the CLI stays a thin client.
@@ -386,18 +386,18 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/probe", dependencies=[Depends(require_token)])
     def submit_probe(body: dict):
-        """Resolve a root arg (path/--name) + submit a probe job, or fan out for --all (§8 A2b).
+        """Resolve a root arg (path/--name) + submit a probe job, or fan out for --all.
 
         A single ``<root>`` submits one ``probe`` job (owns its root, dequeue-gated like
         ``scan``). ``--all`` expands here to one ``probe <root>`` per enabled **library**
-        root — the per-root policy (§8 A2b decision #2), NOT a single root-less sweep — so
+        root — the per-root policy, NOT a single root-less sweep — so
         each gets its own queue entry + gate; the queue's submit-dedup caps the backlog at
         one queued probe per root. Returns ``{job_ids: [...]}`` (the per-root job ids;
         deduped ids may repeat a still-queued probe). A trash root is rejected (400).
         """
         if bool(body.get("all")):
             # One probe per enabled library root — the single definition of the sweep set
-            # (shared with the scheduler's probe-all task, §8 A2b) so the two can't drift.
+            # (shared with the scheduler's probe-all task) so the two can't drift.
             job_ids = [queue.submit("probe", {"root_id": rid})
                        for rid in roots_mod.enabled_library_root_ids(database)]
             return {"job_ids": job_ids}
@@ -409,7 +409,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/dedup", dependencies=[Depends(require_token)])
     def submit_dedup(body: dict):
-        """Resolve a root arg (path/--name) + submit a dedup job (§8 B).
+        """Resolve a root arg (path/--name) + submit a dedup job.
 
         Modes are carried in params: default analyze, or ``--confirm``/``--cancel``
         (act on the pending run) / ``--dry-run`` (analyze without staging). A trash
@@ -431,7 +431,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/cleanup", dependencies=[Depends(require_token)])
     def submit_cleanup(body: dict):
-        """Resolve a root arg (path/--name) + submit a cleanup job (§6.2, §9.1).
+        """Resolve a root arg (path/--name) + submit a cleanup job.
 
         ``mode`` ∈ ``exact`` | ``perceptual`` | ``undecodable`` (one required for a
         fresh op — the CLI enforces exactly-one via its three flags). Sub-verbs carried
@@ -458,7 +458,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.get("/cleanup/preview", dependencies=[Depends(require_token)])
     def cleanup_preview(root: str, mode: str = "exact"):
-        """Read-only count for a one-shot cleanup mode's typed confirm (§6.2, §9.1)."""
+        """Read-only count for a one-shot cleanup mode's typed confirm."""
         prev = queries.cleanup_exact_preview(root, mode)
         if prev is None:
             raise HTTPException(status_code=404, detail=f"no root at path or named {root!r}")
@@ -466,7 +466,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/merge", dependencies=[Depends(require_token)])
     def submit_merge(body: dict):
-        """Resolve ``--into`` to a library root + submit a merge job (§8 C).
+        """Resolve ``--into`` to a library root + submit a merge job.
 
         ``--into`` may name a root or a **subfolder** of one (created at copy time), so
         it uses :func:`roots.resolve_dest` (containment), not exact/name match. The
@@ -494,13 +494,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/trash/refresh", dependencies=[Depends(require_token)])
     def submit_trash_refresh(body: dict):
-        """Submit a ``trash refresh`` job (§6.1) — absorb + empty the trash roots.
+        """Submit a ``trash refresh`` job — absorb + empty the trash roots.
 
         A ``root`` arg (path/--name) scopes the refresh to that **single** trash
         root (the ``trash refresh <root>`` verb / TUI mascot modal); it must resolve
         to a ``kind='trash'`` root (a library root's files are indexed by ``scan``,
-        not consumed) — else 400/404. Omitting it refreshes **every** trash root, the
-        original behavior.
+        not consumed) — else 400/404. Omitting it refreshes **every** trash root.
         """
         arg = body.get("root")
         params: dict = {}
@@ -511,7 +510,7 @@ def build_app(token: str, *, db_file=None, config_path=None):
 
     @app.post("/untrash", dependencies=[Depends(require_token)])
     def submit_untrash(body: dict):
-        """Submit an ``untrash`` job (§6.3) — forget content from trash memory by hash.
+        """Submit an ``untrash`` job — forget content from trash memory by hash.
 
         ``<path>`` is arbitrary bytes to hash (NOT a root), passed through verbatim.
         """
@@ -542,11 +541,11 @@ def build_app(token: str, *, db_file=None, config_path=None):
     # -- shutdown ----------------------------------------------------
     @app.post("/shutdown", dependencies=[Depends(require_token)])
     async def shutdown():
-        # Graceful stop (§3): signal a running job to checkpoint (cooperative
+        # Graceful stop: signal a running job to checkpoint (cooperative
         # cancel would set 'cancelled'; a clean stop wants 'interrupted'). We
         # request the running job to stop cooperatively but reconciliation on
-        # next start lands it as 'interrupted' — matching §3's "stop is a
-        # resumable interruption, not a cancel." We stop serving after replying.
+        # next start lands it as 'interrupted' — a stop is a resumable
+        # interruption, not a cancel. We stop serving after replying.
         running_id = queue.running_job_id()
         # Close any attached SSE streams up front so their event_gen loops break and free
         # their blocked executor threads BEFORE uvicorn's graceful shutdown waits on them.
@@ -572,7 +571,7 @@ def _stop_server(app):
 
 
 def _bind_single_instance(port: int):
-    r"""Acquire the single-instance lock by binding the fixed loopback port (§3).
+    r"""Acquire the single-instance lock by binding the fixed loopback port.
 
     Returns the bound+listening socket, or ``None`` if the port is already taken
     (another daemon won the auto-spawn race — the caller exits without touching any
@@ -601,7 +600,7 @@ def _bind_single_instance(port: int):
 def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> int:
     """Run the daemon in the foreground (the detached process's entrypoint).
 
-    Order matters for the auto-spawn race (§3): **bind the loopback port FIRST**
+    Order matters for the auto-spawn race: **bind the loopback port FIRST**
     (the single-instance lock), and only then do any startup work — reconciliation,
     the queue pump, and the token/state write. A daemon that loses the bind exits
     immediately (code 3) having touched no shared state, so it can never corrupt the
@@ -609,7 +608,7 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
     """
     import uvicorn
 
-    # 1. RACE GATE: bind the port before anything destructive (§3). Loser → exit.
+    # 1. RACE GATE: bind the port before anything destructive. Loser → exit.
     lock_sock = _bind_single_instance(port)
     if lock_sock is None:
         return 3
@@ -633,7 +632,7 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
         # access_log=False: kill the per-request access logger (uvicorn sets its
         # handlers=[]/propagate=False). The TUI/CLI poll /health, /status, /jobs
         # continuously, so at INFO that logger emits one line per poll — the bulk of
-        # what used to fill daemon.log. This is the authoritative switch: quieting the
+        # what would otherwise fill daemon.log. This is the authoritative switch: quieting the
         # logger in _setup_logging doesn't stick because uvicorn's configure_logging()
         # resets uvicorn.access back to log_level during server.run().
         # timeout_graceful_shutdown: uvicorn's default is None (wait FOREVER for in-flight
@@ -652,12 +651,12 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
 
         # We already hold the lock, so token/state can be written up front — but keep
         # it in the lifespan hook so it's torn down symmetrically by _on_stop. Since
-        # the port is ours, this hook can no longer race a second daemon.
+        # the port is ours, this hook cannot race a second daemon.
         @app.on_event("startup")
         def _on_start():
             token_mod.write_token(token, paths.token_path())
             current_state().write()
-            # Arm the periodic scheduler (§3) — its BackgroundScheduler thread starts
+            # Arm the periodic scheduler — its BackgroundScheduler thread starts
             # here, symmetric with the queue; a fired task only submits jobs.
             app.state.scheduler.start()
             log.info("packrat daemon up on %s:%d (pid=%d)", HOST, port, current_state().pid)
@@ -669,7 +668,7 @@ def run_daemon(*, db_file=None, config_path=None, port: int = DEFAULT_PORT) -> i
             # symmetric with queue.shutdown() below.
             app.state.scheduler.shutdown()
             # Signal a running job to checkpoint and join it before closing the DB.
-            # Its row is reconciled to 'interrupted' on next start (§3 clean-stop).
+            # Its row is reconciled to 'interrupted' on next start (clean-stop).
             app.state.queue.shutdown()
             app.state.db.close()
             log.info("packrat daemon stopped")

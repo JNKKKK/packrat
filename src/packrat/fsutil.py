@@ -1,10 +1,10 @@
-r"""Filesystem path helpers — canonical form + long-path-safe I/O (§8 A1, §10.1).
+r"""Filesystem path helpers — canonical form + long-path-safe I/O.
 
 Two concerns kept apart on purpose:
 
 - **Canonical form** (:func:`canonicalize`) — the absolute, normalized string we
   **store** in ``roots.path`` / ``file_instances.path`` and compare for equality
-  (§4: "``path`` is stored in the canonical long-path-safe form … so equality is
+  ("``path`` is stored in the canonical long-path-safe form … so equality is
   well-defined"). It is a *plain* path (no ``\\?\`` prefix) so it stays legible in
   manifests / audit JSON / ``roots list``.
 
@@ -28,7 +28,7 @@ _IS_WINDOWS = os.name == "nt"
 
 
 def canonicalize(path: str | os.PathLike) -> str:
-    r"""Return the absolute, normalized path we store and compare (§8 A1 step 1).
+    r"""Return the absolute, normalized path we store and compare.
 
     No ``\\?\`` prefix — that is added just-in-time by :func:`extended` for I/O.
     Uses :func:`os.path.abspath` (absolute + ``normpath``) which collapses ``.``/
@@ -65,7 +65,7 @@ def paths_equal(a: str, b: str) -> bool:
 def is_within(child: str, parent: str) -> bool:
     r"""True if ``child`` is ``parent`` or nested inside it (canonical inputs).
 
-    Used by the register overlap check (§8 A1 step 2). Compares on ``normcase`` so
+    Used by the register overlap check. Compares on ``normcase`` so
     it is case-insensitive on Windows, and guards the segment boundary so
     ``C:\\foobar`` is not treated as inside ``C:\\foo``.
     """
@@ -77,22 +77,22 @@ def is_within(child: str, parent: str) -> bool:
 
 
 def leaf_name(path: str) -> str:
-    """The last path component (the default root handle, §8 A1 step 3)."""
+    """The last path component (the default root handle)."""
     return Path(path).name
 
 
 def is_network_path(path: str) -> bool:
-    r"""True if ``path`` is on a UNC / network share (no Recycle Bin — §10).
+    r"""True if ``path`` is on a UNC / network share (no Recycle Bin).
 
-    Two cases, both meaning "no Recycle Bin → a delete here is PERMANENT" (§10,
-    §10.1 — most roots live on the Synology NAS, commonly *mapped drives*):
+    Two cases, both meaning "no Recycle Bin → a delete here is PERMANENT"
+    (most roots live on the Synology NAS, commonly *mapped drives*):
 
     - **UNC** (``\\server\share\…`` or the extended ``\\?\UNC\…``) — a leading
       ``\\`` that is not the ``\\?\`` local extended prefix.
     - **Mapped network drive** (``Z:\…``) — a drive letter whose Win32
       :func:`GetDriveTypeW` reports ``DRIVE_REMOTE``. This is the case a pure UNC
       check misses, and it is exactly the "confirm summary must warn on a
-      non-recyclable path" gate (§10). Resolved via ctypes (no dependency);
+      non-recyclable path" gate. Resolved via ctypes (no dependency);
       any failure falls back to False (best-effort, never blocks the delete).
     """
     if path.startswith("\\\\") and not path.startswith("\\\\?\\"):
@@ -125,5 +125,5 @@ def _is_remote_drive(path: str) -> bool:
         import ctypes
 
         return ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root)) == _DRIVE_REMOTE
-    except Exception:  # noqa: BLE001 - classification is best-effort (§10)
+    except Exception:  # noqa: BLE001 - classification is best-effort
         return False

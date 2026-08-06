@@ -1,9 +1,8 @@
-r"""Periodic-job scheduler (§3) — the daemon-owned APScheduler the plan slated.
+r"""Periodic-job scheduler — the daemon-owned APScheduler the plan slated.
 
-§3 lists "Scheduler (APScheduler → interval scans)" as a daemon responsibility; this
-realizes it — **general** enough for future periodic work (scheduled ``--full`` scans
-per §13 M8, audit pruning §8.1, embedding backfills §7), with **probe** (§8 A2b) as
-its first client.
+The plan lists "Scheduler (APScheduler → interval scans)" as a daemon responsibility;
+this realizes it — **general** enough for future periodic work (scheduled ``--full``
+scans, audit pruning, embedding backfills), with **probe** as its first client.
 
 Design — a thin :class:`PeriodicScheduler` wrapper + a declarative
 :class:`PeriodicTask` registry **over** APScheduler's ``BackgroundScheduler`` (so tasks
@@ -14,16 +13,16 @@ pattern):
   enqueues the work (the fan-out lives here), a ``trigger(config)`` builder (→ an
   APScheduler trigger, so cadence is config-tunable), and an ``enabled(config)`` gate.
 - **The probe task's ``submit``** does the fan-out: query enabled *library* roots and
-  ``queue.submit("probe", {"root_id": r})`` per root. The queue's submit-dedup (§8 A2b)
+  ``queue.submit("probe", {"root_id": r})`` per root. The queue's submit-dedup
   makes re-firing before the last batch drained a no-op, so the scheduler stays generic
   — probe's "one job per root" policy lives in the thunk + the dedup, not in APScheduler.
 - **The scheduler is just another queue *client*.** APScheduler's job func runs on *its*
   own thread and only calls ``queue.submit(...)`` (enqueue + pump); it never runs job
-  work itself, so the "one mutating job at a time" invariant (§3) is untouched.
+  work itself, so the "one mutating job at a time" invariant is untouched.
 - **In-memory jobstore (APScheduler default), NOT persistent.** The schedule is re-armed
   from :data:`PERIODIC_TASKS` on every daemon start; a tick missed while the daemon was
   down just runs at the next fire. Probe is cheap + idempotent, so a missed/extra tick
-  is harmless — durability lives in the *job queue* (§3), the schedule itself is
+  is harmless — durability lives in the *job queue*, the schedule itself is
   disposable. ``coalesce=True`` + a ``misfire_grace_time`` collapse a backlog of missed
   fires to one.
 """
@@ -53,7 +52,7 @@ _MIN_INTERVAL_S = 900
 
 @dataclass(frozen=True)
 class PeriodicTask:
-    """One declarative periodic job spec (mirrors ``JobSpec``, §3).
+    """One declarative periodic job spec (mirrors ``JobSpec``).
 
     ``submit`` enqueues the work through the normal queue (fan-out lives here);
     ``trigger`` builds an APScheduler trigger from config (so cadence is tunable);
@@ -68,13 +67,13 @@ class PeriodicTask:
 
 
 # ---------------------------------------------------------------------------
-# the probe-all task (§8 A2b) — probe every enabled library root
+# the probe-all task — probe every enabled library root
 # ---------------------------------------------------------------------------
 def submit_probe_all(queue, db) -> None:
-    """Fan-out: submit one ``probe <root>`` per enabled **library** root (§8 A2b).
+    """Fan-out: submit one ``probe <root>`` per enabled **library** root.
 
     Uses :func:`packrat.roots.enabled_library_root_ids` — the SAME sweep-set definition the
-    daemon's ``/probe --all`` endpoint uses (trash + disabled roots excluded, §6.1), so the
+    daemon's ``/probe --all`` endpoint uses (trash + disabled roots excluded), so the
     scheduled and manual sweeps can't drift. Each submission gets its own queue entry +
     dequeue gate; the queue's submit-dedup collapses a re-fire before the previous batch
     drained to a no-op (one queued probe per root). A plain ``(queue, db) -> None`` so it is
@@ -114,7 +113,7 @@ PERIODIC_TASKS: list[PeriodicTask] = [PROBE_ALL_TASK]
 
 
 class PeriodicScheduler:
-    """Daemon-owned wrapper over APScheduler's ``BackgroundScheduler`` (§3).
+    """Daemon-owned wrapper over APScheduler's ``BackgroundScheduler``.
 
     Registers each *enabled* :class:`PeriodicTask` as an APScheduler job whose func calls
     ``task.submit(queue, db)`` through the normal queue. Owns its own daemon thread (the
@@ -132,7 +131,7 @@ class PeriodicScheduler:
 
     def _make_scheduler(self):
         # In-memory jobstore (the default) — the schedule is disposable + re-armed each
-        # start (§3). coalesce=True collapses missed fires; misfire grace tolerates a
+        # start. coalesce=True collapses missed fires; misfire grace tolerates a
         # daemon that was down over a fire instant.
         from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -142,14 +141,14 @@ class PeriodicScheduler:
 
     def _run_task(self, task: PeriodicTask) -> None:
         """APScheduler job func — runs on the scheduler's thread; only enqueues (never
-        runs job work), so §3's single-worker invariant is untouched."""
+        runs job work), so the single-worker invariant is untouched."""
         try:
             task.submit(self._queue, self._db)
         except Exception:  # noqa: BLE001 - a task error must not kill the scheduler thread
             log.exception("periodic task %r failed to submit", task.name)
 
     def start(self) -> None:
-        """Register each enabled task + start the background scheduler (§3 startup hook).
+        """Register each enabled task + start the background scheduler (startup hook).
 
         A task whose ``enabled(config)`` is false is simply not registered (its
         off-switch). **Never blocks daemon startup**: building the scheduler, arming
@@ -157,7 +156,7 @@ class PeriodicScheduler:
         background thread are ALL guarded — a failure is logged and skipped rather than
         propagated out of the FastAPI startup hook. One bad task is skipped without
         dropping the others; a build/start failure disables periodic jobs but leaves the
-        daemon up (durability lives in the job queue, not the schedule — §3)."""
+        daemon up (durability lives in the job queue, not the schedule)."""
         try:
             self._scheduler = self._make_scheduler()
         except Exception:  # noqa: BLE001 - never block daemon startup on the scheduler
@@ -186,7 +185,7 @@ class PeriodicScheduler:
         log.info("periodic scheduler started (%d task(s) armed)", armed)
 
     def shutdown(self) -> None:
-        """Stop the background scheduler (§3 shutdown hook) — symmetric with
+        """Stop the background scheduler (shutdown hook) — symmetric with
         ``JobQueue.shutdown()``. ``wait=False`` so a graceful daemon stop isn't held up."""
         if self._scheduler is not None:
             try:

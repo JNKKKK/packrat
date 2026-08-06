@@ -22,10 +22,10 @@ from .tokens import HEAVY_BOX, LIGHT_BOX
 
 
 def box(title: str, lines: list[str], width: int, right: str = "", heavy: bool = False) -> list[str]:
-    """A bordered panel ``width`` cells wide (heavy frame = focused, §focus model).
+    """A bordered panel ``width`` cells wide (heavy frame = focused).
 
     ``title`` sits in the top border (``┌─ [R]oots ─┐``); ``right`` is an optional
-    right-aligned top-border label (a paginator in a focused box, §1.3). Body
+    right-aligned top-border label (a paginator in a focused box). Body
     ``lines`` are padded to the inner width. Returns the list of rows.
     """
     tl, tr, bl, br, h, v = HEAVY_BOX if heavy else LIGHT_BOX
@@ -51,7 +51,7 @@ def hjoin(a: list[str], b: list[str], gap: int = 1) -> list[str]:
 def screen(title: str, content: list[str], right: str = "",
            footer: str | list[str] = "",
            *, width: int | None = None, height: int | None = None) -> str:
-    """Wrap ``content`` in the W×H frame — the :class:`AppFrame` (§12).
+    """Wrap ``content`` in the W×H frame — the :class:`AppFrame`.
 
     ``title`` is the top-border label (``packrat · Roots``); ``right`` its
     right-aligned counterpart (``daemon ● up``). The ``footer`` (HintBar) is pinned

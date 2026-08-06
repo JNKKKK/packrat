@@ -1,15 +1,15 @@
-"""Job type registry (§3).
+"""Job type registry.
 
 Each job type declares:
 - ``handler``: ``(JobContext) -> None`` — the work, run on the single worker thread.
-  Every job takes the global single-worker slot (§3 guarantee 1); read-only queries
+  Every job takes the global single-worker slot; read-only queries
   (status/roots) are plain HTTP, not jobs.
 - ``owned_root``: ``(params) -> root_id | None`` — the root this job *owns* for
-  per-root exclusivity (§3 guarantee 2). ``None`` means it owns no root
+  per-root exclusivity. ``None`` means it owns no root
   (e.g. ``untrash``, or ``scan --all`` which iterates roots rather than owning one).
 - ``ignore_merge_holder``: when the dequeue gate checks the owned root's holder, skip
   an open ``merge_runs`` row (only a pending review still blocks). Set by ``merge`` so
-  a *resuming* merge is not held by *its own* prior open run (§8 C) — else it would
+  a *resuming* merge is not held by *its own* prior open run — else it would
   deadlock waiting on itself. Everything else keeps the default (an open merge blocks).
 """
 

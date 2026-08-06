@@ -1,12 +1,12 @@
-"""Navigation & focus — the packrat-specific state machine (component-plan §Nav).
+"""Navigation & focus — the packrat-specific state machine.
 
 Textual gives the primitives (``Screen``, ``push_screen``/``pop_screen``, focus);
 this module owns the one behavior Textual can't know about, kept as a **pure,
 testable** helper so a screen just drives it:
 
-- :class:`DashboardFocus` — the dashboard's focus→maximize state machine (§focus
-  model): ``[r]``/``[q]`` once focuses a box (heavy frame + cursor), again
-  maximizes into the full §2/§4 interface; ``Esc`` un-focuses; ``↑/↓`` move the
+- :class:`DashboardFocus` — the dashboard's focus→maximize state machine:
+  ``[r]``/``[q]`` once focuses a box (heavy frame + cursor), again
+  maximizes into the full interface; ``Esc`` un-focuses; ``↑/↓`` move the
   cursor in place; ``←/→`` page. The two boxes are peers — focusing one unfocuses
   the other.
 """
@@ -18,11 +18,12 @@ from dataclasses import dataclass
 
 @dataclass
 class DashboardFocus:
-    """The dashboard focus→maximize state machine (§focus model).
+    """The dashboard focus→maximize state machine.
 
     ``target`` is the focused box (``None`` | ``'roots'`` | ``'queue'``); a box is
     *focused* when it is ``target``. A second press of its key requests
-    *maximize* (the screen pushes §2/§4). Cursors track the selected row per box.
+    *maximize* (the screen pushes the maximized interface). Cursors track the selected
+    row per box.
     """
 
     target: str | None = None

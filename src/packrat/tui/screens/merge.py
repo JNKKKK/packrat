@@ -1,11 +1,11 @@
-"""Merge-from picker (§3.3) — pure body builder for the merge source form.
+"""Merge-from picker — pure body builder for the merge source form.
 
 ``[m]`` on a root opens this: the root is the fixed **destination**, and the user
 picks the **source** via a radio — a paginated list of **library** roots (a trash
 root is never a merge source; the dest is excluded), or an arbitrary **external
 folder** path. A ``--dry-run`` toggle previews classification without copying.
 Pure (dicts → lines); the Textual screen displays it and owns key routing. It
-submits ``merge <source> --into <dest>`` (§8 C).
+submits ``merge <source> --into <dest>``.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def merge_sources(roots: list[dict], dest_name: str) -> list[dict]:
 def merge_body(dest: dict, sources: list[dict], *, geo: Geometry = REFERENCE,
                source_mode: str = "root", cursor: int = 0, page: int = 0,
                ext_path: str = "", dry_run: bool = False) -> list[str]:
-    """Build the §3.3 merge-from body.
+    """Build the merge-from body.
 
     ``source_mode`` is ``'root'`` (a paginated registered-root list) or ``'ext'``
     (a typed external-folder path). ``cursor``/``page`` navigate the root list;
@@ -86,7 +86,7 @@ def _source_list(sources: list[dict], geo: Geometry, cursor: int, page: int) -> 
 
 
 def _source_row(r: dict, width: int, *, selected: bool = False) -> str:
-    """``▸ Name   path……………   N assets`` — path grows, count right-aligned (§3.3)."""
+    """``▸ Name   path……………   N assets`` — path grows, count right-aligned."""
     cur = CURSOR if selected else " "
     return row(
         width,

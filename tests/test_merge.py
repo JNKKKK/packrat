@@ -1,4 +1,4 @@
-r"""merge (§8 C) — copy into a folder only what's new, decided by exact hash.
+r"""merge — copy into a folder only what's new, decided by exact hash.
 
 Drives the real ``merge`` handler through a ``JobQueue`` + ``Database`` (as the
 dedup/scan/cleanup tests do). Merge is **copy-only** (``shutil.copyfile`` + atomic
@@ -148,7 +148,7 @@ def test_merge_copies_new_files(queue_and_db, tmp_path):
     assert database.query_one("SELECT COUNT(*) c FROM file_instances")["c"] == 2
     # Merge-created assets are un-perceptual (no phash yet — a later scan backfills).
     assert database.query_one("SELECT COUNT(*) c FROM phash")["c"] == 0
-    # A merge that registered new content marks the dest root dedup-dirty (§12 rung 3 ◉ yellow).
+    # A merge that registered new content marks the dest root dedup-dirty (rung 3 ◉ yellow).
     assert database.query_one("SELECT needs_dedup FROM roots WHERE id=?",
                               (root["id"],))["needs_dedup"] == 1
     # merge_runs finalized as history.
@@ -159,7 +159,7 @@ def test_merge_copies_new_files(queue_and_db, tmp_path):
 def test_merge_all_ignored_does_not_dirty_dest(queue_and_db, tmp_path):
     """A merge that registers NOTHING (every file lands on an ignored dest path →
     copied-unindexed) must NOT mark the dest root dedup-dirty — nothing enters the
-    catalog, so there is nothing to dedup (§12 rung 3)."""
+    catalog, so there is nothing to dedup (rung 3)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -295,7 +295,7 @@ def test_merge_source_never_modified(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# ignored-dest handling (§8 C step 11/13)
+# ignored-dest handling
 # ---------------------------------------------------------------------------
 def test_merge_ignored_dest_copies_but_does_not_register(queue_and_db, tmp_path):
     q, database = queue_and_db
@@ -360,7 +360,7 @@ def test_merge_dry_run_warns_ignored_dest(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# resume from the frozen plan (§8 C Safety & resume)
+# resume from the frozen plan (Safety & resume)
 # ---------------------------------------------------------------------------
 def test_merge_resume_finishes_copied_but_unregistered(queue_and_db, tmp_path):
     """A crash between rename and DB register leaves progress='copied' → resume registers it."""
@@ -417,7 +417,7 @@ def test_merge_resume_skips_already_registered(queue_and_db, tmp_path):
 
 def test_merge_phase1_persists_hashes_incrementally_and_resume_skips(queue_and_db, tmp_path, monkeypatch):
     """Phase 1 UPSERTs each source hash as it's computed, so a crash mid-hash keeps the
-    work; a `planning`-resume skips already-hashed files (§8 C SMB-cost avoidance)."""
+    work; a `planning`-resume skips already-hashed files (SMB-cost avoidance)."""
     from packrat import media
     from packrat.jobs import merge as merge_mod
 
@@ -483,7 +483,7 @@ def test_merge_phase1_persists_hashes_incrementally_and_resume_skips(queue_and_d
 
 
 # ---------------------------------------------------------------------------
-# cross-op guard (§8 C Phase 0 step 2a) — held behind a pending review
+# cross-op guard (Phase 0) — held behind a pending review
 # ---------------------------------------------------------------------------
 def test_merge_held_by_pending_dedup(queue_and_db, tmp_path):
     q, database = queue_and_db
@@ -519,7 +519,7 @@ def test_merge_dry_run_owns_no_root(queue_and_db, tmp_path):
 
 
 def test_merge_refreshes_trash_first(queue_and_db, tmp_path):
-    """merge runs refresh-trash first, so a just-dropped trash file is absorbed + excludes a match (§8 C)."""
+    """merge runs refresh-trash first, so a just-dropped trash file is absorbed + excludes a match."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()

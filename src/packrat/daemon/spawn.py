@@ -1,4 +1,4 @@
-"""Race-free auto-spawn of the detached daemon (§3).
+"""Race-free auto-spawn of the detached daemon.
 
 The client does **bind-or-connect**, not check-then-spawn, so two clients racing
 to start the daemon converge on **one**:
@@ -11,8 +11,8 @@ to start the daemon converge on **one**:
 On Windows the child is spawned **windowless**: with ``pythonw.exe`` (the
 GUI-subsystem interpreter, which cannot own a console) when available, plus
 ``CREATE_NO_WINDOW`` | ``CREATE_NEW_PROCESS_GROUP`` so it runs fully in the
-background and outlives the launching terminal (§3, §11: "killing the terminal …
-none touch the running job"). Its raw stdout/stderr go to ``daemon-bootstrap.log``
+background and outlives the launching terminal (killing the terminal never
+touches the running job). Its raw stdout/stderr go to ``daemon-bootstrap.log``
 (pre-logging / hard-crash output only); normal logging goes to the date-rotating
 ``daemon.log`` owned by the handler in :mod:`packrat.daemon.__main__`.
 """
@@ -55,7 +55,7 @@ def spawn_daemon() -> None:
     """Launch the background daemon process (does not wait for it to bind)."""
     # Redirect the child's raw fds to a *bootstrap* log, not daemon.log — keeping the
     # inherited stdout/stderr handle off daemon.log means it can't pin that file across
-    # the rotating handler's midnight rename (§ date-split logging). (The rename is also
+    # the rotating handler's midnight rename. (The rename is also
     # made non-fatal by _SafeTimedRotatingFileHandler as a belt-and-suspenders guard.)
     log_file = paths.daemon_bootstrap_log_path()
     logf = open(log_file, "a", encoding="utf-8")  # noqa: SIM115 - handed to child
@@ -79,7 +79,7 @@ def spawn_daemon() -> None:
 
 
 def ensure_daemon(*, timeout_s: float = 20.0, port: int = DEFAULT_PORT) -> DaemonClient:
-    """Return a client for a live daemon, auto-spawning one if needed (§3).
+    """Return a client for a live daemon, auto-spawning one if needed.
 
     Bind-or-connect: connect first; on failure spawn and poll ``/health`` until
     the winner answers. Raises :class:`TimeoutError` if nothing comes up.
@@ -104,7 +104,7 @@ def ensure_daemon(*, timeout_s: float = 20.0, port: int = DEFAULT_PORT) -> Daemo
 
 
 def _with_token(client: DaemonClient, port: int) -> DaemonClient:
-    """Re-read the token once the daemon is up (it writes it on startup, §3)."""
+    """Re-read the token once the daemon is up (it writes it on startup)."""
     from . import token as token_mod
 
     return DaemonClient(port=port, token=token_mod.read_token())

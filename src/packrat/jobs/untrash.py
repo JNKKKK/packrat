@@ -1,18 +1,18 @@
-r"""The ``untrash`` operation (§6.3) — forget content from trash memory.
+r"""The ``untrash`` operation — forget content from trash memory.
 
 The reversal for an accidental trash: **remove a fingerprint from the permanent
 trashed-hash set** so the content is no longer excluded from future merges. You
 *present the file* (packrat stores no pixels to preview, so the real thing is the
 identifier); untrash hashes it and matches by **exact content hash**.
 
-**It does not restore bytes** — that is the Recycle Bin's job (§10). untrash only
+**It does not restore bytes** — that is the Recycle Bin's job. untrash only
 reads files (to hash) and writes DB rows; it moves/deletes nothing on disk.
 
 The ``<path>`` is arbitrary bytes to hash — it **need not** be a registered root and
 untrash never catalogs it (the key difference from ``scan``/``cleanup``). A file, or
-a folder walked recursively with the same allowlist/ignore rules as scan (§8 A1).
+a folder walked recursively with the same allowlist/ignore rules as scan.
 
-Per matched **trashed** asset (§6.3 step 3, mirrors §4's forget/keep, inverted):
+Per matched **trashed** asset (mirrors the forget/keep rule, inverted):
 - **still has ≥1 live instance** → flip ``status`` back to ``active``, clear
   ``trashed_at``/``trash_reason``, retain fingerprints — it rejoins in place.
 - **zero instances** → **forget it entirely** (delete the asset, cascade its
@@ -20,8 +20,8 @@ Per matched **trashed** asset (§6.3 step 3, mirrors §4's forget/keep, inverted
 
 An ``active`` match is a no-op (``already-active``); an unknown hash a no-op
 (``unknown``) — untrash **never creates** an asset. Owns no root (never blocked by /
-blocks a review or merge, §3); does **not** call trash-refresh, so ``--dry-run``
-truly changes nothing (§6.1's always-absorb rule doesn't apply here).
+blocks a review or merge); does **not** call trash-refresh, so ``--dry-run``
+truly changes nothing (the always-absorb rule doesn't apply here).
 """
 
 from __future__ import annotations
@@ -76,11 +76,11 @@ def _run_untrash(ctx: JobContext) -> None:
 
 
 def _resolve_targets(ctx: JobContext, arg: str) -> list[str]:
-    r"""Resolve ``arg`` to a list of media file paths (§6.3 step 1).
+    r"""Resolve ``arg`` to a list of media file paths.
 
     A single file (kept only if it clears the media allowlist), or a folder walked
     recursively with the scan ignore set. Errors if the path is missing/unreadable.
-    ``arg`` is NOT resolved against roots — it is just bytes to hash (§6.3).
+    ``arg`` is NOT resolved against roots — it is just bytes to hash.
     """
     canon = fsutil.canonicalize(arg)
     ext = fsutil.extended(canon)
@@ -101,7 +101,7 @@ def _resolve_targets(ctx: JobContext, arg: str) -> list[str]:
 
 
 def _untrash_one(db, path: str, summary: dict, *, dry_run: bool) -> None:
-    """Hash one file and forget/reactivate its trashed asset (§6.3 steps 2–3)."""
+    """Hash one file and forget/reactivate its trashed asset."""
     try:
         content_hash = media.hash_file(path)
     except OSError as exc:
@@ -139,6 +139,6 @@ register_job(
     JobSpec(
         type="untrash",
         handler=_run_untrash,
-        owned_root=None,  # targets no root — arbitrary bytes to hash (§6.3)
+        owned_root=None,  # targets no root — arbitrary bytes to hash
     )
 )

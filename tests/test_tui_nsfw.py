@@ -1,7 +1,7 @@
 """NSFW redaction (``packrat --nsfw``) — the display-only, value-based masking layer.
 
 Value-based: keywords are matched ONLY against the live roots' name/path (the source of
-truth, §8 A1); those literal values (and path components) are then redacted wherever they
+truth); those literal values (and path components) are then redacted wherever they
 appear. So app chrome ("assets", "analyze") can never be corrupted — only real root-derived
 text is touched. Masking is applied **pre-layout** (screens feed the read model through
 ``app.view``), so a keyword is redacted before ``middle_elide`` can split it across a ``…``

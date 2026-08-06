@@ -1,8 +1,8 @@
-"""scan job (§8 A2) + M2 perceptual: new/dup, fast-path, deletion, undecodable, PDQ.
+"""scan job + perceptual: new/dup, fast-path, deletion, undecodable, PDQ.
 
 Drives the real scan handler through a ``JobQueue`` + ``Database`` (as test_jobs
 does), against tiny real PNGs so the decode→hash→PDQ path actually runs. Requires
-the ``media`` extra (blake3/pillow/pdqhash) — all confirmed by the M0 smoke test.
+the ``media`` extra (blake3/pillow/pdqhash) — all confirmed by the smoke test.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def test_plain_scan_sets_scan_recency_not_full(queue_and_db, tiny_photos):
     snap = queries.roots_snapshot()[0]
     # A plain scan records general recency (max last_seen_at) ...
     assert snap["last_scan_at"] is not None
-    # ... but does NOT stamp last_full_scan_at (only `scan --full` does, §8 A2 step 11).
+    # ... but does NOT stamp last_full_scan_at (only `scan --full` does).
     assert snap["last_full_scan_at"] is None
     det = queries.root_detail(root["name"])
     assert det["last_scan_at"] == snap["last_scan_at"]
@@ -95,7 +95,7 @@ def test_plain_scan_sets_scan_recency_not_full(queue_and_db, tiny_photos):
 
 def test_full_scan_of_offline_root_does_not_stamp_last_full_scan(queue_and_db, tmp_path):
     """An offline/unreadable root in a --full scan must NOT record last_full_scan_at — its
-    enumeration failed, so nothing was fingerprinted or deletion-detected (§8 A2 / §10.1).
+    enumeration failed, so nothing was fingerprinted or deletion-detected.
 
     A --all sweep skips+logs a busy root but still ENTERS the per-root loop for an offline
     one (offline is discovered at enumerate time, not the dequeue gate), so the post-scan
@@ -115,7 +115,7 @@ def test_full_scan_of_offline_root_does_not_stamp_last_full_scan(queue_and_db, t
 
 
 def test_roots_snapshot_media_split_and_dedup_recency(queue_and_db, tiny_photos):
-    """roots_snapshot exposes photos/videos + last_dedup_at for the M6 dot & sort (Open Q#1)."""
+    """roots_snapshot exposes photos/videos + last_dedup_at for the dot & sort."""
     from packrat import queries
 
     q, database = queue_and_db
@@ -139,7 +139,7 @@ def test_scan_new_and_exact_dup(queue_and_db, tiny_photos):
     # a.png, b.png distinct; a_copy.png is a byte-dup of a.png; notes.txt ignored.
     assert c["assets"] == 2
     assert c["instances"] == 3
-    # M2: a PDQ row per photo asset.
+    # A PDQ row per photo asset.
     assert c["phash"] == 2
 
 
@@ -157,7 +157,7 @@ def test_scan_fast_path_skips(queue_and_db, tiny_photos):
 
 
 def test_scan_sets_needs_dedup_only_when_it_indexes_new_content(queue_and_db, tiny_photos):
-    """The §12 dedup-dirty signal: a scan that indexes NEW content marks the root
+    """The dedup-dirty signal: a scan that indexes NEW content marks the root
     needs_dedup=1; a no-op re-scan (all fast-path skips) leaves the flag untouched. This
     is the fix for "a routine re-scan flipped a fully-deduped root back to ◉ yellow"."""
     q, database = queue_and_db
@@ -183,7 +183,7 @@ def test_scan_sets_needs_dedup_only_when_it_indexes_new_content(queue_and_db, ti
 
 def test_scan_reappearing_trash_does_not_dirty_root(queue_and_db, tiny_photos):
     """A byte-identical TRASH re-appearance (matches_trashed) is NOT new dedup-able content
-    — dedup ignores trashed assets — so it must not set needs_dedup (§12 rung 3). Covers
+    — dedup ignores trashed assets — so it must not set needs_dedup (rung 3). Covers
     both the plain-attach and the backfill (perceptual-refill of a trashed asset) variants."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
@@ -204,7 +204,7 @@ def test_scan_reappearing_trash_does_not_dirty_root(queue_and_db, tiny_photos):
 
 def test_scan_undecodable_only_does_not_dirty_root(queue_and_db, tmp_path):
     """A scan that indexes ONLY an undecodable file gains no phash → nothing dedup-able →
-    needs_dedup stays 0 (§12 rung 3). An undecodable asset is hash-only, never a near-dup."""
+    needs_dedup stays 0 (rung 3). An undecodable asset is hash-only, never a near-dup."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -285,7 +285,7 @@ def test_scan_deletion_keeps_asset_with_other_instance(queue_and_db, tiny_photos
     assert c["instances"] == 2
 
 
-# --- move detection (§8 A2 step 4a) ----------------------------------------
+# --- move detection ---------------------------------------------------------
 def _one_png(path, seed=1):
     import numpy as np
     from PIL import Image
@@ -299,7 +299,7 @@ def _moved_count(database, job_id):
 
 def test_scan_relinks_moved_file_without_rehash(queue_and_db, tmp_path):
     """A file moved to a new dir (same name/size/mtime, its bucket unambiguous) is
-    RELINKED — the SAME file_instances row is repointed, no new asset/hash (§8 A2 4a)."""
+    RELINKED — the SAME file_instances row is repointed, no new asset/hash."""
     q, database = queue_and_db
     lib = tmp_path / "lib"; lib.mkdir()
     _one_png(lib / "a.png")
@@ -321,7 +321,7 @@ def test_scan_relinks_moved_file_without_rehash(queue_and_db, tmp_path):
 
 
 def test_scan_move_is_dedup_neutral(queue_and_db, tmp_path):
-    """A relinked move adds no new dedup-able content → must NOT set needs_dedup (§12).
+    """A relinked move adds no new dedup-able content → must NOT set needs_dedup.
 
     Asserts the move ACTUALLY fired (moved==1): the hash-attach fallback also leaves
     needs_dedup 0, so without this the test would pass even if move detection broke."""
@@ -341,7 +341,7 @@ def test_scan_move_is_dedup_neutral(queue_and_db, tmp_path):
 
 def test_scan_move_of_trashed_asset_falls_through_to_hash(queue_and_db, tmp_path):
     """A moved file whose asset is TRASHED must NOT relink silently (that would drop the
-    matches_trashed signal, §8 A2 4a guard 6) — it falls through to the hash path, which
+    matches_trashed signal, guard 6) — it falls through to the hash path, which
     hits the trashed asset and reports it as matches_trashed (moved stays 0)."""
     q, database = queue_and_db
     lib = tmp_path / "lib"; lib.mkdir()
@@ -382,7 +382,7 @@ def test_scan_copy_is_not_a_move(queue_and_db, tmp_path):
 def test_scan_two_move_candidates_are_hashed_not_relinked(queue_and_db, tmp_path):
     """A file relocated into TWO new spots (two path-absent candidates sharing the
     bucket) is ambiguous — only one could be the move, so BOTH are hashed (moved=0) and
-    resolve correctly via content hash to one asset (§8 A2 4a condition v)."""
+    resolve correctly via content hash to one asset (condition v)."""
     q, database = queue_and_db
     import shutil
     lib = tmp_path / "lib"; lib.mkdir()
@@ -453,7 +453,7 @@ def test_plan_moves_live_origin_vetoes():
 
 def test_plan_moves_suppressed_origin_vetoes():
     """A gone-looking origin under a suppressed (errored/ignored) subtree may still exist
-    on disk (§10.1) → never relink it."""
+    on disk → never relink it."""
     from packrat.jobs.scan import Candidate, Enumeration, plan_moves
     existing = _existing(_rec(1, _P("subx", "a.png"), 100, 1000.0))
     en = Enumeration(suppressed={os.path.normcase(_P("subx"))})
@@ -472,7 +472,7 @@ def test_plan_moves_not_fully_fingerprinted_vetoes():
 
 def test_plan_moves_trashed_origin_vetoes():
     """A trashed origin must fall through to the hash path so the re-appearance is counted
-    matches_trashed, not silently relinked (§8 A2 4a guard 6)."""
+    matches_trashed, not silently relinked (guard 6)."""
     from packrat.jobs.scan import Candidate, Enumeration, plan_moves
     existing = _existing(_rec(1, _P("a.png"), 100, 1000.0, status="trashed"))
     cand = Candidate(path=_P("sub", "a.png"), rel="sub/a.png", size=100, mtime=1000.0)
@@ -615,7 +615,7 @@ def test_enumeration_prunes_and_suppresses_ignored_subtree(tmp_path):
 
 
 def test_enumeration_per_entry_error_suppresses_subtree(tmp_path, monkeypatch):
-    # A per-entry stat()/is_dir() OSError (a NAS blip, §10.1) must SUPPRESS the
+    # A per-entry stat()/is_dir() OSError (a NAS blip) must SUPPRESS the
     # containing directory so deletion-detection can't read the unreadable file as
     # "deleted" and forget its fingerprints. (Regression: a bare `continue` left the
     # file neither enumerated nor suppressed → silently forgotten.)
@@ -676,7 +676,7 @@ def test_scan_attaches_to_trashed_asset_without_unflip(queue_and_db, tiny_photos
     root = register(database, str(tiny_photos))
     _run_scan(q, database, root["id"])
     # Flip a.png's asset to trashed, drop its instances, then re-scan: the file
-    # re-appears and attaches, but the asset stays trashed (§8 A2 Phase 4).
+    # re-appears and attaches, but the asset stays trashed (Phase 4).
     a = database.query_one(
         "SELECT a.id FROM assets a JOIN file_instances fi ON fi.asset_id=a.id "
         "WHERE fi.filename='a.png' LIMIT 1"
@@ -690,7 +690,8 @@ def test_scan_attaches_to_trashed_asset_without_unflip(queue_and_db, tiny_photos
 def test_scan_backfill_of_trashed_asset_reports_matches_trashed(queue_and_db, tiny_photos):
     """A hit on a TRASHED, not-yet-fingerprinted asset (the merge-created-then-trashed
     case) reports matches_trashed even though scan also backfills its perceptual data —
-    the banner's trash signal must be honest (the backfill branch used to mislabel it)."""
+    the banner's trash signal must be honest: the backfill branch reports it as
+    matches_trashed, not 'backfilled'."""
     q, database = queue_and_db
     root = register(database, str(tiny_photos))
     _run_scan(q, database, root["id"])
@@ -750,7 +751,7 @@ def test_scan_without_profile_emits_no_report(queue_and_db, tiny_photos):
 
 
 # ---------------------------------------------------------------------------
-# producer/consumer photo pipeline (§ decouple I/O from CPU)
+# producer/consumer photo pipeline (decouple I/O from CPU)
 # ---------------------------------------------------------------------------
 def _make_photos(dirpath, n, seed0=0):
     import numpy as np

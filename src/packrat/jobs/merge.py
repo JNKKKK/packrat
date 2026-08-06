@@ -1,4 +1,4 @@
-r"""The ``merge`` operation (§8 C) — copy into a folder only what's new to the collection.
+r"""The ``merge`` operation — copy into a folder only what's new to the collection.
 
 Headline use case: export the whole iPhone to a temp folder, then copy only the
 genuinely-new items into a backup folder. **Merge is deliberately simple:**
@@ -13,33 +13,33 @@ cleanup is ``dedup``'s job, run afterward.
 the **entire collection** by exact hash, and files matching a **trashed** hash are
 discarded.
 
-Phase map (§8 C):
-- **Phase 0** — validate source/dest; refresh the trash collection (§6.1, for real
+Phase map:
+- **Phase 0** — validate source/dest; refresh the trash collection (for real
   even under ``--dry-run``); opportunistically fast-path-scan the dest root so the
   comparison set is current; open a ``merge_runs`` header (the cross-op guard +
   resume anchor).
 - **Phase 1** — fingerprint the transient source: **BLAKE3 only**, persisted to
-  ``merge_plan_items`` so a resume skips re-hashing (the dominant SMB cost, §10.1).
+  ``merge_plan_items`` so a resume skips re-hashing (the dominant SMB cost).
 - **Phase 2** — classify each rep by exact hash: ``dup-in-source`` / ``trashed`` /
   ``exact-known`` / ``new``. Once classified the plan is **frozen** (``status='copying'``).
 - **Phase 3** — copy the ``new`` reps (hash-verify → atomic rename, structure-mirrored)
   and register them as **un-perceptual** assets (a later ``scan``/``dedup`` backfills
   ``phash``/``vphash``). A file landing on an *ignored* dest path is copied but left
   **uncatalogued** (``copied-unindexed``) — registering it would let the next scan
-  silently forget it (§8 C step 11).
+  silently forget it.
 - **Phase 4** — report; warn per ignored dest subpath.
 
-**Resume** (§8 C Safety & resume): re-running ``merge <source> --into <dest>`` while an
+**Resume** (Safety & resume): re-running ``merge <source> --into <dest>`` while an
 open (``planning``/``copying``) ``merge_runs`` row exists for this dest **silently
 auto-resumes** it. A ``copying`` run replays the frozen plan verbatim (no re-hash, no
 re-classify); a ``planning`` run (Phase 1 interrupted before the plan froze) rebuilds
 the plan. Per-item ``progress`` closes the copied→registered crash gap.
 
-**Cancel / stop** (§8 C interruption): merge has no interactive pause and no
+**Cancel / stop** (interruption): merge has no interactive pause and no
 ``--cancel`` flag. A cooperative cancel / clean daemon stop / crash all leave the
 ``merge_runs`` row **open** (copy-only ⇒ a partial copy is safe), so re-running
 resumes. *(Because the runtime can't distinguish a user cancel from a clean daemon
-stop — both use the shared cancel flag — merge favors §3's "a stop never loses
+stop — both use the shared cancel flag — merge favors "a stop never loses
 in-flight progress": it leaves the plan resumable rather than discarding it.)*
 """
 
@@ -71,7 +71,7 @@ def _run_merge(ctx: JobContext) -> None:
 
 
 def _resolve_and_validate(ctx: JobContext) -> tuple[dict, str, str]:
-    r"""Resolve the dest root + validate source/dest (§8 C Phase 0 steps 1–2).
+    r"""Resolve the dest root + validate source/dest (Phase 0 steps 1–2).
 
     Returns ``(dest_root_row, source_canonical, dest_canonical)``. The daemon already
     resolved ``--into`` to a library root (``root_id`` + ``dest_path`` in params); here
@@ -105,7 +105,7 @@ def _resolve_and_validate(ctx: JobContext) -> tuple[dict, str, str]:
 
 
 def _reject_if_held(ctx: JobContext, root: dict) -> None:
-    """§3/§8 C Phase 0 step 2a defense: refuse if *another* op holds the dest root.
+    """Phase 0 step 2a defense: refuse if *another* op holds the dest root.
 
     The dequeue gate already holds a fresh merge behind a pending review / another
     open merge, and the single-worker slot serializes everything — so with the queue
@@ -117,7 +117,7 @@ def _reject_if_held(ctx: JobContext, root: dict) -> None:
 
 
 # ===========================================================================
-# the merge (real; §8 C Phases 0–4)
+# the merge (real; Phases 0–4)
 # ===========================================================================
 def _merge(ctx: JobContext) -> None:
     db = ctx.db
@@ -127,7 +127,7 @@ def _merge(ctx: JobContext) -> None:
     ctx.log(f"merge {source} → {root['name']} ({dest})")
 
     # Phase 0 step 3 — refresh the trash collection (real, even here). The trashed set
-    # must be current before we classify incoming files as `trashed` (§6.1/§8 C).
+    # must be current before we classify incoming files as `trashed`.
     trash.refresh_trash(ctx)
 
     # Phase 0 step 5 — find an open run to resume, else open a fresh one.
@@ -162,25 +162,25 @@ def _merge(ctx: JobContext) -> None:
         _build_plan(ctx, run)                        # Phase 1 (fingerprint) + Phase 2 (classify)
         run = dict(db.query_one("SELECT * FROM merge_runs WHERE id=?", (run["id"],)))
 
-    # Phase 3 — copy the `new` reps + register (DB backup first, §8 C / §10). Copy to the
+    # Phase 3 — copy the `new` reps + register (DB backup first). Copy to the
     # run's FROZEN dest_path (authoritative on resume — the plan owns source+dest).
     db.backup_labeled(f"premerge-{root_id}")
     out = _copy_and_register(ctx, run, root, run["dest_path"])
 
-    # Merge introduced dedup-able content ⇒ mark the dest root dedup-dirty (§12 rung 3 ◉
+    # Merge introduced dedup-able content ⇒ mark the dest root dedup-dirty (rung 3 ◉
     # yellow), so the dot flips to "need dedup". Only REGISTERED files count: `new` totals
     # registered + copied-unindexed, and an unindexed file never enters the catalog, so it
     # is not dedup-able. Mirrors scan's new-content gate; cleared by the next dedup.
     if out["new"] - out["unindexed"] > 0:
         db.execute("UPDATE roots SET needs_dedup=1 WHERE id=?", (root_id,))
 
-    # Finalize (§8 C Safety & resume) — retained as queryable merge history (§14 #5).
+    # Finalize (Safety & resume) — retained as queryable merge history.
     db.execute("UPDATE merge_runs SET status='done', finished_at=? WHERE id=?", (now_iso(), run["id"]))
     _report(ctx, root, source, out, dry_run=False)
 
 
 def _scan_dest(ctx: JobContext, root: dict) -> None:
-    r"""Opportunistically fast-path-scan the dest root (§8 C Phase 0 step 4).
+    r"""Opportunistically fast-path-scan the dest root (Phase 0 step 4).
 
     Runs under merge's ownership (no other op can touch the root), so its
     deletion-detection is safe. Best-effort: a scan failure only makes the comparison
@@ -207,7 +207,7 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
     db = ctx.db
     run_id = int(run["id"])
     # Enumerate the run's FROZEN source_path — the same path _place_copy copies from
-    # (the plan owns source+dest, §8 C), so a `planning`-resume can't drift to a
+    # (the plan owns source+dest), so a `planning`-resume can't drift to a
     # different --source arg pointing at the same dest root.
     source = run["source_path"]
 
@@ -218,7 +218,7 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
     cands = en.candidates
 
     # Phase 1 — BLAKE3 each source file, PERSISTING each row as it's hashed (the
-    # resume-avoids-this SMB cost, §10.1). A `planning`-resume keeps rows already
+    # resume-avoids-this SMB cost). A `planning`-resume keeps rows already
     # hashed and skips re-hashing them — so a crash during a long source hash doesn't
     # throw away the work done so far. (Copy only starts after the flip to `copying`,
     # so no dest file exists yet; a Phase-1 row is just a hash record.) Rows are keyed
@@ -293,7 +293,7 @@ def _build_plan(ctx: JobContext, run: dict) -> None:
 
 
 def _classify_hash(db, content_hash: str) -> str:
-    """Exact-hash classification of one rep (§8 C Phase 2 step 9). No perceptual compare."""
+    """Exact-hash classification of one rep. No perceptual compare."""
     asset = db.query_one("SELECT status FROM assets WHERE content_hash=?", (content_hash,))
     if asset is None:
         return "new"
@@ -339,7 +339,7 @@ def _copy_and_register(ctx: JobContext, run: dict, root: dict, dest: str) -> dic
 
         # cls == 'new'
         if prog in ("registered", "copied-unindexed"):
-            # Terminal (resume): count without touching disk (matters over SMB, §8 C resume).
+            # Terminal (resume): count without touching disk (matters over SMB).
             # Both were physically copied → count as `new`; an unindexed one is ALSO flagged
             # (same as the fresh path, where a `new` file marked copied-unindexed counts both).
             out["new"] += 1
@@ -366,7 +366,7 @@ def _copy_and_register(ctx: JobContext, run: dict, root: dict, dest: str) -> dic
 
 
 def _place_copy(ctx: JobContext, run: dict, dest: str, it: dict) -> tuple[str, str]:
-    r"""Copy one `new` source file into ``dest``, mirroring its structure (§8 C Phase 3 step 10).
+    r"""Copy one `new` source file into ``dest``, mirroring its structure.
 
     Preserves the source-relative path (``<dest>\<rel>``), creating intermediate dirs.
     A same-rel-path collision is resolved by content: identical bytes → reuse in place;
@@ -422,7 +422,7 @@ def _register_or_mark(ctx: JobContext, root_id: int, root_path: str, ignore: Ign
                       it: dict, dest_path: str, out: dict) -> None:
     r"""Register a copied `new` file, or mark it uncatalogued if under an ignored path.
 
-    §8 C Phase 3 step 11 — the silent-forget fix: a file living under the dest root's
+    The silent-forget fix: a file living under the dest root's
     ignore rules must NOT be registered (a later scan wouldn't enumerate it → deletion-
     detection would forget the asset while the file sits on disk). Such a file is copied
     but left ``copied-unindexed`` (terminal). Otherwise it becomes an ``active``,
@@ -431,7 +431,7 @@ def _register_or_mark(ctx: JobContext, root_id: int, root_path: str, ignore: Ign
     ``content_hash``, instance by ``(root_id, path)``), so a resume replay is safe.
 
     The ignore check runs on the path **relative to the root** (not to ``<dest>``) —
-    exactly what a later ``scan`` of the root will test (§8 C step 11).
+    exactly what a later ``scan`` of the root will test.
     """
     db = ctx.db
     rel_to_root = os.path.relpath(dest_path, root_path).replace(os.sep, "/")
@@ -464,8 +464,8 @@ def _register_or_mark(ctx: JobContext, root_id: int, root_path: str, ignore: Ign
 def _dest_ignored(ignore: IgnoreSet, rel_to_root: str) -> bool:
     r"""True if a dest-relative path would be excluded by the dest root's ignore rules.
 
-    Mirrors exactly what a later ``scan`` of the root would do to this file (§8 A1,
-    §8 C step 11), so "registered ⟺ a scan would enumerate it":
+    Mirrors exactly what a later ``scan`` of the root would do to this file,
+    so "registered ⟺ a scan would enumerate it":
     - **allowlist** — a non-media extension is never enumerated;
     - **file glob** — an ignore glob matching the file itself;
     - **directory prune** — an ignore glob matching **any ancestor directory** (e.g.
@@ -487,7 +487,7 @@ def _dest_ignored(ignore: IgnoreSet, rel_to_root: str) -> bool:
 
 
 def _note_ignored(out: dict, root_path: str | None, dest_path: str) -> None:
-    r"""Tally a ``copied-unindexed`` file under its ignored **dest subpath** (§8 C step 13).
+    r"""Tally a ``copied-unindexed`` file under its ignored **dest subpath**.
 
     Grouping per distinct parent directory (not per file) makes the usual cause — a
     whole excluded subtree like ``Screenshots\`` or ``**/cache/**`` — obvious at a glance.
@@ -497,7 +497,7 @@ def _note_ignored(out: dict, root_path: str | None, dest_path: str) -> None:
 
 
 # ===========================================================================
-# DRY-RUN (§8 C Safety & resume) — classify in memory, write nothing
+# DRY-RUN (Safety & resume) — classify in memory, write nothing
 # ===========================================================================
 def _dry_run(ctx: JobContext) -> None:
     r"""Preview the classification counts / would-copy list — copy nothing, write no rows.
@@ -506,12 +506,12 @@ def _dry_run(ctx: JobContext) -> None:
     guard nor leaves a resumable run), skips the opportunistic dest scan (must not mutate
     the catalog), and computes the would-be-ignored destinations up front so the user
     learns about an ignored ``--into`` *before* copying. **But Phase 0's trash refresh
-    still runs for real** (§6.1) — trash inboxes are absorbed + emptied even in dry-run.
+    still runs for real** — trash inboxes are absorbed + emptied even in dry-run.
     """
     db = ctx.db
     root, source, dest = _resolve_and_validate(ctx)
     ctx.log(f"merge (dry-run) {source} → {root['name']} ({dest})")
-    trash.refresh_trash(ctx)  # real even under --dry-run (§6.1)
+    trash.refresh_trash(ctx)  # real even under --dry-run
 
     ignore = IgnoreSet.build(ctx.config)
     en = enumerate_root(source, ignore)
@@ -562,7 +562,7 @@ def _dry_run(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# report + backup (§8 C Phase 4, §10)
+# report + backup (Phase 4)
 # ===========================================================================
 def _report(ctx: JobContext, root: dict, source: str, out: dict, *, dry_run: bool) -> None:
     tag = "merge (dry-run)" if dry_run else "merge"
@@ -572,7 +572,7 @@ def _report(ctx: JobContext, root: dict, source: str, out: dict, *, dry_run: boo
         f"{out['trashed']} trashed · {out['dup_in_source']} dup-in-source · "
         f"{out['collisions']} renamed · {out['errors']} error(s). Source unchanged."
     )
-    # §8 C step 13 — ignored-destination warning, grouped per distinct subpath.
+    # Ignored-destination warning, grouped per distinct subpath.
     for subpath, n in out["ignored_subpaths"].items():
         ctx.log(
             f"⚠ {n} file(s) {'would be copied' if dry_run else 'copied'} to an ignored path "
@@ -599,10 +599,10 @@ register_job(
     JobSpec(
         type="merge",
         handler=_run_merge,
-        # Merge OWNS the dest root (§8 C Phase 0 step 2a): the dequeue gate holds a
+        # Merge OWNS the dest root (Phase 0 step 2a): the dequeue gate holds a
         # fresh merge behind a pending review / another open merge. `ignore_merge_holder`
         # lets a RESUMING merge past its OWN open merge_runs row (else it would deadlock
-        # waiting on itself, §8 C). A --dry-run opens no run and owns None (writes nothing).
+        # waiting on itself). A --dry-run opens no run and owns None (writes nothing).
         owned_root=lambda p: None if p.get("dry_run") else p.get("root_id"),
         ignore_merge_holder=True,
     )

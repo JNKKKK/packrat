@@ -1,4 +1,4 @@
-"""Data-binding tests — render from a REAL seeded DB via queries.py (§Testing).
+"""Data-binding tests — render from a REAL seeded DB via queries.py.
 
 The other TUI tests render from ``fixtures.py`` (hand-authored, mockup-shaped).
 These close the loop: seed a root + scan through the real pipeline, then feed the
@@ -174,7 +174,7 @@ def test_lifetime_deduped_sums_dedup_deleted(seeded, packrat_home):
 # A dedup/cleanup analyze (or advancing confirm) job freezes review_status='pending'
 # + its stage into result_json; a later --confirm advances/finishes the run WITHOUT
 # rewriting that older job's row. queries._job_dict must reconcile the frozen snapshot
-# against the live run so a stale card shows the right actions (§8 B).
+# against the live run so a stale card shows the right actions.
 def _seed_review_job(database, *, root_id, stage, run_id, status="done"):
     """Insert a dedup analyze job frozen at ``stage`` referencing run ``run_id``."""
     import json as _json
@@ -264,7 +264,7 @@ def test_review_card_bodies_reflect_reconciled_state(seeded, packrat_home):
 
 def test_review_counts_reports_network_delete_set(seeded):
     """The pending review's counts carry a `network` tally (files on a non-recyclable
-    share, deleted PERMANENTLY — §10) so the confirm surface can warn. Regression: the
+    share, deleted PERMANENTLY) so the confirm surface can warn. Regression: the
     TUI confirm never surfaced the permanent-delete warning."""
     conn = db.connect(check_same_thread=False)
     database = db.Database(conn)
@@ -286,7 +286,7 @@ def test_review_counts_reports_network_delete_set(seeded):
         counts = d["pending_review"]["counts"]
         assert counts["to_delete_exact"] == 2
         assert counts["network"] == 1              # only the \\nas UNC path counts
-        # Stage-1 delete split + group make-up (§8 B item-3 metrics). Both rows are the
+        # Stage-1 delete split + group make-up (item-3 metrics). Both rows are the
         # same asset with an external survivor (exact-external) → one mixed group.
         assert counts["stage1"] == {"to_delete": 2, "internal": 1, "external": 1,
                                     "groups_internal_only": 0, "groups_mixed": 1}
@@ -333,7 +333,7 @@ def test_review_counts_histogram_uses_analyze_time_threshold_snapshot(seeded):
     """The poll's PDQ bins come from the run's ANALYZE-TIME threshold snapshot on
     review_runs, not live/default config — so the CLI log (which reads the same snapshot via
     review_stats.thresholds_from_row) and the TUI poll can't drift, and a config edit after
-    analyze can't retroactively rewrite an old run's histogram (§8 B follow-up)."""
+    analyze can't retroactively rewrite an old run's histogram."""
     from packrat import review_stats
 
     conn = db.connect(check_same_thread=False)

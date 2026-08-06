@@ -1,4 +1,4 @@
-r"""trash refresh (§6.1) — absorb trash-folder files into the trashed set + empty.
+r"""trash refresh — absorb trash-folder files into the trashed set + empty.
 
 Drives the real ``trash-refresh`` handler through a ``JobQueue`` + ``Database`` (as
 the dedup/scan tests do). Emptying moves files to the Recycle Bin (``send2trash``),
@@ -208,7 +208,7 @@ def test_refresh_empties_the_folder(queue_and_db, tmp_path):
 
 @win_only
 def test_scan_never_touches_trash_root(queue_and_db, tmp_path):
-    """A manual scan of a trash root errors; --all skips it (§8 A2 step 1)."""
+    """A manual scan of a trash root errors; --all skips it."""
     q, database = queue_and_db
     trash = tmp_path / "Trash"
     trash.mkdir()
@@ -219,7 +219,7 @@ def test_scan_never_touches_trash_root(queue_and_db, tmp_path):
 
 def test_empty_file_network_fallback_permanently_deletes(tmp_path, monkeypatch):
     """When recycle() ERRORS on a NETWORK path (no Recycle Bin), _empty_file falls back
-    to a permanent os.remove so the trash inbox is still emptied (§6.1/§10). A LOCAL
+    to a permanent os.remove so the trash inbox is still emptied. A LOCAL
     recycle failure (locked file) is left in place + reported."""
     from packrat import trash
 

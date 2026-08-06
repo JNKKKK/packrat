@@ -1,4 +1,4 @@
-"""Job queue: submit, progress, durable FIFO queue, cancel, reconciliation (§3)."""
+"""Job queue: submit, progress, durable FIFO queue, cancel, reconciliation."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def _drain_to_sentinel(sub, *, timeout: float) -> bool:
 
 
 def test_second_submit_enqueues(queue_and_db):
-    """§3 guarantee 1: a submit while busy is QUEUED (durable backlog), not rejected."""
+    """Guarantee 1: a submit while busy is QUEUED (durable backlog), not rejected."""
     q, database = queue_and_db
     q.submit("sleeper", {"steps": 50, "delay_s": 0.05})
     jid2 = q.submit("sleeper", {"steps": 2})
@@ -100,7 +100,7 @@ def test_second_submit_enqueues(queue_and_db):
 
 
 def test_backlog_drains_in_fifo_order(queue_and_db):
-    """Queued jobs run one at a time, oldest-first, as the worker frees (§3)."""
+    """Queued jobs run one at a time, oldest-first, as the worker frees."""
     q, database = queue_and_db
     a = q.submit("sleeper", {"steps": 3, "delay_s": 0.02})
     b = q.submit("sleeper", {"steps": 3, "delay_s": 0.02})
@@ -114,7 +114,7 @@ def test_backlog_drains_in_fifo_order(queue_and_db):
 
 
 def test_cancel_queued_drops_from_backlog(queue_and_db):
-    """Cancelling a still-queued job marks it cancelled without ever running it (§3)."""
+    """Cancelling a still-queued job marks it cancelled without ever running it."""
     q, database = queue_and_db
     q.submit("sleeper", {"steps": 50, "delay_s": 0.05})
     jid2 = q.submit("sleeper", {"steps": 2})
@@ -132,7 +132,7 @@ def test_cooperative_cancel(queue_and_db):
 
 
 def test_clean_stop_lands_interrupted_not_cancelled(queue_and_db):
-    """A graceful shutdown() is a resumable interruption, not a cancel (§3).
+    """A graceful shutdown() is a resumable interruption, not a cancel.
 
     The worker checkpoints on the shared cancel event, but because the daemon is
     STOPPING the job must land 'interrupted' (resumable — a merge/dedup keeps its
@@ -148,10 +148,10 @@ def test_clean_stop_lands_interrupted_not_cancelled(queue_and_db):
 
 
 # ---------------------------------------------------------------------------
-# prioritize (§3/§11) — bump a queued job to the front of the dequeue order
+# prioritize — bump a queued job to the front of the dequeue order
 # ---------------------------------------------------------------------------
 def test_prioritize_runs_next(queue_and_db):
-    """A prioritized queued job jumps ahead of earlier-enqueued jobs and runs next (§3)."""
+    """A prioritized queued job jumps ahead of earlier-enqueued jobs and runs next."""
     q, database = queue_and_db
     q.submit("sleeper", {"steps": 30, "delay_s": 0.05})       # running
     a = q.submit("sleeper", {"steps": 2, "delay_s": 0.01})    # queued first
@@ -179,7 +179,7 @@ def test_prioritize_is_durable(queue_and_db):
 
 
 def test_prioritize_rejects_running_and_terminal(queue_and_db):
-    """Only a queued job can be prioritized — a running/terminal one returns False (§11)."""
+    """Only a queued job can be prioritized — a running/terminal one returns False."""
     q, database = queue_and_db
     jid = q.submit("sleeper", {"steps": 4, "delay_s": 0.02})  # runs immediately
     time.sleep(0.05)
@@ -230,7 +230,7 @@ def test_unknown_job_type(queue_and_db):
 
 
 def test_reconcile_keeps_nondestructive_queued(database):
-    """§3: a queued NON-destructive job (scan) survives a restart and stays queued."""
+    """A queued NON-destructive job (scan) survives a restart and stays queued."""
     database.execute(
         "INSERT INTO jobs(type,status,enqueued_at,params_json) "
         "VALUES('scan','queued',?, '{\"root_id\": 1}')",
@@ -242,7 +242,7 @@ def test_reconcile_keeps_nondestructive_queued(database):
 
 
 def test_reconcile_carves_out_queued_destructive_apply(database):
-    """§3 carve-out: a queued dedup --confirm is flipped to interrupted, never auto-run."""
+    """Carve-out: a queued dedup --confirm is flipped to interrupted, never auto-run."""
     database.execute(
         "INSERT INTO jobs(type,status,enqueued_at,params_json) "
         "VALUES('dedup','queued',?, '{\"root_id\": 1, \"confirm\": true}')",

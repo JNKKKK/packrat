@@ -19,7 +19,7 @@ from .layout import Cell, end_elide, middle_elide, row
 from .tokens import BAR_EMPTY, BAR_FILL, CURSOR, RUNNING
 
 
-# --- Logo (§1) -------------------------------------------------------------
+# --- Logo -------------------------------------------------------------
 # The gem the packrat clutches, cycled by the dashboard's animation timer. Each is a
 # single terminal cell (verified), so swapping between them never shifts the layout —
 # the plain frame stays width-stable whatever gem is drawn. `LOGO_GEMS[0]` (◆) is the
@@ -39,7 +39,7 @@ LOGO_WORDMARK = (
 
 def logo_lines(assets: int, *, gem: str = LOGO_GEMS[0],
                rows: int | None = None, width: int | None = None) -> list[str]:
-    """The packrat mascot + "Packrat" wordmark + tagline + live "· N assets ·" line (§1).
+    """The packrat mascot + "Packrat" wordmark + tagline + live "· N assets ·" line.
 
     The 3-line :data:`LOGO_WORDMARK` sits in the top three rows of the text column
     (the first row has no mascot beside it); a blank line then separates it from the
@@ -66,9 +66,9 @@ def logo_lines(assets: int, *, gem: str = LOGO_GEMS[0],
     return lines
 
 
-# --- Trash-refresh mascot (§6.1 / trash-root modal) ------------------------
+# --- Trash-refresh mascot (trash-root modal) ------------------------
 # The packrat clutching a trash can (🗑️) — shown when the user picks a *trash*
-# root (which has no detail screen; §6.1 refresh is its only action). Mirrors the
+# root (which has no detail screen; refresh is its only action). Mirrors the
 # root-detail FOLDER_ICON mascot: plain ASCII body so the colorizer leaves it
 # default, with a wide (2-cell) emoji held in the `(>…<)` claw. The 🗑️ carries a
 # VS16 (U+FE0F) so it renders as an emoji AND measures 2 cells under cell_width,
@@ -84,7 +84,7 @@ TRASH_MASCOT = (
 
 
 def trash_refresh_mascot_lines(root_name: str, *, width: int) -> list[str]:
-    """Body lines for the trash-root refresh modal (pure): mascot + prompt (§6.1).
+    """Body lines for the trash-root refresh modal (pure): mascot + prompt.
 
     The mascot's middle rows sit beside a short "ready to hoard away the junk you
     dropped" caption; below it, the actual question naming the trash ``root_name``.
@@ -117,7 +117,7 @@ def fmt_size(n: int | None) -> str:
     return f"{f:.0f} TB"
 
 
-# --- CollectionBox (§1) ----------------------------------------------------
+# --- CollectionBox ----------------------------------------------------
 # Inner content width of the Collection box (its outer width minus the box's 4-cell
 # border+padding), used to right-align each stat's value against the box's right edge.
 COLLECTION_INNER_W = tokens.COLLECTION_W - 4       # 25 at the reference size
@@ -125,7 +125,7 @@ COLLECTION_INNER_W = tokens.COLLECTION_W - 4       # 25 at the reference size
 
 def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None,
                      width: int = COLLECTION_INNER_W) -> list[str]:
-    """Collection stats body (§1): assets/photo-video split, size, trashed, deduped.
+    """Collection stats body: assets/photo-video split, size, trashed, deduped.
 
     ``last_scan_label`` is accepted for call compatibility but no longer shown. The
     ``Size`` line is the full collection's total on-disk bytes (``snap['size_bytes']``);
@@ -147,9 +147,9 @@ def collection_lines(snap: dict, *, now: str, last_scan_label: str | None = None
     ]
 
 
-# --- StatusDot / RootRow (§1, §2) -----------------------------------------
+# --- StatusDot / RootRow -----------------------------------------
 # The root NAME column width, shared by both row renderers (dashboard Roots box +
-# the maximized Roots interface). The name is a root's primary human handle (§8 A1),
+# the maximized Roots interface). The name is a root's primary human handle,
 # so it gets the generous fixed space and the path — a grow cell — absorbs whatever
 # is left; widening this directly trades path width for name width.
 NAME_W = 24
@@ -171,12 +171,12 @@ def root_dot(r: dict) -> str:
 
     Thin accessor over :func:`root_dot_pair` for callers that only need the glyph (e.g.
     the maximized-Roots trash branch). Prefer :func:`root_dot_pair` where the color role
-    is also needed (a row cell), since ``◉`` is both green and yellow (§12)."""
+    is also needed (a row cell), since ``◉`` is both green and yellow."""
     return root_dot_pair(r)[0]
 
 
 def root_dot_pair(r: dict) -> tuple[str, str]:
-    """The freshness dot as ``(glyph, role)`` (§12 4-state ladder — TODO Part C).
+    """The freshness dot as ``(glyph, role)`` (4-state ladder — TODO Part C).
 
     Reads ``probe_new_count`` + ``last_scan_at`` + ``last_dedup_at`` + ``needs_dedup`` off
     the query row and delegates to :func:`tokens.status_dot`. The role is what a row Cell
@@ -189,7 +189,7 @@ def root_dot_pair(r: dict) -> tuple[str, str]:
 
 
 def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str:
-    """A dashboard/focused-box root row (§1): ``▸ Name  path……………  ◐   count``.
+    """A dashboard/focused-box root row: ``▸ Name  path……………  ◐   count``.
 
     The path is a **grow** cell that absorbs the middle, so the dot + count are
     pushed to the right end (most space goes to the path). ``width`` is the full row
@@ -214,7 +214,7 @@ def root_row_compact(r: dict, *, selected: bool = False, width: int = 62) -> str
 
 def root_row_wide(r: dict, *, now: str, selected: bool = False,
                   width: int = 96) -> str:
-    r"""A maximized Roots-interface row (§2.1): dot, count, recency all right-aligned.
+    r"""A maximized Roots-interface row: dot, count, recency all right-aligned.
 
     ``▸ Downloads  D:\dump…………………  ◐     241  never deduped`` — the path is a
     **grow** cell absorbing the middle, so the dot / count / recency columns sit at
@@ -248,10 +248,10 @@ def root_row_wide(r: dict, *, now: str, selected: bool = False,
 
 
 def _dedup_recency(r: dict, now: str) -> str:
-    """The right-column dedup-recency label for a maximized Roots row (§2.1).
+    """The right-column dedup-recency label for a maximized Roots row.
 
     ``deduped today`` / ``deduped <ago>`` / ``never deduped`` off ``last_dedup_at`` —
-    unchanged from the inline logic it replaced; extracted so the row builder stays flat."""
+    a separate helper so the row builder stays flat."""
     dd = r.get("last_dedup_at")
     if not dd:
         return "never deduped"
@@ -260,8 +260,8 @@ def _dedup_recency(r: dict, now: str) -> str:
     return f"deduped {reltime(dd, now)}"
 
 
-# --- [s] sort cycle (§2 Roots interface) -----------------------------------
-# The fixed cycle (§2 notes), wrapping back to the first. All display-side over
+# --- [s] sort cycle (Roots interface) -----------------------------------
+# The fixed cycle, wrapping back to the first. All display-side over
 # roots_snapshot() (which stays id-ascending for CLI parity — Open Q#1). Each
 # entry: (header label, key function, reverse).
 SORT_CYCLE = [
@@ -283,17 +283,17 @@ def sort_roots(roots: list[dict], mode: int) -> list[dict]:
 
 
 def sort_header(mode: int) -> str:
-    """The Roots-interface header line for sort ``mode`` (§2.1)."""
+    """The Roots-interface header line for sort ``mode``."""
     label = SORT_CYCLE[mode % len(SORT_CYCLE)][0]
     return f"[S]ort: {label}  (→ most assets → photos → videos)"
 
 
-# --- ProgressBar (§1.4/§4/§5.1) -------------------------------------------
+# --- ProgressBar -------------------------------------------
 def progress_bar(done: int | None, total: int | None, *, width: int = 14,
                  eta_s: float | None = None, running: bool = True) -> str:
-    """An inline ``███░░░ 67% 8,912/13,204 ETA 4m`` bar (§ProgressBar).
+    """An inline ``███░░░ 67% 8,912/13,204 ETA 4m`` bar.
 
-    ``width`` is the bar-cell count. ETA is passed in (TUI-derived, §cross-cutting);
+    ``width`` is the bar-cell count. ETA is passed in (TUI-derived);
     blank until derivable. A non-running bar omits the ▶ marker.
     """
     done = done or 0
@@ -308,12 +308,12 @@ def progress_bar(done: int | None, total: int | None, *, width: int = 14,
     return f"{marker}{bar}  {int(frac * 100):d}% {done:,}/{total:,}{tail}"
 
 
-# --- JobRow (§1.4/§4) ------------------------------------------------------
+# --- JobRow ------------------------------------------------------
 def blocked_short(job: dict) -> str | None:
     """A compact ``blocked: <root> pending <run>`` note, or None if runnable/not queued.
 
     The daemon's holder ``what`` is verbose (``"dedup pending since <ts>"``); the
-    compact list rows (§1.2/§4) show the short form ``blocked: <root> pending
+    compact list rows show the short form ``blocked: <root> pending
     <run_type>``. ``run_type`` is pulled from the holder when present.
     """
     holder = job.get("blocked")
@@ -341,7 +341,7 @@ def job_status_note(job: dict) -> str:
 
 def queue_row(job: dict, *, selected: bool = False, show_id: bool = True,
               index: int | None = None, width: int = 94) -> str:
-    """A queue-panel row (§1.4/§4): running → live bar; queued → label + reason.
+    """A queue-panel row: running → live bar; queued → label + reason.
 
     The running row carries the ▶ marker itself, so its bar renders ``running=False``
     (no second marker). Queued rows show a leading identifier — the positional

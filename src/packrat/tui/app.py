@@ -1,9 +1,9 @@
-"""The packrat TUI application (M6, §12) — the Textual :class:`App` + its wiring.
+"""The packrat TUI application — the Textual :class:`App` + its wiring.
 
 Holds the live read-model state (snapshots refreshed on a poll timer + job-finished
 SSE) and the daemon client; the individual screen classes live in
 :mod:`packrat.tui.frames` (imported here). Actions map to CLI verbs / daemon endpoints
-(§1.6) — the TUI issues no privileged op of its own.
+— the TUI issues no privileged op of its own.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from .modals import ConfirmModal, TrashRefreshModal
 # the app
 # ---------------------------------------------------------------------------
 class PackratApp(App):
-    """The packrat TUI application (§12).
+    """The packrat TUI application.
 
     Holds the live read-model state (refreshed on a poll timer + job-finished SSE)
     and the daemon client. ``offline`` mode renders from :mod:`packrat.tui.fixtures`
@@ -46,7 +46,7 @@ class PackratApp(App):
         # otherwise rewrite our `background: ansi_default` (the ansi=-1 sentinel)
         # into a concrete opaque RGB fill. With the filter off, the transparent
         # background is emitted as `\x1b[49m` (reset-to-terminal-default), so the
-        # terminal's own acrylic/"glass" background shows through (§12 chrome).
+        # terminal's own acrylic/"glass" background shows through.
         super().__init__(ansi_color=True)
         self.client = client
         self.offline = offline or client is None
@@ -62,8 +62,8 @@ class PackratApp(App):
         # ONLINE it must track the wall clock (`_now=None` → the property returns live
         # now_iso()); a FIXED value is used only when explicitly pinned (tests) or in the
         # offline demo, whose sample timestamps are relative to fixtures.REFERENCE_NOW.
-        # (Regression: defaulting to REFERENCE_NOW online froze the clock at a fixture
-        # date, so a just-finished job rendered as a future calendar date.)
+        # Online it must NOT default to REFERENCE_NOW, or the clock would freeze at a
+        # fixture date and a just-finished job would render as a future calendar date.
         if now is not None:
             self._now = now
         elif self.offline:
@@ -75,10 +75,10 @@ class PackratApp(App):
         # daemon is down (the fallback client at run() exists precisely for that case).
         self.snapshot: dict = _empty_snapshot()
         self.header_right = "daemon ● up"
-        # Live-progress plumbing (§3 SSE + §cross-cutting TUI-side ETA). The poll timer
+        # Live-progress plumbing (SSE + TUI-side ETA). The poll timer
         # is only the backstop; the running job's bar/ETA are driven by an SSE stream
         # (`_stream_running`) whose samples feed `_eta`. `_streamed_job_id`/`_stream_alive`
-        # guard against double-subscribing and let a dropped stream reconnect (§3).
+        # guard against double-subscribing and let a dropped stream reconnect.
         self._eta = EtaEstimator()
         self._streamed_job_id: int | None = None
         self._stream_alive = False
@@ -86,7 +86,7 @@ class PackratApp(App):
 
     @property
     def now(self) -> str:
-        """The reference 'now' for relative-time rendering (§12).
+        """The reference 'now' for relative-time rendering.
 
         A pinned value (tests) or the offline demo's fixed reference when set;
         otherwise the LIVE wall clock, so online timestamps age against real time.
@@ -153,9 +153,9 @@ class PackratApp(App):
             self.set_interval(STATS_POLL_INTERVAL_S, self.refresh_data)
 
     # -- data ---------------------------------------------------------------
-    # The monolithic snapshot was decomposed into three concern-scoped reads so each
+    # The snapshot is split into three concern-scoped reads so each
     # dashboard box polls the SAME source as its maximized screen (source-sharing
-    # principle), on its OWN cadence (§12):
+    # principle), on its OWN cadence:
     #   • live  (/jobs/live) — running + queued + interrupted + pending_reviews. Changes
     #            constantly, so it drives the FAST poll (POLL_INTERVAL_S).
     #   • stats (/stats)     — collection COUNT/SUM aggregations. Only move when a
@@ -165,7 +165,7 @@ class PackratApp(App):
     #            slow cadence — a root's numbers also only settle on job completion.
     # `self.snapshot` stays the single COMPOSED dict the pure builders read (so they and
     # the offline/nsfw paths are untouched); each fetch UPDATES its own keys in place.
-    # Terminal HISTORY is no longer polled wholesale — it is lazy-loaded a page at a time
+    # Terminal HISTORY is not polled wholesale — it is lazy-loaded a page at a time
     # by the Queue / root-detail screens (see `history_page`).
     def refresh_data(self) -> None:
         """FULL refresh — live + stats + roots (mount, job-finished, slow backstop).
@@ -300,7 +300,7 @@ class PackratApp(App):
             self.screen.poll_reload()
             self.screen.refresh_frame()
 
-    # -- live progress: SSE stream + TUI-side ETA (§3 / §cross-cutting) ------
+    # -- live progress: SSE stream + TUI-side ETA ------
     def _track_running(self) -> None:
         """Keep the live SSE stream attached to the current running job + inject ETA.
 
@@ -325,7 +325,7 @@ class PackratApp(App):
         self._observe(running)
         # Attach the live stream if the client supports SSE and none is attached. A
         # dropped/failed stream clears `_stream_alive`, so the NEXT poll re-attaches
-        # (§3 reconnect) — the poll cadence is the backoff, no tight retry loop.
+        # (reconnect) — the poll cadence is the backoff, no tight retry loop.
         if not self._stream_alive and jid is not None and hasattr(self.client, "stream_job"):
             self._stream_running(jid)
 
@@ -344,8 +344,8 @@ class PackratApp(App):
         Each progress/state event updates the running row's ``done``/``total`` + the
         TUI-side ETA and re-renders on the UI thread (via :meth:`call_from_thread`); a
         terminal event triggers a full refetch so history/result cards appear. A dropped
-        or unreachable stream just ends the worker — the poll backstop re-attaches (§3,
-        job state is durable). ``exclusive`` cancels any prior stream in the group."""
+        or unreachable stream just ends the worker — the poll backstop re-attaches (job
+        state is durable). ``exclusive`` cancels any prior stream in the group."""
         self._stream_alive = True
         finished = False                      # True only on a clean terminal event
         try:
@@ -366,7 +366,7 @@ class PackratApp(App):
             # Refetch immediately ONLY on a clean job-finished event (history/result
             # card appear at once). A mid-stream DROP does NOT refetch here — that would
             # re-attach instantly and tight-loop if the daemon keeps erroring; the poll
-            # timer reconnects on its own cadence (§3 durable state).
+            # timer reconnects on its own cadence (durable state).
             if finished:
                 try:
                     self.call_from_thread(self.refresh_data)
@@ -379,7 +379,7 @@ class PackratApp(App):
         The in-memory counters + ETA update on EVERY event (no data lost), but the
         repaint is COALESCED to ``STREAM_RENDER_INTERVAL_S`` — a scan fires one event
         per file (hundreds/sec), and re-laying-out the whole frame that often is what
-        made the TUI laggy (issue #1). Between repaints the next poll tick still shows
+        made the TUI laggy. Between repaints the next poll tick still shows
         the latest value, so nothing stalls visually."""
         running = self.snapshot.get("running")
         if not running or running.get("id") != job_id:
@@ -416,7 +416,7 @@ class PackratApp(App):
         return None
 
     def open_root(self, name: str) -> None:
-        """Open a root the right way for its kind (§6.1 — trash has no detail screen).
+        """Open a root the right way for its kind (trash has no detail screen).
 
         A **library** root opens its RootDetailScreen (scan/dedup/merge/cleanup). A
         **trash** root has no detail — its only meaningful action is *refresh the
@@ -431,7 +431,7 @@ class PackratApp(App):
             self.push_screen(RootDetailScreen(name))
 
     def _confirm_trash_refresh(self, name: str) -> None:
-        """Push the trash mascot modal; on [y] submit ``trash refresh <name>`` (§6.1)."""
+        """Push the trash mascot modal; on [y] submit ``trash refresh <name>``."""
         def after(ok):
             if ok:
                 self.run_verb(f"packrat trash refresh {name}", title="trash refresh",
@@ -472,7 +472,7 @@ class PackratApp(App):
 
     def root_history(self, name: str, root_id: int | None, limit: int, offset: int):
         """One page of a root's terminal (finished) jobs + the true total — the root-detail
-        History section (§12 lazy load). Offline → the demo page (by ``name``); online →
+        History section (lazy load). Offline → the demo page (by ``name``); online →
         the paged endpoint (by ``root_id``); failure → empty."""
         if self.offline:
             terminal = {"queued", "running"}
@@ -502,7 +502,7 @@ class PackratApp(App):
                     job[k] = live[k]
 
     def job_problem_files(self, job: dict) -> list[dict]:
-        """A scan job's undecodable/read-error files (paths + reasons, §12 card)."""
+        """A scan job's undecodable/read-error files (paths + reasons, card)."""
         if self.offline:
             return demo.job_problem_files(job["id"])
         try:
@@ -510,7 +510,7 @@ class PackratApp(App):
         except Exception:
             return []
 
-    # -- actions (§1.6: every action maps to a CLI verb) --------------------
+    # -- actions (every action maps to a CLI verb) --------------------
     def _modal_on_top(self) -> bool:
         """True if a Modal is already the active screen — the re-entrancy guard.
 
@@ -528,14 +528,14 @@ class PackratApp(App):
 
     def run_verb(self, cmd: str, *, title: str = "would run", submit=None,
                  then=None) -> None:
-        """Run an action that maps to a CLI verb (§1.6), reporting via a **toast**.
+        """Run an action that maps to a CLI verb, reporting via a **toast**.
 
         ``cmd`` is the human display string (the CLI verb it corresponds to).
         ``submit`` is a zero-arg callable that performs the real daemon call
         (``client.submit_*``) and returns a job id; pass it for actions that
         actually submit work. ``then`` is an optional zero-arg callable fired right
         after the toast is posted — e.g. the JobCard passes ``self._back`` so an
-        action pops the card back to the interface that opened it (§5).
+        action pops the card back to the interface that opened it.
 
         These are the actions that **do not need a confirmation** (a confirm-gated
         action goes through :meth:`confirm_verb` → the ConfirmModal first). So the
@@ -575,7 +575,7 @@ class PackratApp(App):
 
     def confirm_verb(self, question: str, cmd: str, *, count: int | None = None,
                      network: int = 0, submit=None, then=None) -> None:
-        """Confirm (y/n or typed-count), then run the verb (§1.6 — gather then act).
+        """Confirm (y/n or typed-count), then run the verb (gather then act).
 
         On confirm, delegates to :meth:`run_verb` (offline → notice; online →
         ``submit()`` + result notice). ``submit`` is the real daemon call; ``then``
@@ -594,7 +594,7 @@ class PackratApp(App):
 
 
 def run(*, offline: bool = False, nsfw: bool = False) -> None:
-    """Launch the TUI (the ``packrat`` no-args entrypoint, §12).
+    """Launch the TUI (the ``packrat`` no-args entrypoint).
 
     ``nsfw`` enables the display-only adult-keyword redaction (``--nsfw``) — root
     names/paths are masked on screen only (:mod:`packrat.tui.nsfw`), never in the

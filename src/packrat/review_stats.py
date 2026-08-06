@@ -1,4 +1,4 @@
-r"""Dedup review stats — one compute + one line-builder, shared by CLI and TUI (§8 B).
+r"""Dedup review stats — one compute + one line-builder, shared by CLI and TUI.
 
 The stage-1 exact-delete split and the stage-2 keep-lead / PDQ / internal-external
 breakdown surface in TWO faces: the ``packrat dedup`` staging log (jobs layer) and the
@@ -15,7 +15,7 @@ logic lives here — a neutral, dependency-free module both import.
 - :func:`stats_for_stage` / :func:`lines_for_stage` are the **dispatch** — the ONE place
   the ``stage → which compute`` and ``stage → which line-builder`` maps live, so a new
   stage (or a changed ``stage=`` arg) is a one-place edit rather than three hand-written
-  ladders across ``queries``/``dedup``/``rootdetail`` (§8 B). Each face calls one entry
+  ladders across ``queries``/``dedup``/``rootdetail``. Each face calls one entry
   point; :func:`thresholds_from_row` is the seam both feed the run's analyze-time snapshot
   through (see [[review-stats-shared-renderer]]).
 """
@@ -26,8 +26,8 @@ from collections.abc import Callable, Iterable
 
 from .jobs.dedup_rank import ordered_lead_levels
 
-#: PDQ threshold defaults (mirror config.MatchConfig; §5.3) — the fallback histogram bin
-#: boundaries when a run predates the analyze-time snapshot columns (§8 B) so its
+#: PDQ threshold defaults (mirror config.MatchConfig) — the fallback histogram bin
+#: boundaries when a run predates the analyze-time snapshot columns so its
 #: ``review_runs`` row reads NULL. Both faces normally feed the run's OWN snapshotted
 #: thresholds through :func:`thresholds_from_row`; these only cover the pre-snapshot rows.
 _T_RECOMPRESS, _T_EDIT, _T_MATCH_VIDEO = 10, 32, 90
@@ -35,7 +35,7 @@ _OPEN = 10 ** 9   # open-ended top-bin upper bound
 
 
 def thresholds_from_row(row) -> dict:
-    """PDQ histogram thresholds for a run, from its analyze-time snapshot (§8 B).
+    """PDQ histogram thresholds for a run, from its analyze-time snapshot.
 
     ``row`` is the run's ``review_runs`` row (any mapping with the three columns, or
     ``None``). Each snapshotted column that is present feeds the matching bin boundary;
@@ -69,7 +69,7 @@ def thresholds_from_row(row) -> dict:
 #: The text width the line-builders receive at the TUI's reference geometry — the SAME
 #: value the Review box passes them there (``_review_text_w(REFERENCE) − 2`` for the 2-space
 #: indent). Headless callers (the daemon staging log, with no client terminal size) render
-#: to this so the log and the box stay byte-identical (§8 B "can't drift"); the live TUI
+#: to this so the log and the box stay byte-identical ("can't drift"); the live TUI
 #: derives its width from the real geometry instead.
 REFERENCE_TEXT_WIDTH = 90
 
@@ -84,7 +84,7 @@ def _thirds(lo: int, hi: int) -> list[tuple[str, int, int]]:
 
 
 def _photo_bins(stage: int, t_rec: int, t_edit: int) -> list[tuple[str, int, int]]:
-    """Photo histogram bins for a stage — even thirds of the stage's PDQ band (§5.3).
+    """Photo histogram bins for a stage — even thirds of the stage's PDQ band.
 
     Stage 2 (recompression) photos band at ``0..t_rec``; stage 3 (minor edits) at
     ``t_rec+1..t_edit``. (Stage 1 is exact, no distance.)"""
@@ -93,7 +93,7 @@ def _photo_bins(stage: int, t_rec: int, t_edit: int) -> list[tuple[str, int, int
 
 def _video_bins(t_video: int) -> list[tuple[str, int, int]]:
     """Video histogram bins (stage 2 only) — even thirds of ``0..t_match_video`` + an open
-    overflow. Video distance is a *mean* Hamming over comparable frames (matcher §5.3): it
+    overflow. Video distance is a *mean* Hamming over comparable frames (matcher): it
     can be low for a tight match OR exceed ``t_match_video`` (non-matching frames pull the
     mean up), so the scale is independent of the photo thresholds and the top bin is open.
     """
@@ -133,7 +133,7 @@ def stage1_split(rows: Iterable[dict]) -> dict:
     """Stage-1 exact-delete breakdown: files to delete (internal/external) + group make-up.
 
     ``rows`` are the stage-1 ``review_actions`` (all default-DELETE). ``is_external`` marks
-    a file *outside* the target root — nonzero only under ``--prefer-internal`` (§8 B). A
+    a file *outside* the target root — nonzero only under ``--prefer-internal``. A
     stage-1 "group" is one asset (its redundant copies): exact dups carry no ``group_no``,
     so group by ``asset_id``. A group is internal-only when the copies being deleted are
     all internal (``exact-internal``), mixed when the delete set reaches an external copy
@@ -157,7 +157,7 @@ def perceptual_stats(rows: Iterable[dict], *, stage: int = 2,
                      t_rec: int = _T_RECOMPRESS, t_edit: int = _T_EDIT,
                      t_video: int = _T_MATCH_VIDEO,
                      is_network: Callable[[str], bool] = lambda _p: False) -> dict:
-    """Compute the perceptual (stage-2 or stage-3) review bundle from ``review_actions`` (§8 B).
+    """Compute the perceptual (stage-2 or stage-3) review bundle from ``review_actions``.
 
     Returns groups/members, a PDQ-distance histogram (bins derived from the thresholds for
     ``stage``), the internal/external group make-up, and — for stage 2 only — the keep-lead
@@ -182,7 +182,7 @@ def perceptual_stats(rows: Iterable[dict], *, stage: int = 2,
 
     # (b) PDQ-distance histograms — SEPARATE photo and video tallies (partitioned by
     # media_type, not by distance range), since video distance is a mean-Hamming on its
-    # own scale (§5.3). Stage 3 is photo-only, so its video tally stays empty.
+    # own scale. Stage 3 is photo-only, so its video tally stays empty.
     def _dists(medium: str) -> list[int]:
         return [r["distance"] for r in rows
                 if r.get("distance") is not None
@@ -239,7 +239,7 @@ def perceptual_stats(rows: Iterable[dict], *, stage: int = 2,
 # ---------------------------------------------------------------------------
 def _makeup_line(internal_only: int, mixed: int, *,
                  internal_label: str = "all-internal", indent: str = "") -> str:
-    """The shared internal/mixed group make-up line (§8 B) — one source for the
+    """The shared internal/mixed group make-up line — one source for the
     ``· N mixed (internal+external)`` tail across all three stages, so it can't drift.
 
     Stage 1 labels its internal count "internal-only" and bakes in its own indent (its
@@ -249,7 +249,7 @@ def _makeup_line(internal_only: int, mixed: int, *,
 
 
 def stage1_lines(split: dict) -> list[str]:
-    """The stage-1 lines: delete count (internal/external) + group make-up (§8 B)."""
+    """The stage-1 lines: delete count (internal/external) + group make-up."""
     return [
         f"  to delete (exact): {split['to_delete']} file(s)  ·  "
         f"{split['internal']} internal, {split['external']} external",
@@ -261,7 +261,7 @@ def stage1_lines(split: dict) -> list[str]:
 def stage3_lines(bundle: dict, width: int) -> list[str]:
     """The stage-3 (minor edits) Review body: group/member count + PDQ histogram + make-up.
 
-    Stage 3 is deliberately UNRANKED (the edited copy may be the keeper, §8 B), so there is
+    Stage 3 is deliberately UNRANKED (the edited copy may be the keeper), so there is
     no keep-lead column and no keep-suggested action — just the near-dup shape."""
     body = [f"{bundle['groups']} near-dup groups / {bundle['members']} members (default-keep)"]
     body += _histogram_lines(bundle["pdq_photo"], width, title="PDQ distance")
@@ -330,7 +330,7 @@ def _histogram_lines(pdq: dict, width: int, *, title: str = "PDQ distance") -> l
 
 
 def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> list[str]:
-    """The stage-2 Review body (§8 B): keep-lead columns + two PDQ histograms, group
+    """The stage-2 Review body: keep-lead columns + two PDQ histograms, group
     make-up, suggestion split, and the ``--keep-suggested`` delete/network tip.
 
     Four sub-columns lay out left→right: keep-lead **photos**, keep-lead **videos**, **PDQ
@@ -389,13 +389,13 @@ def stage2_lines(bundle: dict, width: int, *, keep_suggested: bool = True) -> li
 
 
 # ---------------------------------------------------------------------------
-# stage dispatch (the ONE stage→compute / stage→build map; §8 B) — each face calls
+# stage dispatch (the ONE stage→compute / stage→build map) — each face calls
 # these two entry points instead of hand-writing the ladder (queries poll, dedup
 # staging log, rootdetail render). A new stage 4 is then a one-place edit here.
 # ---------------------------------------------------------------------------
 #: Number of dedup review stages (exact → recompression → minor-edit). The single source
 #: for the "stage N of <count>" phrase every face prints, so adding a stage doesn't leave a
-#: stale "of 3" hardcoded across the CLI log and the TUI Review box (§8 B). Mirrors the
+#: stale "of 3" hardcoded across the CLI log and the TUI Review box. Mirrors the
 #: jobs-layer STAGE_* constants, kept here (the neutral module both faces already import)
 #: because the TUI render layer must not import the jobs layer.
 N_DEDUP_STAGES = 3
@@ -403,7 +403,7 @@ N_DEDUP_STAGES = 3
 
 def stats_for_stage(rows: Iterable[dict], stage: int, *, thresholds: dict | None = None,
                     is_network: Callable[[str], bool] = lambda _p: False) -> dict:
-    """``stage → the right bundle`` — the ONE place the stage→compute map lives (§8 B).
+    """``stage → the right bundle`` — the ONE place the stage→compute map lives.
 
     Stage 1 is the exact-delete split (no thresholds/network band there); stages 2 & 3 are
     the perceptual bundle, PDQ-banded by the run's ``thresholds`` (a dict as produced by
@@ -418,7 +418,7 @@ def stats_for_stage(rows: Iterable[dict], stage: int, *, thresholds: dict | None
 
 def lines_for_stage(bundle: dict, stage: int, width: int, *,
                     keep_suggested: bool = True) -> list[str]:
-    """``stage → the right line list``, from a bundle :func:`stats_for_stage` produced (§8 B).
+    """``stage → the right line list``, from a bundle :func:`stats_for_stage` produced.
 
     Every returned line carries the shared 2-space indent (stage 1 bakes it in; stages 2/3
     get it here), so both faces consume the list verbatim — the CLI ``ctx.log(ln)`` and the

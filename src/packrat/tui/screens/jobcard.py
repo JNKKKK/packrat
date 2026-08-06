@@ -1,6 +1,6 @@
-"""Job result / detail card (§5) — pure body builders keyed off status then op.
+"""Job result / detail card — pure body builders keyed off status then op.
 
-The renderer keys off ``status`` first, ``op`` second (the §5 "every job show-able"
+The renderer keys off ``status`` first, ``op`` second (the "every job show-able"
 contract): a **running** job has no ``result_json`` yet → renders live from the SSE
 stream (progress bar + counts); a **terminal** job switches on ``result_json.op``
 for its outcome tallies, falling back to ``status`` + ``error`` when ``result_json``
@@ -24,7 +24,7 @@ def review_ui(job: dict) -> str | None:
 
     A review job freezes ``result_json.review_status``/``stage`` at the moment it
     paused; a later ``--confirm`` advances or finishes the run **without** rewriting
-    that older job's row (§8 B). So the card must key off the run's LIVE state, which
+    that older job's row. So the card must key off the run's LIVE state, which
     the data layer reconciles into ``job['review_state']``
     (:func:`packrat.queries._reconcile_review_state`):
 
@@ -66,7 +66,7 @@ def _status_word(job: dict) -> str:
 
 def card_body(job: dict, *, now: str, problem_files: list[dict] | None = None,
               problems_scroll: int = 0, geo: Geometry = REFERENCE) -> list[str]:
-    """Build the card body — dispatch on status first, then op (§5).
+    """Build the card body — dispatch on status first, then op.
 
     A **scan** card also lists its undecodable/read-error ``problem_files`` (paths +
     reasons) in a fixed-height, ``↑/↓``-scrollable section below the count summary;
@@ -89,7 +89,7 @@ def card_body(job: dict, *, now: str, problem_files: list[dict] | None = None,
     return builder(job)
 
 
-# --- running (§5.1) — live from SSE ---------------------------------------
+# --- running — live from SSE ----------------------------------------------
 def _running_body(job: dict) -> list[str]:
     bar = render.progress_bar(job.get("done"), job.get("total"),
                              width=30, eta_s=job.get("_eta_s"), running=True)
@@ -136,7 +136,7 @@ def problem_budget(job: dict, problem_files: list[dict], geo: Geometry) -> int:
 
 def _problem_section(problem_files: list[dict], scroll: int,
                      geo: Geometry) -> list[str]:
-    """The scrollable ``[undecodable]/[read-error] <path> <reason>`` list (§12 card).
+    """The scrollable ``[undecodable]/[read-error] <path> <reason>`` list.
 
     A fixed-height window into ``problem_files`` starting at line ``scroll`` (the
     ↑/↓ offset), with a header showing the count + the visible range so scrolling is

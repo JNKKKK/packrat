@@ -1,4 +1,4 @@
-"""The single-worker job queue (§3) — packrat's serialization point.
+"""The single-worker job queue — packrat's serialization point.
 
 Enforces both concurrency guarantees, but as a **durable queue**, not a reject:
 1. **Global: one mutating job runs at a time; the rest wait in a durable FIFO
@@ -19,7 +19,7 @@ column, so a bump survives a daemon restart.
 
 The worker slot is **in-memory** (a live daemon has at most one running job, in
 this process). That is what makes startup reconciliation correct: any ``running``
-row found at boot is stale (§3) — see :mod:`packrat.jobs.reconcile`. The *backlog*,
+row found at boot is stale — see :mod:`packrat.jobs.reconcile`. The *backlog*,
 by contrast, is durable (``queued`` rows) and drains after a restart.
 
 The queue is **pumped after every job finishes** (and on startup): a completing
@@ -29,7 +29,7 @@ was waiting on that root. :meth:`submit` never rejects a mutating job — the on
 submit-time error is an unknown job type (a ``ValueError``).
 
 Progress/state is pushed to subscribers as :class:`ProgressEvent`s over an SSE
-fan-out; ``jobs.done`` is persisted purely as the progress-display counter (§4).
+fan-out; ``jobs.done`` is persisted purely as the progress-display counter.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ class _Subscriber:
             self.q.put_nowait(ev)
         except _q.Full:
             # Slow client: drop rather than block the worker. State is durable
-            # in the jobs table, so a reconnect recovers (§3 SSE degrades).
+            # in the jobs table, so a reconnect recovers (SSE degrades).
             pass
 
     def close(self) -> None:
@@ -85,7 +85,7 @@ class JobQueue:
         self._sub_lock = threading.Lock()
         # Set by shutdown() so the worker's cancel-checkpoint lands the job
         # 'interrupted' (resumable) rather than 'cancelled' (terminal) — a clean
-        # `daemon stop` is a resumable interruption, NOT a cancel (§3). It also
+        # `daemon stop` is a resumable interruption, NOT a cancel. It also
         # stops _pump from launching new work into the teardown.
         self._stopping = False
 
@@ -93,7 +93,7 @@ class JobQueue:
     def submit(self, job_type: str, params: dict) -> int:
         """Enqueue a job, returning its job id; pump the queue.
 
-        Every mutating submission is enqueued as a ``queued`` row (§3 guarantee 1) —
+        Every mutating submission is enqueued as a ``queued`` row (guarantee 1) —
         it is **not** rejected if the worker is busy or the owned root is held (that
         is decided later, at dequeue). Only an *unknown job type* raises
         (:class:`ValueError`). Returns immediately; the work runs on the worker
@@ -106,7 +106,7 @@ class JobQueue:
         with self._lock:
             existing = self._dedup_probe(job_type, params)
             if existing is not None:
-                # A queued probe for this root already waits — coalesce (§8 A2b). No pump
+                # A queued probe for this root already waits — coalesce. No pump
                 # needed: the existing job is already in the backlog and will run.
                 return existing
             job_id = self._create_job_row(job_type, params)
@@ -114,9 +114,9 @@ class JobQueue:
         return job_id
 
     def _dedup_probe(self, job_type: str, params: dict) -> int | None:
-        """Submit-time dedup — **probe-only** "one pending probe per root" (§8 A2b).
+        """Submit-time dedup — **probe-only** "one pending probe per root".
 
-        The queue never dedups in general (every submission is enqueued — §3 guarantee 1);
+        The queue never dedups in general (every submission is enqueued — guarantee 1);
         this is a narrow, documented exception for ``probe``. If an un-started ``probe``
         job for the **same ``root_id``** is already ``status='queued'``, skip the insert
         and return that job's id — so the 24 h scheduler re-firing before yesterday's
@@ -139,7 +139,7 @@ class JobQueue:
         return int(row["id"]) if row is not None else None
 
     def _create_job_row(self, job_type: str, params: dict) -> int:
-        # root_id is the root the job *concerns* (for the per-root history/TUI, §12) —
+        # root_id is the root the job *concerns* (for the per-root history/TUI) —
         # taken from params.root_id when present (scan <root>/dedup/cleanup/merge-dest);
         # NULL for scan --all / untrash / trash-refresh. Distinct from owned_root
         # (exclusivity), which is narrower (e.g. only the perceptual-cleanup analyze).
@@ -153,12 +153,12 @@ class JobQueue:
 
     # -- scheduling (pump) ----------------------------------------------
     def _pump(self) -> None:
-        """Start the first runnable queued job if the worker is free (§3).
+        """Start the first runnable queued job if the worker is free.
 
         Runnable-first, ``priority DESC`` then FIFO by ``enqueued_at``: scan the backlog
         highest-priority-and-oldest-first and launch the first job whose owned root is
         free (or that owns no root); skip (leave ``queued``) any whose owned root is held
-        by a pending review / open merge. A prioritized job (``jobs prioritize``, §11)
+        by a pending review / open merge. A prioritized job (``jobs prioritize``)
         thus runs next when the worker frees — or, if *its* root is held, stays at the
         front but blocked while a lower-priority runnable job legitimately passes it
         (runnable-first, never a deadlock). Called on submit, after every job finishes,
@@ -168,7 +168,7 @@ class JobQueue:
             if self._stopping:
                 # Tearing down: don't launch new work into the shutdown race (a fresh
                 # worker wouldn't be joined by shutdown(), and a queued destructive
-                # --confirm must never auto-run unattended — §3). The pump-on-finish
+                # --confirm must never auto-run unattended). The pump-on-finish
                 # from the current job's teardown reaches here and correctly no-ops.
                 return
             if self._running_job_id is not None:
@@ -194,7 +194,7 @@ class JobQueue:
                 return
 
     def _is_runnable(self, spec, params: dict) -> bool:
-        """True if this job's owned root is free (or it owns none) — §3 guarantee 2."""
+        """True if this job's owned root is free (or it owns none) — guarantee 2."""
         if spec.owned_root is None:
             return True
         root_id = spec.owned_root(params)
@@ -232,7 +232,7 @@ class JobQueue:
 
     # -- worker ----------------------------------------------------------
     def _run_job(self, job_id: int, spec, params: dict, cancel_event: threading.Event) -> None:
-        # Snapshot config at job start (§9.2 per-job reload). A parse error here
+        # Snapshot config at job start (per-job reload). A parse error here
         # rejects the job cleanly rather than crashing the worker.
         try:
             config = self._config_loader()
@@ -260,7 +260,7 @@ class JobQueue:
             spec.handler(ctx)
         except CancelledError:
             # A CancelledError raised because the daemon is STOPPING is a resumable
-            # interruption, not a user cancel (§3): land it 'interrupted' so a merge/
+            # interruption, not a user cancel: land it 'interrupted' so a merge/
             # dedup keeps its resumable plan. A genuine user cancel (not stopping) is
             # terminal 'cancelled' and discards the plan.
             if self._stopping:
@@ -284,7 +284,7 @@ class JobQueue:
             self._release(job_id)
             # Pump: start the next runnable job AND unblock anything that was
             # waiting on a root this job just released (a --confirm/--cancel frees
-            # its review_run here). One pump does both (§3).
+            # its review_run here). One pump does both.
             self._pump()
 
     def _persist_progress(self, job_id: int, done: int, total: int | None) -> None:
@@ -297,7 +297,7 @@ class JobQueue:
 
     def _finish(self, job_id: int, status: str, *, error: str | None,
                 result: dict | None = None) -> None:
-        # result_json is the uniform outcome summary (§4) — written for EVERY terminal
+        # result_json is the uniform outcome summary — written for EVERY terminal
         # status. NULL when the job set none (its status/error still record the outcome).
         self._safe_write(
             "UPDATE jobs SET status=?, finished_at=?, error=?, result_json=? WHERE id=?",
@@ -310,7 +310,7 @@ class JobQueue:
 
         If the daemon is exiting, its shared connection may already be gone when
         a still-running worker tries to persist. That is harmless — startup
-        reconciliation (§3) flips a stale ``running`` row to ``interrupted`` — so
+        reconciliation flips a stale ``running`` row to ``interrupted`` — so
         we swallow the closed-DB error rather than crash the worker thread.
         """
         import sqlite3
@@ -348,7 +348,7 @@ class JobQueue:
 
     # -- cancellation ----------------------------------------------------
     def cancel(self, job_id: int) -> bool:
-        """Cancel ``job_id`` — the running job (cooperative) or a queued one (drop) (§3).
+        """Cancel ``job_id`` — the running job (cooperative) or a queued one (drop).
 
         - **Running** → set the cancel flag; the worker observes it at its next
           checkpoint and lands the job ``cancelled`` (terminal), distinct from
@@ -375,13 +375,13 @@ class JobQueue:
         return False
 
     def prioritize(self, job_id: int) -> bool:
-        """Bump a **queued** job to the front of the dequeue order (§11 ``jobs prioritize``).
+        """Bump a **queued** job to the front of the dequeue order (``jobs prioritize``).
 
         Sets its ``priority`` to ``max(existing priorities) + 1`` so it sorts ahead of
-        every other queued job (dequeue is ``priority DESC, enqueued_at, id`` — §3). Then
+        every other queued job (dequeue is ``priority DESC, enqueued_at, id``). Then
         pumps: if the worker is free and the job is runnable it starts **next/now**; if its
         owned root is held it stays at the front but **blocked** (runnable-first means a
-        lower-priority runnable job can still pass it — no deadlock, §3). Only a ``queued``
+        lower-priority runnable job can still pass it — no deadlock). Only a ``queued``
         job can be prioritized — a running job is already the one running; a terminal job
         is history. Returns True if it was queued and bumped.
         """
@@ -400,7 +400,7 @@ class JobQueue:
         return True
 
     def cancel_all_queued(self) -> int:
-        """Drop every ``queued`` job from the backlog (TUI ``[x]``, §12).
+        """Drop every ``queued`` job from the backlog (TUI ``[x]``).
 
         Leaves the running job alone. Returns the number dropped.
         """
@@ -418,7 +418,7 @@ class JobQueue:
     def shutdown(self, *, timeout: float = 5.0) -> None:
         """Signal the running job to checkpoint and join the worker (clean teardown).
 
-        A graceful ``daemon stop`` is a **resumable interruption, not a cancel** (§3):
+        A graceful ``daemon stop`` is a **resumable interruption, not a cancel**:
         we set ``_stopping`` *before* signalling the shared cancel event, so when the
         worker's checkpoint raises ``CancelledError`` it lands the job ``interrupted``
         (resumable — a merge/dedup keeps its plan), never ``cancelled`` (which would
@@ -439,7 +439,7 @@ class JobQueue:
 
         Called by the daemon on startup (after reconciliation drains stale state) so a
         durable backlog left by a previous run begins draining without waiting for a
-        new submission (§3). Safe to call anytime; a no-op while a job runs.
+        new submission. Safe to call anytime; a no-op while a job runs.
         """
         self._pump()
 
@@ -449,7 +449,7 @@ class JobQueue:
             return self._running_job_id
 
     def blocked_reason(self, job_type: str, params: dict) -> dict | None:
-        """Why a queued job of ``(job_type, params)`` can't run yet, or None (§3/§12).
+        """Why a queued job of ``(job_type, params)`` can't run yet, or None.
 
         None → runnable (``queued · waiting for worker``). Otherwise the returned
         holder dict (from :meth:`_root_holder`) drives the ``blocked: root R has a
@@ -464,12 +464,12 @@ class JobQueue:
         return self._root_holder(root_id, ignore_merge=spec.ignore_merge_holder)
 
     def _root_holder(self, root_id: int, *, ignore_merge: bool = False) -> dict | None:
-        """Description of the op currently owning ``root_id``, or None (§3 guarantee 2).
+        """Description of the op currently owning ``root_id``, or None (guarantee 2).
 
         Delegates to the shared :func:`packrat.roots.root_holder` (a pending
-        review_run or open merge_run, per §4) so the dequeue gate and the
+        review_run or open merge_run) so the dequeue gate and the
         ``scan --all`` skip-log speak identically. ``ignore_merge`` lets a resuming
-        merge past its own open ``merge_runs`` row (§8 C). Imported lazily to avoid a cycle.
+        merge past its own open ``merge_runs`` row. Imported lazily to avoid a cycle.
         """
         from ..roots import root_holder
 

@@ -1,4 +1,4 @@
-"""Job runtime: the single-worker queue, job context, and registry (§3)."""
+"""Job runtime: the single-worker queue, job context, and registry."""
 
 from .context import CancelledError, JobContext, ProgressEvent
 from .labels import job_label, job_qualifier, job_verb

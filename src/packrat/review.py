@@ -1,8 +1,8 @@
-r"""Shared plumbing for stateful review runs — dedup (M3) and cleanup (M4).
+r"""Shared plumbing for stateful review runs — dedup and cleanup.
 
 A "review run" stages candidate files as Explorer shortcuts under the target
 root's ``_packrat_review\`` area, persists a crash-safe plan (``review_actions``),
-pauses for the user, and applies on ``--confirm`` (§8 B, §6.2). This module owns
+pauses for the user, and applies on ``--confirm``. This module owns
 the pieces both operations share:
 
 - **staging paths** — the ``_packrat_review\`` parent and the per-stage subfolders
@@ -10,11 +10,11 @@ the pieces both operations share:
   ``_with_minor_edits\``; cleanup's ``_perceptually_identified_trash\``). All are
   already in the scan ignore set (:data:`packrat.ignore.REVIEW_DIR`) so scan never
   indexes them.
-- **audit trail** (§8.1) — the immutable ``proposed.json`` / ``applied.json`` under
+- **audit trail** — the immutable ``proposed.json`` / ``applied.json`` under
   ``%APPDATA%\packrat\audit\{run_type}\{root}\{run_id}\``, written once and never
   edited, surviving DB loss.
 
-Kept operation-agnostic so ``cleanup --perceptual`` reuses it verbatim in M4.
+Kept operation-agnostic so ``cleanup --perceptual`` reuses it verbatim.
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ __all__ = [
     "ensure_dir", "remove_tree", "path_exists", "audit_run_dir", "write_audit",
 ]
 
-#: dedup per-stage staging subfolders (§8 B). Stage 1 is default-DELETE (named
+#: dedup per-stage staging subfolders. Stage 1 is default-DELETE (named
 #: `…_to_delete`); stages 2 & 3 are default-KEEP (content-named).
 EXACT_DUP = "_exact_dup_to_delete"          # stage 1: byte-identical copies
 SUSPECT_RECOMPRESSION = "_suspect_recompression"  # stage 2: recompressions + all video near-dups
 WITH_MINOR_EDITS = "_with_minor_edits"      # stage 3: photo minor-edits/crops
 #: All dedup stage folders, in stage order (index 0 == stage 1).
 DEDUP_STAGE_FOLDERS = (EXACT_DUP, SUSPECT_RECOMPRESSION, WITH_MINOR_EDITS)
-#: cleanup --perceptual staging subfolder (§6.2, M4).
+#: cleanup --perceptual staging subfolder.
 PERCEPTUAL_TRASH = "_perceptually_identified_trash"
 
 
@@ -79,10 +79,10 @@ def path_exists(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# audit trail (§8.1)
+# audit trail
 # ---------------------------------------------------------------------------
 def audit_run_dir(run_type: str, root_name: str, run_id: int) -> str:
-    r"""``audit\{run_type}\{root_name}\{run_id}\`` — one dir per run (§8.1).
+    r"""``audit\{run_type}\{root_name}\{run_id}\`` — one dir per run.
 
     Created on demand. ``run_type`` ∈ ``dedup`` | ``cleanup-perceptual``.
     """
@@ -106,12 +106,12 @@ def _safe_name(name: str) -> str:
 
 
 def write_audit(run_dir: str, filename: str, obj: dict) -> str:
-    """Write an immutable audit JSON (``proposed.json`` / ``applied.json``, §8.1).
+    """Write an immutable audit JSON (``proposed.json`` / ``applied.json``).
 
     **Crash-atomic:** serialize to a sibling ``.tmp`` file, ``fsync`` it, then
     ``os.replace`` it into place — so a crash/power-loss mid-write can never leave a
     truncated or empty ``proposed.json``/``applied.json`` (this is the forensic record
-    §8.1 says must survive DB loss; a half-written one would be worse than none). The
+    that must survive DB loss; a half-written one would be worse than none). The
     replace is atomic on both NTFS and POSIX, so a reader sees either the old file or
     the complete new one, never a partial.
     """

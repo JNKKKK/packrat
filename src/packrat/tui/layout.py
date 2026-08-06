@@ -5,7 +5,7 @@ CSS can't — horizontal cell alignment in a monospace grid (:func:`row`), verti
 height budgeting (:func:`fit`), the long-path rule (:func:`middle_elide`), and
 CJK-aware display width (:func:`cell_width` — East-Asian wide chars count as 2).
 All functions are **pure and return plain, colorless text** — width math and the
-frame snapshot tests must never see color markup (§Theming "the hard rule"). Color
+frame snapshot tests must never see color markup (the hard rule). Color
 is a separate layer, applied by a widget's render step *after* layout.
 
 Everything here is importable without a Textual runtime (only :mod:`tokens`), so it
@@ -74,14 +74,14 @@ def cell_pad(text: str, width: int, align: str = "left") -> str:
 
 @dataclass
 class Cell:
-    """One labelled cell in a :func:`row` (component-plan §Layout).
+    """One labelled cell in a :func:`row`.
 
     ``width`` fixes the cell to exactly that many cells (the RootRow norm — why
     the mockup columns align); ``grow`` shares leftover space weighted by its
     value (the exception, for a single flexible cell). ``align`` positions text
     within the cell; ``elide`` shrinks over-width text. ``style`` is a **semantic
     role name** (e.g. ``'running'``/``'warn'``/``'dim'``) — layout *ignores* it
-    entirely; only a widget's render step maps it to a theme color (§Theming).
+    entirely; only a widget's render step maps it to a theme color.
     """
 
     text: str
@@ -107,7 +107,7 @@ def _tail_by_cells(text: str, width: int) -> str:
 
 
 def middle_elide(text: str, width: int, ellipsis: str = ELLIPSIS) -> str:
-    """Collapse ``text`` from the middle to ≤ ``width`` display cells (§12 path rule).
+    """Collapse ``text`` from the middle to ≤ ``width`` display cells (path rule).
 
     Keeps the **head** (drive + start) and **tail** (leaf) visible — the two ends
     carry a path's identity; the middle folders are the throwaway. The odd leftover
@@ -235,7 +235,7 @@ def row(width: int, cells: list[Cell], *, gap: int = 1, justify: str = "pack") -
 
 
 def pager_line(width: int, cur: int = 1, total: int = 1) -> str:
-    """A centered ``page i/N`` indicator (component-plan §Layout, §2 paginator).
+    """A centered ``page i/N`` indicator (the list paginator).
 
     Drawn directly beneath a scrollable list; shown even at ``1/1`` so the paging
     control is always visible (the ``←/→`` keys move between pages). Full-width so
@@ -247,8 +247,8 @@ def pager_line(width: int, cur: int = 1, total: int = 1) -> str:
 def wrap_cells(text: str, width: int) -> list[str]:
     """Word-wrap ``text`` to ``width`` cells (monospace), hard-breaking long tokens.
 
-    The roomy detail/card views (§3, §5) wrap a long NAS path over multiple lines
-    rather than eliding it (vertical space is cheaper there — §12). Preserves
+    The roomy detail/card views wrap a long NAS path over multiple lines
+    rather than eliding it (vertical space is cheaper there). Preserves
     explicit newlines; a token longer than ``width`` is hard-broken.
     """
     if width <= 0:
@@ -319,11 +319,11 @@ def fit(lines: list[str], budget: int, *, mode: str = "scroll", page: int = 0) -
     - ``'scroll'``   → page through all lines (PagedList/detail Jobs); render the
       ``page``-th window of ``budget`` lines.
     - ``'truncate'`` → keep ``budget-1`` lines + a ``… N more`` marker (compact
-      previews, e.g. the §1.2 dashboard queue box).
+      previews, e.g. the dashboard queue box).
     - ``'clip'``     → hard cut to ``budget`` (last resort).
 
     Returning more than ``budget`` rows is impossible by construction — that is what
-    makes §12's "if it can't fit, trim it, don't grow the window" mechanical.
+    makes "if it can't fit, trim it, don't grow the window" mechanical.
     """
     budget = max(0, budget)
     total = len(lines)

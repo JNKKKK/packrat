@@ -1,4 +1,4 @@
-"""Base screen + shared helpers for the TUI screen controllers (M6, §12).
+"""Base screen + shared helpers for the TUI screen controllers.
 
 :class:`FrameScreen` is the common base: a Textual :class:`~textual.screen.Screen`
 holding one :class:`~textual.widgets.Static` that shows a composed 100×24 frame from a
@@ -44,7 +44,7 @@ def _open_in_explorer(path: str) -> None:
     """Open ``path`` in the OS file manager (the [o] review action, a local op).
 
     Not a daemon call — the TUI observes/controls jobs but reviewing happens in
-    Explorer (§12 "observe-and-control, not a file manager"). Returns None (no job
+    Explorer ("observe-and-control, not a file manager"). Returns None (no job
     id), so the notice just says "submitted"."""
     review = f"{path}\\_packrat_review\\"
     import os
@@ -63,7 +63,7 @@ class FrameScreen(Screen):
 
     Subclasses implement :meth:`frame` (→ the composed string) and declare
     ``BINDINGS``; :meth:`refresh_frame` re-renders. The single ``Static`` is sized
-    to the fixed frame by ``packrat.tcss`` (§12 — a fixed root container, not
+    to the fixed frame by ``packrat.tcss`` (a fixed root container, not
     auto-sizing widgets).
     """
 
@@ -72,7 +72,7 @@ class FrameScreen(Screen):
         # markup parsing would treat the `[R]`/`[Q]`/`[c]` hint brackets as style
         # tags — consuming them (dropping `[R]` from a title) and bleeding a bad
         # span's background into the footer/border. Color is applied by ROLE, not
-        # inline markup (§Theming), so markup must be off here.
+        # inline markup, so markup must be off here.
         yield Static(id="frame", markup=False)
 
     def on_mount(self) -> None:
@@ -106,7 +106,7 @@ class FrameScreen(Screen):
 
     def refresh_frame(self) -> None:
         self.current_frame = self.frame()      # PLAIN string (tests / snapshotting)
-        # Colorize post-layout (§Theming): the plain frame stays the source of
+        # Colorize post-layout: the plain frame stays the source of
         # truth; only the live widget gets theme role colors applied by pattern.
         # NSFW masking (--nsfw) runs BEFORE colorize on the same string, so the
         # colorizer's offset math sees the already-redacted (cell-width-preserving)

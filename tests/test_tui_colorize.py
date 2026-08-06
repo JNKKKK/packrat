@@ -1,4 +1,4 @@
-"""Colorizer tests — assert role→span mapping, never a concrete hex (§Theming).
+"""Colorizer tests — assert role→span mapping, never a concrete hex.
 
 ``colorize`` applies theme role colors to a finished plain frame *post-layout*, so
 the golden frames stay colorless (tested elsewhere) and this is the separate,
@@ -33,7 +33,7 @@ def test_deduped_dot_gets_success_color():
 
 
 def test_probed_new_dot_gets_dim_color():
-    # ◐ "new files probed" is grey in the base glyph pass (§12 4-state).
+    # ◐ "new files probed" is grey in the base glyph pass (4-state).
     assert _span_color(f" {tokens.DOT_PROBED} x", tokens.DOT_PROBED) == T.color("dim")
 
 
@@ -293,7 +293,7 @@ def test_shade_box_title_also_shades_the_pager():
     assert text.plain == frame
 
 
-# --- 4-state dot recolor (§12): ◉ green vs ◉ yellow needs a per-row post-pass --------
+# --- 4-state dot recolor: ◉ green vs ◉ yellow needs a per-row post-pass --------
 def _mk_root(rid, name, path, scan, dedup, probe_new):
     return {"id": rid, "name": name, "path": path, "kind": "library", "enabled": 1,
             "last_full_scan_at": None, "last_probe_at": None, "probe_new_count": probe_new,
@@ -330,7 +330,7 @@ def _dot_color(text, frame, roots, target_name):
 
 def test_recolor_root_dots_splits_deduped_green_from_need_dedup_yellow():
     """◉ renders BOTH green (deduped>scan) and yellow (need-dedup) — the per-row post-pass
-    colors each root's ◉ to its true role, which the glyph pass alone can't (§12)."""
+    colors each root's ◉ to its true role, which the glyph pass alone can't."""
     from packrat.tui.colorize import recolor_root_dots
     from packrat.tui.screens.roots import roots_body
     from packrat.tui.framing import screen

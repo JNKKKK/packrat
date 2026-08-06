@@ -1,10 +1,10 @@
-"""Job execution context — progress + cooperative cancellation (§3, §9).
+"""Job execution context — progress + cooperative cancellation.
 
 A job handler receives a :class:`JobContext`. It reports progress by calling
 :meth:`JobContext.progress`, and cooperatively checks for cancellation at its
 existing checkpoints via :meth:`JobContext.check_cancelled` (or the cheaper
 :attr:`JobContext.cancelled` flag). The context also holds the frozen
-:class:`~packrat.config.Config` snapshot taken at job start (§9.2).
+:class:`~packrat.config.Config` snapshot taken at job start.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class CancelledError(Exception):
 
 @dataclass
 class ProgressEvent:
-    """A single progress/state push, streamed to clients over SSE (§3)."""
+    """A single progress/state push, streamed to clients over SSE."""
 
     job_id: int
     type: str  # one of: progress|state|log|done|error
@@ -73,7 +73,7 @@ class JobContext:
 
     # -- result ----------------------------------------------------------
     def set_result(self, result: dict) -> None:
-        """Record this job's uniform, human-showable outcome summary (§4/§12).
+        """Record this job's uniform, human-showable outcome summary.
 
         Persisted to ``jobs.result_json`` by the queue at terminal time — the single
         surface the TUI renders as a job's result card without joining per-op tables.
@@ -95,7 +95,7 @@ class JobContext:
         return self._cancel.is_set()
 
     def check_cancelled(self) -> None:
-        """Raise :class:`CancelledError` if cancel was requested (§9 checkpoints)."""
+        """Raise :class:`CancelledError` if cancel was requested (at checkpoints)."""
         if self._cancel.is_set():
             raise CancelledError()
 
@@ -115,7 +115,7 @@ class JobContext:
             self._done += 1
         else:
             self._done = done
-        # Persist the counter (progress-display only — §4), then push an event.
+        # Persist the counter (progress-display only), then push an event.
         self._set_progress(self._done, self._total)
         self._emit(
             ProgressEvent(

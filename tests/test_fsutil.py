@@ -1,4 +1,4 @@
-"""fsutil.is_network_path — UNC + mapped-drive (DRIVE_REMOTE) detection (§10).
+"""fsutil.is_network_path — UNC + mapped-drive (DRIVE_REMOTE) detection.
 
 The permanent-delete safety warning for cleanup/dedup keys off this: a NAS is
 usually a *mapped drive* (like ``Z:``), which a pure UNC check misses. These tests
@@ -59,5 +59,5 @@ def test_remote_drive_helper_swallows_win32_failure(monkeypatch):
             raise OSError("no win32 here")
 
     monkeypatch.setattr(ctypes, "windll", _Boom(), raising=False)
-    # Best-effort: a ctypes failure must never raise into the delete path (§10).
+    # Best-effort: a ctypes failure must never raise into the delete path.
     assert fsutil._is_remote_drive(r"Z:\photos\a.jpg") is False

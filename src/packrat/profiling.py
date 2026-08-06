@@ -1,4 +1,4 @@
-r"""Opt-in scan profiler — where does a scan's wall time actually go? (§10.1)
+r"""Opt-in scan profiler — where does a scan's wall time actually go?
 
 A scan splits its time between **I/O** (byte transfer — disk or network reads),
 **CPU** (BLAKE3 hashing, PDQ perceptual hashing, image decode), and shared
@@ -9,7 +9,7 @@ tell "82% I/O" from "CPU-bound on PDQ".
 buckets are keyed by ``(medium, name)`` and the report prints a **PHOTOS** and a
 **VIDEOS** section, each with its own rollup + read throughput, plus a small
 **SHARED** footer (enumeration, DB). For photos the producer/consumer pipeline
-(§scan) reads each file once in a producer thread and decodes it from RAM in a
+reads each file once in a producer thread and decodes it from RAM in a
 consumer — so a photo's ``io`` bucket is *pure* byte transfer and ``decode``/``pdq``
 are *pure* CPU (no file descriptor → no hidden lazy reads). Videos keep the
 path-based stream+seek pipeline, so their ``decode`` is honestly labelled mixed.
@@ -125,7 +125,7 @@ class ScanProfiler:
         files = snap["files"]
         # Single aggregate throughput = ALL bytes read / wall time — the real link
         # rate. Per-medium MB/s would mislead: photos and videos run in disjoint
-        # phases (§scan), so dividing each medium's bytes by the *full* wall
+        # phases, so dividing each medium's bytes by the *full* wall
         # understates its in-phase speed and the two don't sum to the aggregate.
         total_bytes = sum(snap["bytes"].values())
         tput = f" · {(total_bytes / (1024 * 1024)) / wall:.1f} MB/s read" if total_bytes else ""

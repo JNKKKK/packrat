@@ -1,4 +1,4 @@
-"""Smoke-test sample generation (§9.1).
+"""Smoke-test sample generation.
 
 Skipped when the media deps aren't installed — the generator degrades to a
 ``failed`` summary rather than raising, and there's nothing to assert on a bare

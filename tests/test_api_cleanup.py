@@ -1,4 +1,4 @@
-"""Daemon HTTP API for M4: /cleanup, /cleanup/preview, /trash/refresh, /untrash.
+"""Daemon HTTP API: /cleanup, /cleanup/preview, /trash/refresh, /untrash.
 
 In-process TestClient (never binds the port), mirroring test_api_roots.py. Verifies
 the HTTP surface — routing, validation (trash root → 400), param passthrough — not
@@ -94,7 +94,7 @@ def test_trash_refresh_endpoint(client, tmp_path):
 
 
 def test_trash_refresh_single_root_passes_root_id(client, tmp_path):
-    """`trash refresh <root>` resolves the trash root + carries its id in params (§6.1)."""
+    """`trash refresh <root>` resolves the trash root + carries its id in params."""
     trash = tmp_path / "Trash"
     trash.mkdir()
     reg = client.post("/roots", json={"path": str(trash), "kind": "trash"}, headers=_h()).json()

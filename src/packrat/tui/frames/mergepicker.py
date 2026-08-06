@@ -1,4 +1,4 @@
-"""The MergePickerScreen screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The MergePickerScreen screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from .base import FrameScreen
 
 
 # ---------------------------------------------------------------------------
-# Merge-from picker (§3.3)
+# Merge-from picker
 # ---------------------------------------------------------------------------
 class MergePickerScreen(FrameScreen):
-    """Pick a merge SOURCE for a fixed destination root (§3.3).
+    """Pick a merge SOURCE for a fixed destination root.
 
     ``[Tab]`` toggles the source between a paginated **registered-root** list
     (library roots, dest excluded) and a typed **external folder** path; ``↑/↓``

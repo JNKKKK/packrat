@@ -1,4 +1,4 @@
-r"""untrash (§6.3) — forget content from the trashed-hash set by presenting the file.
+r"""untrash — forget content from the trashed-hash set by presenting the file.
 
 Pure DB/hash logic (no shell APIs), so these run everywhere. untrash never touches
 disk; it hashes the presented file and edits ``assets`` rows only.
@@ -159,7 +159,7 @@ def test_untrash_folder_recursive(queue_and_db, tmp_path):
 
 
 def test_untrash_owns_no_root(queue_and_db, tmp_path):
-    """untrash takes a worker slot but owns no root → not blocked by a pending review (§3)."""
+    """untrash takes a worker slot but owns no root → not blocked by a pending review."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()

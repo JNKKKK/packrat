@@ -1,4 +1,4 @@
-r"""Self-healing an orphaned daemon (§3) — the port→pid→kill recovery path.
+r"""Self-healing an orphaned daemon — the port→pid→kill recovery path.
 
 An orphaned daemon (spawned under a since-deleted ``PACKRAT_HOME``, e.g. during
 testing) answers unauthenticated ``/health`` but rejects our token, so the authed

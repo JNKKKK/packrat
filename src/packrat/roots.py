@@ -1,4 +1,4 @@
-r"""Root lifecycle + resolution (§8 A1, §11).
+r"""Root lifecycle + resolution.
 
 ``roots register`` is **metadata-only and instantaneous** — it validates a folder
 and inserts a ``roots`` row; it walks/fingerprints nothing (that is ``scan``). So
@@ -8,14 +8,14 @@ any running op).
 
 Also home to:
 - :func:`resolve_root` — the path-vs-``--name`` argument resolution shared by
-  ``scan`` and ``dedup``/``cleanup`` (§11).
-- :func:`resolve_dest` — merge's ``--into`` resolution (§8 C Phase 0 step 2): a
+  ``scan`` and ``dedup``/``cleanup``.
+- :func:`resolve_dest` — merge's ``--into`` resolution: a
   path/name that must land **inside** a registered library root (the dest may be a
   *subfolder* of one, unlike ``resolve_root``'s exact/name match).
 - :func:`root_holder` — "who owns this root right now" (pending review / open
-  merge), used by the queue's dequeue gate and ``scan --all``'s skip-and-log
-  (§8 A2 step 1a); centralized so both agree. ``ignore_merge`` lets a *resuming*
-  merge past its own open ``merge_runs`` row (§8 C — else it would deadlock waiting
+  merge), used by the queue's dequeue gate and ``scan --all``'s skip-and-log;
+  centralized so both agree. ``ignore_merge`` lets a *resuming*
+  merge past its own open ``merge_runs`` row (else it would deadlock waiting
   on itself).
 """
 
@@ -32,11 +32,11 @@ VALID_KINDS = ("library", "trash")
 
 
 class RootError(Exception):
-    """A ``roots register`` validation failure or a failed root resolution (§8 A1/§11)."""
+    """A ``roots register`` validation failure or a failed root resolution."""
 
 
 # ---------------------------------------------------------------------------
-# register (§8 A1)
+# register
 # ---------------------------------------------------------------------------
 def register(
     db: Database,
@@ -46,7 +46,7 @@ def register(
     kind: str = "library",
     ignore_globs: list[str] | None = None,
 ) -> dict:
-    """Validate ``path`` and insert a ``roots`` row (§8 A1). Return the new row.
+    """Validate ``path`` and insert a ``roots`` row. Return the new row.
 
     Raises :class:`RootError` on: missing/unreadable path, non-directory, overlap
     with an existing root (nested or containing), or a leaf-name/``--name`` clash.
@@ -75,7 +75,7 @@ def register(
     # Steps 2-4 run in ONE transaction under the DB write lock, so the overlap +
     # unique-name checks and the INSERT are ATOMIC — two concurrent registers of
     # overlapping/nesting paths (whose distinct path/name would slip past the DB's own
-    # UNIQUE constraints) can't both pass their checks and insert (§8 A1 TOCTOU).
+    # UNIQUE constraints) can't both pass their checks and insert (a TOCTOU guard).
     with db.transaction() as conn:
         # 2. Overlap check — reject if this path is, contains, or is contained by a root.
         for row in conn.execute("SELECT id, name, path FROM roots").fetchall():
@@ -121,10 +121,10 @@ def ignore_globs_of(row) -> list[str]:
 
 
 def enabled_library_root_ids(db: Database) -> list[int]:
-    """The ids of every enabled **library** root, in registration order (§8 A2b).
+    """The ids of every enabled **library** root, in registration order.
 
     The single definition of "which roots a `probe --all` sweep covers" — trash roots
-    (never scanned/probed, §6.1) and disabled roots are excluded. Shared by the daemon's
+    (never scanned/probed) and disabled roots are excluded. Shared by the daemon's
     ``/probe --all`` endpoint and the periodic ``probe-all`` scheduler task so the manual
     and scheduled sweeps can never target different sets."""
     rows = db.query(
@@ -134,10 +134,10 @@ def enabled_library_root_ids(db: Database) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# resolution (§11): path first, then --name handle
+# resolution: path first, then --name handle
 # ---------------------------------------------------------------------------
 def resolve_root(db: Database, arg: str) -> dict:
-    """Resolve a CLI root argument to a ``roots`` row (§11).
+    """Resolve a CLI root argument to a ``roots`` row.
 
     1. Canonicalized as a path, exact-match a stored ``roots.path``.
     2. Else case-insensitively match a ``roots.name``.
@@ -154,11 +154,11 @@ def resolve_root(db: Database, arg: str) -> dict:
 
 
 def resolve_dest(db: Database, arg: str) -> tuple[dict, str]:
-    r"""Resolve a merge ``--into`` argument to ``(library_root_row, dest_canonical_path)`` (§8 C Phase 0 step 2).
+    r"""Resolve a merge ``--into`` argument to ``(library_root_row, dest_canonical_path)``.
 
     Unlike :func:`resolve_root` (which matches a root's own path/name), the merge dest
     may be a **subfolder** of a library root that need not exist yet (created at copy
-    time). Resolution — **path first, then name** (§11: path-match is tried first so an
+    time). Resolution — **path first, then name** (path-match is tried first so an
     odd handle can't shadow a real path):
 
     1. Canonicalize ``arg`` as a path and find the root that *contains* it
@@ -197,18 +197,18 @@ def resolve_dest(db: Database, arg: str) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
-# per-root exclusivity holder (§3 guarantee 2 / §8 A2 step 1a)
+# per-root exclusivity holder
 # ---------------------------------------------------------------------------
 def root_holder(db: Database, root_id: int, *, ignore_merge: bool = False) -> dict | None:
-    """Describe the op currently *owning* ``root_id``, or ``None`` (§3).
+    """Describe the op currently *owning* ``root_id``, or ``None``.
 
     The owners are a ``pending`` ``review_runs`` row (dedup/cleanup) or an open
-    ``merge_runs`` row (``planning``/``copying``) with this root as dest, per the §4
+    ``merge_runs`` row (``planning``/``copying``) with this root as dest, per the
     partial-unique indexes. Returns a dict with a human ``what`` string so both the
     queue dequeue gate and ``scan --all`` skip-log speak the same language.
 
     ``ignore_merge`` skips the open-``merge_runs`` check — used by a *resuming* merge,
-    which must not treat *its own* open row as a blocking holder (§8 C: it auto-resumes
+    which must not treat *its own* open row as a blocking holder (it auto-resumes
     that very run) or it would deadlock waiting on itself.
     """
     rr = db.query_one(

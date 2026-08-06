@@ -1,4 +1,4 @@
-"""Pure stage-1/stage-2 review-stats compute + line-builders (§8 B, review_stats).
+"""Pure stage-1/stage-2 review-stats compute + line-builders (review_stats).
 
 No DB or FS — drives the shared module on synthetic ``review_actions`` row-dicts (the
 same shape the job builds and the TUI queries), so the numbers the CLI log and the TUI
@@ -59,7 +59,7 @@ def test_stage2_lead_tally_split_by_medium():
 
 
 def test_stage2_pdq_histograms_split_by_medium():
-    # Photo and video get SEPARATE histograms on their own scales (§8 B). Photo bins are
+    # Photo and video get SEPARATE histograms on their own scales. Photo bins are
     # thirds of 0..t_rec (0–2/3–6/7–10); video bins are thirds of 0..t_video + open
     # overflow (0–29/30–59/60–90/91+). A low-distance video lands in the VIDEO 0–29 bin,
     # not a photo bin — the partition is by media_type, not by distance range.

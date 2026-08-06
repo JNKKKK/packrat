@@ -1,4 +1,4 @@
-r"""Startup reconciliation (§3) — crash / kill / power-loss recovery.
+r"""Startup reconciliation — crash / kill / power-loss recovery.
 
 On **every** daemon start, before serving any request, the daemon reconciles
 stale state left by a dead worker. The worker slot is in-memory, so any
@@ -8,9 +8,9 @@ most one, in *this* process, which just started).
 Actions:
 - **Orphaned ``running`` jobs → ``interrupted``** with ``error='daemon restarted'``.
   The daemon does **not** auto-resume/re-enqueue — the durable per-op plan is
-  intact, so the user re-runs the command (§3). This avoids a crash-loop and
+  intact, so the user re-runs the command. This avoids a crash-loop and
   never resumes a destructive apply unattended.
-- **Durable ``queued`` backlog → kept, with one carve-out (§3 guarantee 1).** Jobs
+- **Durable ``queued`` backlog → kept, with one carve-out.** Jobs
   that were merely *waiting* (never started, nothing touched) are not stale — they
   stay ``queued`` and the daemon's startup pump drains them in order. **Carve-out:**
   a queued *destructive apply* (``dedup``/``cleanup --confirm``) is flipped to
@@ -63,7 +63,7 @@ def reconcile_on_startup(db: Database) -> dict:
             interrupted.append({"id": row["id"], "type": row["type"], "params_json": row["params_json"]})
             summary["interrupted_jobs"].append({"id": row["id"], "type": row["type"]})
 
-        # Phase 1b — durable queued backlog carve-out (§3 guarantee 1). Queued jobs
+        # Phase 1b — durable queued backlog carve-out. Queued jobs
         # never started, so they are KEPT to drain — EXCEPT a destructive apply
         # (dedup/cleanup --confirm), which must not auto-run unattended → interrupted.
         for row in conn.execute(
@@ -77,12 +77,12 @@ def reconcile_on_startup(db: Database) -> dict:
                 )
                 summary["carved_out_queued"].append({"id": row["id"], "type": row["type"]})
 
-    # Phase 2 — analyze rollback (§3). A dedup/cleanup *analyze* that died mid-staging
+    # Phase 2 — analyze rollback. A dedup/cleanup *analyze* that died mid-staging
     # left a `pending` review_run with half-built `_packrat_review\` staging and NOTHING
     # yet deleted. Roll it back: delete the partial staging + mark the run `cancelled`,
     # so a fresh re-run isn't blocked and a stray `--confirm` can't apply a partial plan.
     # NOT rolled back (left `pending` for a `--confirm` re-run, which resumes
-    # idempotently, §3):
+    # idempotently):
     #   - an interrupted `--confirm`/`--cancel` job (params say so), and
     #   - a run already past stage 1 or with stage_phase='applied' — a later stage means
     #     an earlier stage's deletions were already CONFIRMED; rolling back would discard
@@ -94,7 +94,7 @@ def reconcile_on_startup(db: Database) -> dict:
         # Only an interrupted *analyze* rolls back its own half-built staging. A
         # confirm/cancel job owns no fresh staging (leave its pending run for a
         # --confirm re-run), and a DRY-RUN owns NOTHING — it opens no review_run and
-        # touches no staging (§8 B). Critically, dry-run does NOT acquire the root
+        # touches no staging. Critically, dry-run does NOT acquire the root
         # (owned_root→None), so it can legitimately run while a REAL review is pending
         # on that root; rolling back here would destroy that unrelated review's staging.
         if params.get("confirm") or params.get("cancel") or params.get("dry_run"):
@@ -113,7 +113,7 @@ def reconcile_on_startup(db: Database) -> dict:
 
 
 def _is_destructive_apply(job_type: str, params: dict) -> bool:
-    """True for a queued job that would DELETE files on run (§3 carve-out).
+    """True for a queued job that would DELETE files on run (the carve-out).
 
     The two destructive applies are ``dedup --confirm`` and ``cleanup --confirm``
     (they recycle files under the review plan). A ``cleanup`` one-shot ``apply``
@@ -134,7 +134,7 @@ def _params(params_json) -> dict:
 
 
 def _rollback_analyze(db: Database, root_id) -> list[dict]:
-    """Delete half-built staging + cancel the pending review_run for ``root_id`` (§3).
+    """Delete half-built staging + cancel the pending review_run for ``root_id``.
 
     Imported lazily so reconcile stays cheap/dependency-light on the common (no
     rollback) path. Returns a list of ``{run_id, root_id}`` rolled back.

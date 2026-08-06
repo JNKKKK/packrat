@@ -1,8 +1,8 @@
-"""Transport-stream (.ts / .m2ts / .mts) support (§5.3 duration fallback + allowlist).
+"""Transport-stream (.ts / .m2ts / .mts) support (duration fallback + allowlist).
 
-Transport streams routinely carry NO stream/container duration, which used to collapse
-``_probe_video`` to a single frame → too few comparable frames to ever dedup (§5.3
-min_comparable_frames). These tests build a real mpegts-muxed clip and assert the
+Transport streams routinely carry NO stream/container duration, which would collapse
+``_probe_video`` to a single frame → too few comparable frames to ever dedup
+(min_comparable_frames). These tests build a real mpegts-muxed clip and assert the
 demux-based duration fallback recovers a timeline so the clip samples across it, plus
 that ``.ts`` is recognized as video by the allowlist + type classifier.
 """
@@ -121,7 +121,7 @@ def test_video_duration_s_prefers_stream_then_container_then_demux():
 
 def test_ts_fingerprint_samples_multiple_frames(tmp_path):
     """End-to-end public path: a real .ts yields a multi-frame, decodable signature with
-    enough comparable frames to participate in dedup (§5.3 min_comparable_frames) — not the
+    enough comparable frames to participate in dedup (min_comparable_frames) — not the
     single frame the old no-duration path produced."""
     p = tmp_path / "clip.ts"
     _write_ts(p, frames=45)
@@ -162,7 +162,7 @@ def test_mp4_still_samples_full_frame_count_via_seek(tmp_path):
 
 def test_undecodable_ts_still_flagged_not_frame_faked(tmp_path):
     """The ≥1-frame guarantee must NOT mask a genuinely undecodable file: bytes that only
-    LOOK like a .ts (no real stream) stay undecodable=1 with no frames (§9.1)."""
+    LOOK like a .ts (no real stream) stay undecodable=1 with no frames."""
     p = tmp_path / "bogus.ts"
     p.write_bytes(b"\x47" + b"\x00" * 4096)              # 0x47 is the TS sync byte; no real stream
     fp = media.fingerprint(str(p), p.stat().st_size, Config())
@@ -210,7 +210,7 @@ def test_broken_seek_triggers_sequential_fallback(tmp_path, monkeypatch):
 def test_sample_sequential_fills_every_covered_slot(tmp_path):
     """_sample_sequential must not drop target slots when one frame covers several (short /
     low-fps clips): every satisfied target gets a FrameSig, so the slot count == targets
-    satisfied, preserving frame_index alignment with a full-count peer (§5.3)."""
+    satisfied, preserving frame_index alignment with a full-count peer."""
     av = pytest.importorskip("av")
     p = tmp_path / "few.ts"
     _write_ts(p, frames=3)                               # far fewer real frames than 12 targets

@@ -1,4 +1,4 @@
-"""Downscale-before-PDQ (§ profiler finding): dims preserved, hash near full-res."""
+"""Downscale-before-PDQ: dims preserved, hash near full-res."""
 
 from __future__ import annotations
 

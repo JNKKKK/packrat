@@ -1,4 +1,4 @@
-"""The QueueMax screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The QueueMax screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from .jobcard import JobCard
 
 
 # ---------------------------------------------------------------------------
-# Queue interface (§4)
+# Queue interface
 # ---------------------------------------------------------------------------
 class QueueMax(FrameScreen):
-    """§4 with per-section focus: [r]unning / [q]ueued / rec[e]nt.
+    """The Queue interface with per-section focus: [r]unning / [q]ueued / rec[e]nt.
 
     ↑/↓ and ←/→ act on the FOCUSED section only; each section keeps its own cursor
     and page, so paging one never touches another (the three are independent
@@ -44,10 +44,10 @@ class QueueMax(FrameScreen):
 
     def __init__(self) -> None:
         super().__init__()
-        self.focus = "running"      # focused section: running|queued|history (§4 default)
+        self.focus = "running"      # focused section: running|queued|history (default)
         self.cursors = {"running": 0, "queued": 0, "history": 0}
         self.pages = {"running": 0, "queued": 0, "history": 0}
-        # History is LAZY-LOADED one page at a time (§12): running/queued come from the
+        # History is LAZY-LOADED one page at a time: running/queued come from the
         # snapshot, but the terminal-job history is unbounded, so we hold only the current
         # page's rows + the true total-page count (for the paginator). Fetched on mount +
         # poll + page change, off the UI thread.

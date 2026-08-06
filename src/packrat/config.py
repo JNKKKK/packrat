@@ -1,4 +1,4 @@
-"""Configuration — ``%APPDATA%\\packrat\\config.toml`` (§9.2).
+"""Configuration — ``%APPDATA%\\packrat\\config.toml``.
 
 Lifecycle:
 - **Auto-created with commented defaults** on first daemon start (:func:`ensure_config`).
@@ -8,7 +8,7 @@ Lifecycle:
   logged warning**; a **malformed file raises** :class:`ConfigError` naming the failure.
 
 Scope is global-only; the one per-root setting (``--ignore`` globs) lives on the ``roots``
-row, not here (§9.2).
+row, not here.
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ log = logging.getLogger("packrat.config")
 
 
 class ConfigError(Exception):
-    """Raised when ``config.toml`` cannot be parsed (§9.2 malformed-file path)."""
+    """Raised when ``config.toml`` cannot be parsed (malformed-file path)."""
 
 
 # ---------------------------------------------------------------------------
-# Media extension allowlist (§8 A1). The shipped default is a fixed closed set.
+# Media extension allowlist. The shipped default is a fixed closed set.
 # Stored lower-case, no leading dot. RAW is opt-in (allowlist.raw).
 # ---------------------------------------------------------------------------
 PHOTO_EXTS = frozenset(
@@ -43,7 +43,7 @@ RAW_EXTS = frozenset("dng cr2 cr3 nef arw raf orf rw2 pef srw".split())
 @dataclass(frozen=True)
 class AllowlistConfig:
     raw: bool = False
-    # Extension lists are editable in TOML but default to the §8 A1 closed sets.
+    # Extension lists are editable in TOML but default to the closed sets.
     photo: frozenset[str] = PHOTO_EXTS
     video: frozenset[str] = VIDEO_EXTS
 
@@ -57,11 +57,11 @@ class AllowlistConfig:
 
 @dataclass(frozen=True)
 class FastpathConfig:
-    #: tolerant-mtime skip window (§8 A2 step 4); 0 = strict path+size+mtime.
+    #: tolerant-mtime skip window; 0 = strict path+size+mtime.
     mtime_tolerance_s: float = 2.0
 
 
-#: Codec-efficiency weights for the video keep-lead (§8 B). A more-efficient codec's
+#: Codec-efficiency weights for the video keep-lead. A more-efficient codec's
 #: bits are "worth more" → higher weight, so at equal resolution an HEVC master beats
 #: an H.264 re-export on effective bitrate (= size/duration × weight). Coarse + tunable;
 #: an unknown/missing codec gets weight 1.0 (neutral). H.265 == HEVC (same codec).
@@ -77,21 +77,21 @@ DEFAULT_CODEC_WEIGHTS: dict[str, float] = {
 
 @dataclass(frozen=True)
 class MatchConfig:
-    #: photo PDQ Hamming cutoffs (§5.3). `t_photo_edit` is the match decision (a pair
+    #: photo PDQ Hamming cutoffs. `t_photo_edit` is the match decision (a pair
     #: with distance ≤ this is a near-dup); `t_photo_recompress` (tighter) BANDS matched
     #: photos into dedup's review stages — ≤ recompress = stage 2 (recompression),
     #: recompress < d ≤ edit = stage 3 (minor edit). recompress < edit. Both need
-    #: calibration (§14 #1). `cleanup --perceptual` uses t_photo_edit alone (no banding).
+    #: calibration. `cleanup --perceptual` uses t_photo_edit alone (no banding).
     t_photo_recompress: int = 10
     t_photo_edit: int = 32
-    #: per-frame PDQ cutoff for video (§5.3); looser, the frame vote reclaims precision.
+    #: per-frame PDQ cutoff for video; looser, the frame vote reclaims precision.
     #: Video near-dups are a single frame-vote match (not banded) → all go to dedup stage 2.
     t_match_video: int = 90
     #: downscale each decoded image/frame to this longest edge before PDQ. PDQ on a
     #: full 12MP photo is ~7x slower than on a 512px copy while the hash barely moves
     #: (drift ~7/256, well inside t_photo_edit). 0 = no downscale (hash full-res).
     pdq_max_edge: int = 512
-    #: video keep-lead (§8 B): two effective-bitrates within this percent are a "tie"
+    #: video keep-lead: two effective-bitrates within this percent are a "tie"
     #: (log-scale bucket), so the codec-efficiency weight then the path decide — not a
     #: coin-flip on a noisy bitrate diff. Resolution is ranked above this either way.
     video_bitrate_tie_pct: float = 10.0
@@ -111,17 +111,17 @@ class VideoConfig:
 
 @dataclass(frozen=True)
 class ReviewConfig:
-    #: photo PDQ quality below this flags a near-dup pair low_confidence (§5.3).
+    #: photo PDQ quality below this flags a near-dup pair low_confidence.
     low_quality_hint: int = 50
 
 
 @dataclass(frozen=True)
 class SmbConfig:
-    #: concurrent hashing/decoding streams over SMB (§10.1); 4–8 typical. Used for
+    #: concurrent hashing/decoding streams over SMB; 4–8 typical. Used for
     #: the video path (per-file) and as a fallback; the photo pipeline uses the
     #: separate io/cpu worker knobs below.
     scan_workers: int = 6
-    #: PHOTO pipeline — decouple I/O from CPU concurrency (§producer-consumer).
+    #: PHOTO pipeline — decouple I/O from CPU concurrency.
     #: io_workers read whole photo files off disk/NAS into a bounded queue (want
     #: high, to saturate the link); cpu_workers hash+decode+PDQ from RAM (want ≈
     #: cores). 0 = auto (io: 2×cores capped at 16; cpu: max(2, cores−2)).
@@ -138,7 +138,7 @@ class SmbConfig:
     def resolved_io_workers(self) -> int:
         """io_workers, resolving 0 → auto.
 
-        Aims for the §10.1 SMB sweet spot of ~4–8 concurrent read streams: enough
+        Aims for the SMB sweet spot of ~4–8 concurrent read streams: enough
         outstanding requests to hide latency and saturate the link, but not so many
         that parallel reads thrash a single NAS volume with seek contention. A
         single sequential reader can't fill the bandwidth-delay product (it would
@@ -161,18 +161,18 @@ class SmbConfig:
 
 @dataclass(frozen=True)
 class AuditConfig:
-    #: 0 = keep review audits forever (§8.1); >0 = prune older (deferred pass, §14 #5).
+    #: 0 = keep review audits forever; >0 = prune older (deferred pass).
     retention_days: int = 0
 
 
 @dataclass(frozen=True)
 class ScheduleConfig:
-    """Periodic-scheduler cadence (§3 / §8 A2b). Read when the scheduler arms its jobs
+    """Periodic-scheduler cadence. Read when the scheduler arms its jobs
     at daemon start; an interval edit applies on the next daemon restart (a background
     cadence, so no live reload needed in v1)."""
 
     #: run a ``probe`` sweep every N hours (fan-out: one ``probe <root>`` per enabled
-    #: library root, deduped to one-per-root by the queue). Default 24 h (§8 A2b).
+    #: library root, deduped to one-per-root by the queue). Default 24 h.
     probe_interval_hours: float = 24.0
     #: master off-switch for the scheduled probe sweep (probe stays a manual CLI verb).
     probe_enabled: bool = True
@@ -192,7 +192,7 @@ class Config:
 
 # ---------------------------------------------------------------------------
 # The shipped default file. Written verbatim on first start so defaults are
-# always visible + editable (§9.2). Keep in sync with the dataclasses above.
+# always visible + editable. Keep in sync with the dataclasses above.
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG_TOML = """\
 # packrat configuration (%APPDATA%\\packrat\\config.toml)
@@ -248,14 +248,14 @@ photo_buffer_max_bytes    = 134217728   # photos above this bypass buffering (st
 retention_days = 0     # 0 = keep review audits forever; >0 = prune older (deferred knob)
 
 [schedule]
-# Background periodic jobs (§3 scheduler). Interval edits apply on the next daemon restart.
+# Background periodic jobs (scheduler). Interval edits apply on the next daemon restart.
 probe_interval_hours = 24     # run a probe sweep (one probe per enabled library root) every N hours
 probe_enabled        = true   # off-switch for the scheduled probe (probe stays a manual CLI verb)
 """
 
 
 def ensure_config(path: Path | None = None) -> Path:
-    """Create ``config.toml`` with commented defaults if it does not exist (§9.2).
+    """Create ``config.toml`` with commented defaults if it does not exist.
 
     Returns the path. Idempotent — never overwrites an existing file.
     """
@@ -271,7 +271,7 @@ def _coerce_section(cls: type, raw: dict, section_name: str) -> object:
     """Build a config dataclass from a raw TOML table.
 
     Known keys are pulled (with light type coercion); unknown keys are warned
-    about and ignored (§9.2 forward-compat). Missing keys keep their default.
+    about and ignored (forward-compat). Missing keys keep their default.
     """
     known = {f.name: f for f in fields(cls)}
     kwargs: dict[str, object] = {}
@@ -287,7 +287,7 @@ def _coerce_section(cls: type, raw: dict, section_name: str) -> object:
 def _coerce_value(f, value, dotted: str):
     """Coerce a TOML scalar/list to the field's declared type, or raise ConfigError.
 
-    A malformed value is rejected HERE (at load, naming the bad key — §9.2) rather
+    A malformed value is rejected HERE (at load, naming the bad key) rather
     than stored and detonated deep inside a running job: e.g. a scalar where an
     extension list / codec-weight table is expected would otherwise blow up later in
     ``media_exts()`` (``str | frozenset``) or the video keep-lead.
@@ -328,7 +328,7 @@ def _coerce_value(f, value, dotted: str):
 
 
 def load_config(path: Path | None = None) -> Config:
-    """Parse ``config.toml`` into a :class:`Config` (§9.2).
+    """Parse ``config.toml`` into a :class:`Config`.
 
     Missing file -> all defaults. Missing keys/sections -> per-key defaults.
     Unknown keys -> warned + ignored. Malformed TOML -> :class:`ConfigError`.

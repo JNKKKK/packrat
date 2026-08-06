@@ -1,4 +1,4 @@
-"""CLI helper units — exit-code propagation + error-detail parsing (§11).
+"""CLI helper units — exit-code propagation + error-detail parsing.
 
 The CLI is otherwise a thin daemon client (exercised via the API tests); these pin
 the two pure helpers that guard scripting/CI behavior.

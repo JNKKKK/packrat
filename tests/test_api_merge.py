@@ -1,4 +1,4 @@
-"""Daemon HTTP API for M5: /merge (§8 C).
+"""Daemon HTTP API: /merge.
 
 In-process TestClient (never binds the port), mirroring test_api_cleanup.py. Verifies
 the HTTP surface — routing, --into resolution (name / subfolder / no-library-root),

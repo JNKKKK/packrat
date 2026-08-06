@@ -1,7 +1,7 @@
-"""Roots interface (§2) — maximized root list + add-root form, pure body builders.
+"""Roots interface — maximized root list + add-root form, pure body builders.
 
-``roots_body`` builds the §2.1 list (sortable via the ``[s]`` cycle, paginated);
-``add_root_body`` builds the §2.2 register form. Both are pure (dict → lines) and
+``roots_body`` builds the list (sortable via the ``[s]`` cycle, paginated);
+``add_root_body`` builds the register form. Both are pure (dict → lines) and
 golden-frame testable; the Textual screens display them and own key routing.
 """
 
@@ -16,7 +16,7 @@ DOTKEY_WIDE = "◉ deduped   ◉ need dedup   ◐ new files probed   ○ never s
 
 def roots_body(roots: list[dict], *, now: str, geo: Geometry = REFERENCE,
                sort_mode: int = 0, cursor: int = 0, page: int = 0) -> list[str]:
-    """The §2.1 maximized root list, sorted per the ``[s]`` cycle + paginated.
+    """The maximized root list, sorted per the ``[s]`` cycle + paginated.
 
     Layout: the sort header, then one line with the dot legend (left) + ``page i/N``
     (right), then a rule, then the list filling the rest of the frame. Rows lay out
@@ -44,7 +44,7 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
                   scan: bool = True, full: bool = False,
                   focus_field: str = "path", error: str | None = None,
                   geo: Geometry = REFERENCE) -> list[str]:
-    """The §2.2 add-root (register) form body.
+    """The add-root (register) form body.
 
     Radio/checkbox glyphs reflect the current selection; ``focus_field`` (one of
     :data:`ADD_ROOT_FIELDS`) puts the ``▸`` cursor on the focused field so ``[Tab]``
@@ -52,7 +52,7 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
     path (component-plan: validate inline on Enter). The form fields are fixed-width;
     only the rule line spans ``geo``'s content width.
 
-    ``--embed`` is intentionally NOT offered — the embedding pass is deferred to M7
+    ``--embed`` is intentionally NOT offered — the embedding pass is deferred
     (a plain scan writes no embeddings), so the form exposes only the flags that do
     something today: ``scan`` and its ``--full`` re-hash. Both are togglable fields.
     """
@@ -64,7 +64,7 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
 
     # A 2-cell focus marker ("▸ " when focused, "  " otherwise) placed WITHIN each
     # field's existing indentation, so the unfocused form is byte-identical to the
-    # §2.2 mockup and every line keeps the same width (the golden-frame contract).
+    # mockup and every line keeps the same width (the golden-frame contract).
     def cur(field: str) -> str:
         return "▸ " if focus_field == field else "  "
 
@@ -104,6 +104,6 @@ def add_root_body(*, path: str = "", name: str = "", kind: str = "library",
     return lines
 
 
-# The [Tab] focus order across the add-root form fields (§2.2). `--embed` is omitted —
-# the embedding pass is deferred (M7), so the form only offers flags that do something.
+# The [Tab] focus order across the add-root form fields. `--embed` is omitted —
+# the embedding pass is deferred, so the form only offers flags that do something.
 ADD_ROOT_FIELDS = ("path", "name", "kind", "scan", "full")

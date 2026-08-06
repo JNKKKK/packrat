@@ -1,7 +1,7 @@
 """Shared test fixtures: isolate PACKRAT_HOME so tests never touch real state.
 
 Also registers a tiny test-only ``sleeper`` job — a cancellable, progress-emitting
-job used to exercise the *runtime* (submit / progress / cancel / busy / SSE) in
+job that exercises the *runtime* (submit / progress / cancel / busy / SSE) in
 ``test_jobs.py`` / ``test_api.py`` without coupling those tests to a real operation
 (``scan`` needs files + a root). It owns no root, so it never trips per-root
 exclusivity. (This replaces the removed ``demo`` job, which served the same role.)
@@ -22,7 +22,7 @@ def _run_sleeper(ctx) -> None:
     delay = float(ctx.params.get("delay_s", 0.2))
     ctx.set_total(steps)
     for i in range(steps):
-        ctx.check_cancelled()  # cooperative cancellation checkpoint (§9)
+        ctx.check_cancelled()  # cooperative cancellation checkpoint
         time.sleep(delay)
         ctx.progress(i + 1, message=f"step {i + 1}/{steps}")
 
@@ -46,7 +46,7 @@ def tiny_photos(tmp_path):
     """A folder with a few tiny real PNGs (distinct + one exact duplicate).
 
     Pure Pillow — no HEIC/video deps — so scan tests run wherever the ``media``
-    extra's decode wheels are present (all decode paths are proven by the M0 smoke
+    extra's decode wheels are present (all decode paths are proven by the smoke
     test; scan tests just need *some* decodable media + an exact-dup + a subfolder).
     """
     import numpy as np

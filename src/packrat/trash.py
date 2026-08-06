@@ -1,12 +1,12 @@
-r"""Refresh the trash collection (§6.1) — the shared trash-absorb procedure.
+r"""Refresh the trash collection — the shared trash-absorb procedure.
 
 This is the step that turns files sitting in a registered ``kind='trash'`` root
 into **permanent trashed fingerprints** and then empties the folder. It is invoked
-automatically at the start of ``cleanup`` and ``merge`` (M5), and exposed directly
+automatically at the start of ``cleanup`` and ``merge``, and exposed directly
 as the ``trash refresh`` job. Kept operation-agnostic here (like :mod:`review` /
 :mod:`matcher`) so all three consumers share one implementation.
 
-Steps (§6.1), for **every** registered trash root:
+Steps, for **every** registered trash root:
 1. Enumerate its files (same allowlist/ignore rules as scan). For each file compute
    BLAKE3 (+ perceptual signature on a *miss*, so the trashed fingerprint supports
    ``cleanup --perceptual``). Resolve against ``assets.content_hash``:
@@ -15,17 +15,17 @@ Steps (§6.1), for **every** registered trash root:
    - **matches an ``active`` asset** → flip it to ``trashed`` (retain fingerprints);
      its library-folder instances stay on disk until a ``cleanup`` removes them.
    - **matches a ``trashed`` asset** → already remembered; nothing to add.
-2. Physically remove the file (Recycle Bin — permanent on NAS/SMB, §10).
+2. Physically remove the file (Recycle Bin — permanent on NAS/SMB).
 
 **Crash-safety ordering (required):** step 1 (record → DB, committed) completes
 **before** step 2 deletes that file — never delete first, or a crash between would
 lose the trashed fingerprint. Recording is idempotent (re-hashing the same file
 yields the same asset), so a crash mid-refresh just re-processes survivors next run.
 
-**No dry-run variant (§6.1).** Putting a file in a trash folder *is* the act of
+**No dry-run variant.** Putting a file in a trash folder *is* the act of
 trashing it, so refresh always absorbs-and-empties — even when its caller
 (``cleanup``/``merge``) is running ``--dry-run``. Trash roots are **never** indexed
-by ``scan`` (§8 A2 step 1), so refresh is the only writer of trash-folder state.
+by ``scan``, so refresh is the only writer of trash-folder state.
 """
 
 from __future__ import annotations
@@ -56,9 +56,9 @@ def _new_summary() -> dict:
 
 
 def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
-    r"""Absorb + empty registered trash roots (§6.1). Returns a summary dict.
+    r"""Absorb + empty registered trash roots. Returns a summary dict.
 
-    Always runs for real (there is no dry-run refresh, §6.1). Cooperatively
+    Always runs for real (there is no dry-run refresh). Cooperatively
     cancellable at the per-file checkpoint; a cancel leaves already-processed files
     absorbed+emptied and the rest untouched (re-run re-processes survivors).
 
@@ -78,7 +78,7 @@ def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
         ]
         if not trash_roots:
             # The server validates the arg before enqueue, but the daemon is the
-            # authoritative contract (§1.6): a stale/disabled/non-trash id must not
+            # authoritative contract: a stale/disabled/non-trash id must not
             # silently fall through to an all-roots refresh.
             ctx.log(f"trash refresh: no enabled trash root with id {root_id} — nothing to absorb.")
             return summary
@@ -91,8 +91,8 @@ def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
             ctx.log("trash refresh: no trash roots registered — nothing to absorb.")
             return summary
 
-    # Enumerate every trash root up front (one scandir round-trip per directory,
-    # §10.1), then process the combined worklist so progress spans all roots.
+    # Enumerate every trash root up front (one scandir round-trip per directory),
+    # then process the combined worklist so progress spans all roots.
     worklist: list[tuple[dict, _scan.Candidate]] = []
     for root in trash_roots:
         summary["roots"] += 1
@@ -101,7 +101,7 @@ def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
         if en.root_offline:
             # Unreachable trash root (share down / drive unplugged). Skipping it is
             # safe — nothing is deleted — but it must NOT read as "absorbed and
-            # emptied": whatever is in it stays untracked (§10.1). Surface it.
+            # emptied": whatever is in it stays untracked. Surface it.
             summary["offline_roots"] = summary.get("offline_roots", 0) + 1
             ctx.log(f"trash refresh: skipped offline/unreadable trash root {root['name']!r} "
                     "(nothing absorbed from it).")
@@ -118,7 +118,7 @@ def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
         done += 1
         ctx.progress(done, message=os.path.basename(cand.path))
         # Record-then-delete: only remove the file once its fingerprint is
-        # committed (§6.1). An unreadable file was never recorded → leave it.
+        # committed. An unreadable file was never recorded → leave it.
         if recorded:
             _empty_file(cand.path, summary)
 
@@ -131,7 +131,7 @@ def refresh_trash(ctx, *, root_id: int | None = None) -> dict:
 
 
 def _absorb_file(ctx, cand: "_scan.Candidate", summary: dict) -> bool:
-    """Record one trash file's fingerprint to the trashed set (§6.1 step 1).
+    """Record one trash file's fingerprint to the trashed set.
 
     Returns True if the fingerprint is committed (so the file may now be deleted),
     False if the bytes could not even be read (leave the file in place, report it).
@@ -170,7 +170,7 @@ def _absorb_file(ctx, cand: "_scan.Candidate", summary: dict) -> bool:
 
 
 def _create_trashed_asset(db, fp: media.Fingerprint) -> None:
-    """Insert a new ``status='trashed'`` asset + its perceptual rows (§6.1).
+    """Insert a new ``status='trashed'`` asset + its perceptual rows.
 
     Idempotent on ``content_hash`` (``ON CONFLICT DO NOTHING``): a crash-then-re-run
     that re-hashes a not-yet-deleted file becomes a hit (``already_trashed``), never a
@@ -195,17 +195,17 @@ def _create_trashed_asset(db, fp: media.Fingerprint) -> None:
 
 
 def _empty_file(path: str, summary: dict) -> None:
-    """Move an absorbed trash file to the Recycle Bin (§6.1 step 2).
+    """Move an absorbed trash file to the Recycle Bin.
 
     Its fingerprint is already committed, so a delete that fails (locked / permission
     denied) is non-fatal — leave the file and report it; a later refresh retries the
-    delete (a DB no-op). Permanent on a NAS/SMB trash root (no Recycle Bin, §10).
+    delete (a DB no-op). Permanent on a NAS/SMB trash root (no Recycle Bin).
 
     **Network fallback:** Windows provides no Recycle Bin for network locations, so
-    ``send2trash`` may *error* there rather than hard-delete (§10). Since §6.1 mandates
-    that a trash root is emptied — and permanently on NAS/SMB anyway — a recycle failure
+    ``send2trash`` may *error* there rather than hard-delete. Since a trash root must
+    be emptied — and permanently on NAS/SMB anyway — a recycle failure
     on a **network path** falls back to a permanent ``os.remove``. On a LOCAL volume a
-    failure is a genuine problem (locked file), so leave it and report it, as before.
+    failure is a genuine problem (locked file), so leave it and report it.
     """
     try:
         shortcuts.recycle(path)
@@ -216,7 +216,7 @@ def _empty_file(path: str, summary: dict) -> None:
     except Exception as exc:  # noqa: BLE001 - never block the whole refresh on one stuck file
         recycle_err = exc
     # Recycle failed. On a network share (no Recycle Bin) empty it permanently — that's
-    # exactly what §6.1/§10 promise for NAS trash; anywhere else, leave + report it.
+    # exactly what NAS trash requires; anywhere else, leave + report it.
     if fsutil.is_network_path(path):
         try:
             os.remove(fsutil.extended(path))

@@ -1,6 +1,6 @@
-"""Unit tests for the pure navigation state machine (component-plan §Nav).
+"""Unit tests for the pure navigation state machine.
 
-The focus→maximize table (§focus model) is pure logic — tested here without a
+The focus→maximize table is pure logic — tested here without a
 Textual pilot. The live end-to-end drive is in ``test_tui_app.py``.
 """
 

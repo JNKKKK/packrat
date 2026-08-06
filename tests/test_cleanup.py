@@ -1,4 +1,4 @@
-r"""cleanup (§6.2) — remove trashed content from a library folder.
+r"""cleanup — remove trashed content from a library folder.
 
 Default mode is exact-hash removal (the CLI does the count-confirm; the handler's
 ``apply`` submode does the deletion). ``--perceptual`` is a stateful analyze→confirm
@@ -132,7 +132,7 @@ def test_cleanup_rejects_trash_root(queue_and_db, tmp_path):
 
 
 def test_cleanup_held_by_pending_dedup(queue_and_db, tmp_path):
-    """§3/§6.2: a cleanup on a root under a pending dedup is ENQUEUED + held, not rejected.
+    """A cleanup on a root under a pending dedup is ENQUEUED + held, not rejected.
 
     Every root-touching cleanup op (perceptual analyze AND exact preview) declares the
     root, so the dequeue gate holds it in the backlog until the dedup run clears.
@@ -185,7 +185,7 @@ def test_cleanup_preview_counts_exact_trash(queue_and_db, tmp_path):
 
 def test_cleanup_mode_less_apply_is_rejected(queue_and_db, tmp_path):
     """A mode-less cleanup that would DELETE must error, not silently exact-delete
-    (§6.2 no bare default). The daemon is the authoritative contract (§1.6)."""
+    (no bare default). The daemon is the authoritative contract."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -243,7 +243,7 @@ def test_cleanup_perceptual_stage_confirm_deletes(queue_and_db, tmp_path):
     jid = _run(q, database, "cleanup", root_id=root["id"], mode="perceptual")
     run = _run_row(database, root["id"])
     assert run is not None and run["stage"] == 1
-    # The analyze job's result carries review_status='pending' (like dedup) so the M6
+    # The analyze job's result carries review_status='pending' (like dedup) so the
     # TUI card / Review box detect the awaiting-review state and offer [o]/[g]/[k].
     rj = json.loads(database.query_one("SELECT result_json FROM jobs WHERE id=?", (jid,))["result_json"])
     assert rj["op"] == "cleanup" and rj["review_status"] == "pending"
@@ -362,7 +362,7 @@ def test_cleanup_perceptual_confirm_aborts_if_folder_missing(queue_and_db, tmp_p
 # refresh interaction + dry-run
 # ---------------------------------------------------------------------------
 def test_cleanup_refreshes_trash_first(queue_and_db, tmp_path):
-    """cleanup runs refresh-trash first, so a just-dropped trash file is absorbed (§6.2)."""
+    """cleanup runs refresh-trash first, so a just-dropped trash file is absorbed."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()
@@ -385,7 +385,7 @@ def test_cleanup_refreshes_trash_first(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# reconcile — an interrupted cleanup analyze rolls back (inherited from M3, §3)
+# reconcile — an interrupted cleanup analyze rolls back (inherited)
 # ---------------------------------------------------------------------------
 def test_reconcile_rolls_back_interrupted_cleanup_analyze(queue_and_db, tmp_path):
     q, database = queue_and_db
@@ -415,7 +415,7 @@ def test_reconcile_rolls_back_interrupted_cleanup_analyze(queue_and_db, tmp_path
 
 
 def test_reconcile_keeps_interrupted_cleanup_confirm_pending(queue_and_db, tmp_path):
-    """An interrupted cleanup --confirm stays pending for an idempotent --confirm re-run (§3)."""
+    """An interrupted cleanup --confirm stays pending for an idempotent --confirm re-run."""
     q, database = queue_and_db
     from packrat.jobs.reconcile import reconcile_on_startup
 
@@ -455,7 +455,7 @@ def test_cleanup_dry_run_refreshes_but_deletes_nothing(queue_and_db, tmp_path):
     logs = _run_capture(q, database, "cleanup", root_id=root["id"], mode="exact", dry_run=True)
     blob = "\n".join(logs)
     assert "dry-run" in blob
-    # Refresh ran for real (§6.1): the active asset was flipped to trashed …
+    # Refresh ran for real: the active asset was flipped to trashed …
     assert database.query_one(
         "SELECT status FROM assets WHERE id=(SELECT asset_id FROM file_instances WHERE filename='junk.png')"
     )["status"] == "trashed"
@@ -464,7 +464,7 @@ def test_cleanup_dry_run_refreshes_but_deletes_nothing(queue_and_db, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# --undecodable mode (§9.1)
+# --undecodable mode
 # ---------------------------------------------------------------------------
 def _make_undecodable(database, root_id, lib, name):
     """Create an undecodable asset + a live instance at ``lib/name`` (bytes exist, no PDQ)."""
@@ -555,7 +555,7 @@ def test_status_drops_undecodable_after_cleanup(queue_and_db, tmp_path):
 
 
 def test_cleanup_undecodable_does_not_refresh_trash(queue_and_db, tmp_path):
-    """--undecodable targets the folder's own bad files — it must NOT run trash refresh (§9.1)."""
+    """--undecodable targets the folder's own bad files — it must NOT run trash refresh."""
     q, database = queue_and_db
     lib = tmp_path / "lib"
     lib.mkdir()

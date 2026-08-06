@@ -1,4 +1,4 @@
-"""roots register: validation, overlap, unique-name, resolution (§8 A1, §11)."""
+"""roots register: validation, overlap, unique-name, resolution."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def test_root_holder_pending_review(database, tmp_path):
 
 
 def test_root_holder_open_merge_and_ignore_merge(database, tmp_path):
-    """An open merge_run holds the root — but ignore_merge=True (a resuming merge) skips it (§8 C)."""
+    """An open merge_run holds the root — but ignore_merge=True (a resuming merge) skips it."""
     folder = tmp_path / "x"
     folder.mkdir()
     row = register(database, str(folder))
@@ -165,7 +165,7 @@ def test_root_holder_open_merge_and_ignore_merge(database, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# resolve_dest (merge --into, §8 C Phase 0 step 2) — containment, path-first
+# resolve_dest (merge --into) — containment, path-first
 # ---------------------------------------------------------------------------
 def test_resolve_dest_by_name_and_subfolder(database, tmp_path):
     lib = tmp_path / "Lib"

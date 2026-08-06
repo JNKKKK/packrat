@@ -44,7 +44,7 @@ def test_reltime_today_clock():
 
 
 def test_reltime_matches_mockup_camera_dedup():
-    # §2.1: Camera "deduped Jul 12"; iPhone "deduped today"
+    # Camera "deduped Jul 12"; iPhone "deduped today"
     cam = next(r for r in fixtures.ROOTS if r["name"] == "Camera")
     assert reltime(cam["last_dedup_at"], NOW) == "Jul 12"
 

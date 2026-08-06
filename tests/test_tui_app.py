@@ -1,7 +1,7 @@
 """Live app tests — drive the Textual pilot to assert navigation + rendering.
 
 State-transition tests for the focus→maximize table and the drill-in/back-out
-screen stack (component-plan §Testing), plus the modal result plumbing. Run the
+screen stack, plus the modal result plumbing. Run the
 async pilot from a sync test via ``asyncio.run`` so no pytest-asyncio plugin is
 needed. The app runs in ``offline`` mode (fixtures), so these need no daemon.
 """
@@ -116,7 +116,7 @@ def test_dashboard_hoard_count_matches_gem_color():
     _drive(scenario)
 
 
-# --- focus → maximize table (§focus model) --------------------------------
+# --- focus → maximize table --------------------------------
 def test_focus_then_maximize_roots():
     async def scenario(app, pilot):
         await pilot.press("r")
@@ -430,7 +430,7 @@ class _FakeClient:
         # `for ev in stream_job(...)` loop just exhausts and proceeds to count — same as a
         # clean terminal. Crucially we must NOT yield a terminal 'done' here: the app's
         # `_track_running` streams the RUNNING job too, and a terminal event would trigger
-        # `refresh_data` → re-attach → refetch storm (the SSE reconnect loop, §3).
+        # `refresh_data` → re-attach → refetch storm (the SSE reconnect loop).
         self.calls.append(("stream_job", job_id))
         return
         yield  # noqa: unreachable — makes this a generator
@@ -524,7 +524,7 @@ def test_queue_cancel_submits_online():
 
 def test_run_verb_refused_while_modal_on_top():
     """A no-confirm action (run_verb) that bubbles from a background screen while a
-    modal is open must NOT fire a real daemon submit underneath it (§1.6 modal guard)."""
+    modal is open must NOT fire a real daemon submit underneath it (modal guard)."""
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")
         assert _screen(app) == "RootDetailScreen"
@@ -641,7 +641,7 @@ def test_daemon_down_renders_dashboard_not_crash():
 def test_queuemax_poll_skips_history_refetch_when_live_set_unchanged():
     """QueueMax refetches its history page on a poll ONLY when the live (running/queued)
     set changed — between job finishes the terminal history is identical, so we skip the
-    round-trip. Efficiency guard (F5 follow-up)."""
+    round-trip. Efficiency guard."""
     from packrat.tui import demo
     from packrat.tui.frames import QueueMax
 
@@ -686,7 +686,7 @@ def test_queuemax_poll_skips_history_refetch_when_live_set_unchanged():
 def test_refresh_live_daemon_down_synchronous_path_does_not_crash():
     """The SYNCHRONOUS refresh_live path (unmounted app / no event loop) must survive a
     daemon-down fetch. _get_live() returns None on failure and the non-loop branch feeds
-    it straight to _apply_live — which used to crash on None.get (regression F1)."""
+    it straight to _apply_live — handling a None live payload without crashing."""
     app = PackratApp(client=_DownClient(), offline=False)
     # Unmounted → _app_loop_running() is False → refresh_live takes the synchronous
     # branch: _apply_live(_get_live()) with _get_live() → None (daemon unreachable).
@@ -782,7 +782,7 @@ def test_cleanup_undecodable_submits_apply_not_just_preview():
 
 def test_cleanup_exact_refreshes_then_submits_apply():
     """[c] → trash-exact: the TUI first runs the PREVIEW job (which refreshes the trash
-    collection, §6.1) + streams it to done, THEN count-confirms and submits apply=True —
+    collection) + streams it to done, THEN count-confirms and submits apply=True —
     mirroring the CLI so a freshly-dropped trash file is absorbed before deletion."""
     async def scenario(app, pilot):
         await pilot.press("r"); await pilot.press("r"); await pilot.press("enter")

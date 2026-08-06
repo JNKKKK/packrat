@@ -1,4 +1,4 @@
-"""The JobCard screen (M6, §12) — see :mod:`packrat.tui.frames.base`."""
+"""The JobCard screen — see :mod:`packrat.tui.frames.base`."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .base import FrameScreen, _open_in_explorer
 
 
 # ---------------------------------------------------------------------------
-# Job result / detail card (§5)
+# Job result / detail card
 # ---------------------------------------------------------------------------
 class JobCard(FrameScreen):
     BINDINGS = [
@@ -33,7 +33,7 @@ class JobCard(FrameScreen):
         self.problems_scroll = 0
 
     def on_mount(self) -> None:
-        # A terminal scan card lists its problem files (paths + reasons, §12); fetch
+        # A terminal scan card lists its problem files (paths + reasons); fetch
         # them once (they don't change for a finished job) BEFORE the first frame.
         self._load_problems()
         super().on_mount()
@@ -52,7 +52,7 @@ class JobCard(FrameScreen):
         open/confirm/cancel), ``'advanced'`` (a later stage is pending: open/cancel
         only), or ``None`` (no review actions). Reconciled by the data layer against the
         live ``review_runs`` row, so a stale analyze/confirm card never offers actions
-        for a stage that was already confirmed or a run that finished (§8 B)."""
+        for a stage that was already confirmed or a run that finished."""
         return jobcard.review_ui(self.job)
 
     def _pending(self) -> bool:
@@ -108,7 +108,7 @@ class JobCard(FrameScreen):
             self.refresh_frame()
 
     def _back(self) -> None:
-        """Pop this card back to the interface that opened it (§5).
+        """Pop this card back to the interface that opened it.
 
         Every JobCard action reports via a toast (``run_verb``/``confirm_verb``) and
         then returns here so the user lands back on the screen they came from — the
@@ -142,7 +142,7 @@ class JobCard(FrameScreen):
 
     def _review_network_count(self, root: str) -> int:
         """How many of the pending review's current-stage delete candidates sit on a
-        network share (permanent delete — §10). Read from the live root detail; any
+        network share (permanent delete). Read from the live root detail; any
         failure → 0 (no warning, never blocks the confirm)."""
         try:
             detail = self.app.root_detail(root)

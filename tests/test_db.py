@@ -1,4 +1,4 @@
-"""Schema constraints: CASCADE, partial-unique review/merge, edge ordering (§4)."""
+"""Schema constraints: CASCADE, partial-unique review/merge, edge ordering."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def test_init_db_is_idempotent(packrat_home, tmp_path):
 
 
 def test_added_columns_retrofit_onto_legacy_roots(packrat_home, tmp_path):
-    """The pre-release live-DB patch (§4, no migration runner): init_db `ALTER TABLE …
+    """The pre-release live-DB patch (no migration runner): init_db `ALTER TABLE …
     ADD COLUMN`s the additive columns (roots' last_probe_at/probe_new_count/needs_dedup;
     scan_results.moved) onto tables that predate them, defaulting existing rows to current
     behavior (counts/flags 0/NULL). Simulates the real upgrade path a live catalog takes."""

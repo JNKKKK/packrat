@@ -1,15 +1,15 @@
-r"""The ``scan`` job (§8 A2) — walk a registered root and fingerprint it.
+r"""The ``scan`` job — walk a registered root and fingerprint it.
 
 Scan is purely **per-asset**: for each file it writes the content hash (identity),
-metadata, and the M2 perceptual signature (photo PDQ / video per-frame PDQ). It
+metadata, and the perceptual signature (photo PDQ / video per-frame PDQ). It
 resolves **exact** byte-identity (a second file of the same bytes becomes another
 ``file_instance`` of one asset) but computes **no** near-dup relationships — that
-is ``dedup`` (M3). No embeddings unless ``--embed`` (the pass itself is M7).
+is ``dedup``. No embeddings unless ``--embed`` (the pass itself is deferred).
 
-Shape of a pass (mapped to §8 A2):
+Shape of a pass:
 - **Phase 1 — enumerate.** Resolve the root (reject trash roots; honor per-root
   exclusivity), walk it with the root's ignore set, and record which directories
-  were *cleanly* enumerated (the deletion-detection guard, §10.1).
+  were *cleanly* enumerated (the deletion-detection guard).
 - **Phase 2 — per file.** Fast-path skip (path + exact size + tolerant mtime, and
   the asset already "fully fingerprinted"); else hash, resolve against
   ``assets.content_hash`` (attach instance on a hit, create on a miss, backfill a
@@ -19,7 +19,7 @@ Shape of a pass (mapped to §8 A2):
   touched, *and* whose parent directory was cleanly enumerated, has its row
   deleted; an ``active`` asset left with zero instances is forgotten (cascade).
 
-**Concurrency — two engines, split by medium (§10.1, § profiler findings):**
+**Concurrency — two engines, split by medium (profiler findings):**
 
 - **Photos → producer/consumer pipeline** (:func:`_run_photo_pipeline`).
   ``smb.io_workers`` producer threads read each whole photo file into memory
@@ -111,7 +111,7 @@ class Candidate:
 class Enumeration:
     candidates: list[Candidate] = field(default_factory=list)
     #: normcase'd canonical dirs whose *subtree* must NOT be reconciled this pass —
-    #: either a listing errored (NAS blip, §10.1) or the dir was ignore-pruned. A
+    #: either a listing errored (NAS blip) or the dir was ignore-pruned. A
     #: genuinely-deleted folder is NOT here (its parent listed cleanly and simply
     #: didn't contain it), so its instances still get forgotten. See is_suppressed.
     suppressed: set[str] = field(default_factory=set)
@@ -127,7 +127,7 @@ class Enumeration:
 
 
 def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
-    r"""Walk ``root_path`` applying the ignore set (§8 A2 step 2, §10.1).
+    r"""Walk ``root_path`` applying the ignore set.
 
     Uses ``os.scandir`` (one batched directory round-trip, ``DirEntry`` caches
     ``stat`` on Windows). Directories we could **not** authoritatively read — a
@@ -135,15 +135,15 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
     ``suppressed``; deletion-detection then skips any instance under a suppressed
     subtree, so a NAS blip or an ignore rule never reads as "files deleted". A
     folder that was actually *deleted* is not suppressed (its parent enumerated
-    cleanly), so its now-gone instances are correctly reconciled (§8 A2 step 11).
+    cleanly), so its now-gone instances are correctly reconciled.
     """
     en = Enumeration()
     canon_root = fsutil.canonicalize(root_path)  # plain, prefix-free — the stored form
     # (canon_dir, rel_dir) work stack; rel_dir is "" at the root. We scandir the
     # *extended* form of canon_dir but store/compare the plain canonical path so
-    # equality with the fast-path/deletion queries is well-defined (§4, §8 A1).
+    # equality with the fast-path/deletion queries is well-defined.
     stack: list[tuple[str, str]] = [(canon_root, "")]
-    # If the very first listing fails the whole root is offline (§4 whole-root guard).
+    # If the very first listing fails the whole root is offline (whole-root guard).
     first = True
     while stack:
         canon_dir, rel_dir = stack.pop()
@@ -163,10 +163,10 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
             except OSError as exc:
-                # A per-entry error (NAS blip, §10.1) means we can't authoritatively
+                # A per-entry error (NAS blip) means we can't authoritatively
                 # classify this entry. Suppress the CONTAINING directory's subtree so
                 # deletion-detection never mistakes an unreadable file/subtree for a
-                # deletion and forgets its fingerprints (the §10.1 fail-safe applied at
+                # deletion and forgets its fingerprints (the fail-safe applied at
                 # entry granularity, not just whole-directory-listing granularity).
                 log.warning("entry error under %s (%s): %s — suppressing subtree",
                             canon_dir, entry.name, exc)
@@ -191,7 +191,7 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
             except OSError as exc:
                 # Couldn't read this file's metadata this pass (NAS blip). The file may
                 # well still exist, so suppress the containing directory rather than let
-                # deletion-detection forget its instance on incomplete data (§10.1).
+                # deletion-detection forget its instance on incomplete data.
                 log.warning("stat error under %s (%s): %s — suppressing subtree",
                             canon_dir, entry.name, exc)
                 en.suppressed.add(os.path.normcase(canon_dir))
@@ -207,10 +207,10 @@ def enumerate_root(root_path: str, ignore: IgnoreSet) -> Enumeration:
 
 
 # ---------------------------------------------------------------------------
-# fast-path predicate (§8 A2 step 4)
+# fast-path predicate
 # ---------------------------------------------------------------------------
 def _asset_fully_fingerprinted(undecodable: int, media_type: str, has_phash: int, has_vphash: int) -> bool:
-    """The "fully fingerprinted" predicate (§8 A2 step 4, authoritative).
+    """The "fully fingerprinted" predicate (authoritative).
 
     ``undecodable`` assets are complete by design (hash-only, no perceptual — only
     ``--full`` retries them). Otherwise the media type's perceptual rows must exist.
@@ -226,8 +226,8 @@ def _asset_fully_fingerprinted(undecodable: int, media_type: str, has_phash: int
 def load_existing_instances(db, root_id: int, profiler=NULL_PROFILER) -> dict[str, dict]:
     """Preload a root's ``file_instances`` + their assets' fingerprint-completeness.
 
-    Returns a dict keyed by ``normcase(path)`` — the in-memory fast-path lookup table
-    (§8 A2 step 4), so neither scan nor probe pays a per-file DB round-trip. Each value
+    Returns a dict keyed by ``normcase(path)`` — the in-memory fast-path lookup table,
+    so neither scan nor probe pays a per-file DB round-trip. Each value
     carries ``fid``/``path``/``size``/``mtime``/``asset_id`` plus
     ``undecodable``/``media_type``/``has_phash``/``has_vphash`` so :func:`is_fastpath_hit`
     can apply the "fully fingerprinted" test. **Shared** by ``scan`` (skip
@@ -249,7 +249,7 @@ def load_existing_instances(db, root_id: int, profiler=NULL_PROFILER) -> dict[st
 
 
 def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
-    """True if ``cand`` matches a *known, unchanged, fully-fingerprinted* instance (§8 A2 step 4).
+    """True if ``cand`` matches a *known, unchanged, fully-fingerprinted* instance.
 
     ``rec`` is a :func:`load_existing_instances` row (``None`` → no known instance at this
     path → not a hit). "Unchanged" = exact ``size`` + ``mtime`` within ``tol``; the asset
@@ -260,7 +260,7 @@ def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
 
     NB the bound is on *files touched*, not *bytes hashed*: a moved file fails this
     predicate (its new path has no row), so probe counts it new/changed, but scan may
-    then relink it with **zero** byte work (:func:`plan_moves`, §8 A2 step 4a). Probe
+    then relink it with **zero** byte work (:func:`plan_moves`). Probe
     firing is still correct — a move genuinely needs a scan to fix the stored path — it
     just no longer lower-bounds re-fingerprinting.
     """
@@ -277,7 +277,7 @@ def is_fastpath_hit(rec: dict | None, cand: "Candidate", tol: float) -> bool:
 
 def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
                en: "Enumeration", tol: float) -> dict[str, dict]:
-    r"""Classify path-absent candidates that are safe **moves** (§8 A2 step 4a).
+    r"""Classify path-absent candidates that are safe **moves**.
 
     A moved file fails :func:`is_fastpath_hit` (its new path has no DB row), so the plain
     pipeline would re-hash it over the network just to rediscover a known asset. When we
@@ -296,7 +296,7 @@ def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
        holder — live or gone — makes the bucket non-unique here.
     2. **The sole holder is gone, not merely unreadable.** ``origin``'s path was NOT
        enumerated this pass (so it's a deletion candidate) AND is not under a suppressed
-       (errored/ignored) subtree (§10.1) — an unreadable origin's file may still exist, so
+       (errored/ignored) subtree — an unreadable origin's file may still exist, so
        repointing it would relocate a row whose bytes are still on disk.
     3. **mtime corroborates** within ``tol`` (the same tolerant window as the fast-path).
     4. **The origin asset is fully fingerprinted** — else fall through so the miss path
@@ -305,8 +305,8 @@ def plan_moves(candidates: list["Candidate"], existing: dict[str, dict],
        bucket (``C`` itself) — if a file was copied into two new spots only one can be the
        move, so hash them all rather than pick arbitrarily.
     6. **The origin asset is `active`, not `trashed`.** A moved file of a *trashed* asset
-       is a trash re-appearance the banner must report as ``matches_trashed`` (§8 A2 Phase
-       4) — a metadata-only relink would silently drop that signal. Trashed origins are
+       is a trash re-appearance the banner must report as ``matches_trashed`` — a
+       metadata-only relink would silently drop that signal. Trashed origins are
        rare (short-lived until a `cleanup`), so falling through to the hash path (which
        hits the trashed asset and counts it correctly) costs almost nothing.
 
@@ -383,11 +383,11 @@ def _insert_perceptual(conn, asset_id: int, fp: media.Fingerprint) -> None:
 
 
 def _upsert_instance(conn, asset_id: int, root_id: int, cand: Candidate, seen_at: str) -> None:
-    """Insert/repoint the instance at ``(root_id, path)`` to ``asset_id`` (§8 A2 step 6).
+    """Insert/repoint the instance at ``(root_id, path)`` to ``asset_id``.
 
     If this **repoints** an existing row from another asset (an in-place content
     edit: same path, new bytes → new/other asset), the prior asset may be left
-    with zero instances — forget it here if it is ``active`` (§4: a plain edit is
+    with zero instances — forget it here if it is ``active`` (a plain edit is
     not trash), in the same transaction so the reconcile is atomic. Deletion
     detection (Phase 3) can't catch this case: it keys off the *path*, which is
     still present, just bound to a different asset now.
@@ -412,7 +412,7 @@ def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_
 
     Returns True if this call created the asset (a genuine new asset), False if it
     lost a race to a concurrent worker with identical bytes (then it only attaches
-    the instance — the winner wrote the perceptual rows). §8 A2 step 9.
+    the instance — the winner wrote the perceptual rows).
     """
     with db.transaction() as conn:
         cur = conn.execute(
@@ -430,7 +430,7 @@ def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_
             _insert_perceptual(conn, asset_id, fp)
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
         # A genuinely new, DECODABLE asset is new dedup-able content in this root → mark it
-        # dedup-dirty (§12 rung 3 ◉ yellow) in the SAME transaction as the asset write, so
+        # dedup-dirty (rung 3 ◉ yellow) in the SAME transaction as the asset write, so
         # it is crash-atomic: an interrupted scan that commits the asset can't leave the
         # signal unset (a resume then fast-path-skips the asset → the end-of-loop write
         # would never re-set it → the root would wrongly read ◉ green). A new UNDECODABLE
@@ -443,7 +443,7 @@ def _persist_new(db, root_id: int, cand: Candidate, fp: media.Fingerprint, seen_
 
 def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: media.Fingerprint,
                       seen_at: str, *, asset_status: str = "active") -> None:
-    """Update an existing asset in place with freshly-computed perceptual data (§8 A2 step 6 backfill).
+    """Update an existing asset in place with freshly-computed perceptual data (backfill).
 
     ``asset_status`` is the pre-backfill ``assets.status`` — it gates the dedup-dirty
     signal (a TRASHED asset's backfill is not new *active* dedup-able content: dedup only
@@ -459,9 +459,9 @@ def _persist_backfill(db, asset_id: int, root_id: int, cand: Candidate, fp: medi
         conn.execute("DELETE FROM vphash WHERE asset_id=?", (asset_id,))
         _insert_perceptual(conn, asset_id, fp)
         _upsert_instance(conn, asset_id, root_id, cand, seen_at)
-        # A backfill fills in an ACTIVE asset's previously-missing perceptual rows → it is
-        # now dedup-able where it wasn't → mark the root dedup-dirty, in-transaction (§12
-        # rung 3; crash-atomic, same rationale as _persist_new — a resume fast-path-skips
+        # A backfill fills in an ACTIVE asset's missing perceptual rows → it is
+        # now dedup-able where it wasn't → mark the root dedup-dirty, in-transaction
+        # (rung 3; crash-atomic, same rationale as _persist_new — a resume fast-path-skips
         # the now-fingerprinted asset). Excluded: an UNDECODABLE fill (gains no phash) and a
         # TRASHED asset (dedup ignores trash — a reappearing trash file is not new work).
         if not fp.undecodable and asset_status != "trashed":
@@ -474,14 +474,14 @@ def _attach_instance(db, asset_id: int, root_id: int, cand: Candidate, seen_at: 
 
 
 def _repoint_moved(conn, fid: int, cand: Candidate, seen_at: str) -> None:
-    r"""Relink a *moved* file's existing instance row to its new path (§8 A2 step 4a).
+    r"""Relink a *moved* file's existing instance row to its new path.
 
     The origin instance ``fid`` was proven a move of ``cand`` by :func:`plan_moves`, so we
     update the SAME row in place — new ``path``/``filename``, bumped ``last_seen_at`` — with
     NO byte work: the asset (hash + perceptual) is unchanged, only its location moved.
     ``size``/``mtime`` are left as stored (as the same-path fast-path does; a move preserves
     both within tolerance). Deliberately does NOT touch ``roots.needs_dedup``: a move adds no
-    new dedup-able content (same asset), so a fully-deduped root stays ◉ green (§12).
+    new dedup-able content (same asset), so a fully-deduped root stays ◉ green.
 
     Takes a raw ``conn`` (not the ``Database`` wrapper) so the caller can batch every
     relink into ONE transaction — one commit for the whole move set, not per row."""
@@ -531,7 +531,7 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
         return "undecodable" if fp.undecodable else "new"
 
     asset_id = int(asset["id"])
-    # Backfill (§8 A2 step 6): (a) not-yet-fingerprinted, or (b) undecodable + --full.
+    # Backfill: (a) not-yet-fingerprinted, or (b) undecodable + --full.
     complete = _asset_fully_fingerprinted(
         asset["undecodable"], asset["media_type"], asset["has_phash"], asset["has_vphash"]
     )
@@ -551,7 +551,7 @@ def _resolve_and_persist(ctx, root_id, cand, content_hash, decode, full, seen_at
             return "matches_trashed"
         return "backfilled"
 
-    # Plain exact-dup hit — attach the instance and stop (§8 A2 step 6 / Phase 4).
+    # Plain exact-dup hit — attach the instance and stop.
     with profiler.timer("shared", "db"):
         _attach_instance(db, asset_id, root_id, cand, seen_at)
     profiler.file_done(medium)
@@ -641,7 +641,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     fastpath_fids: list[int] = []
     tol = ctx.config.fastpath.mtime_tolerance_s
 
-    # Move detection (§8 A2 step 4a): a path-absent candidate that provably relocates a
+    # Move detection: a path-absent candidate that provably relocates a
     # gone instance is repointed (no re-hash). Skipped under --full (re-hash is forced).
     # Keyed by normcase(new path) → the origin `existing` record.
     moves = {} if full else plan_moves(en.candidates, existing, en, tol)
@@ -671,7 +671,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
         report["would_index"] = len(to_process)
         return report, done + len(en.candidates)
 
-    # Fast-path bumps advance progress without any byte work (§8 A2 step 4).
+    # Fast-path bumps advance progress without any byte work.
     with profiler.timer("shared", "db"):
         for i in range(0, len(fastpath_fids), 900):
             chunk = fastpath_fids[i : i + 900]
@@ -683,7 +683,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     if report["skipped_fastpath"]:
         ctx.progress(done, message=f"{report['skipped_fastpath']} unchanged")
 
-    # Repoint moved files (metadata-only, §8 A2 step 4a) — also advances progress with no
+    # Repoint moved files (metadata-only) — also advances progress with no
     # byte work, on the main thread before the worker pools spin up. One transaction for
     # the whole batch (like the fast-path bump's chunked UPDATE above), so a large
     # reorganization is ~1 commit, not one fsync per relinked file.
@@ -717,7 +717,7 @@ def _scan_one_root(ctx: JobContext, root_row: dict, en: "Enumeration", *, full: 
     _run_photo_pipeline(ctx, root_id, photos, full, seen_at, profiler, _record, collector)
     _run_streamed(ctx, root_id, others, full, seen_at, profiler, _record, collector)
 
-    # Phase 3 — deletion detection (guarded per-subtree, §8 A2 step 11, §10.1).
+    # Phase 3 — deletion detection (guarded per-subtree).
     if not en.root_offline:
         _detect_deletions(ctx, root_id, existing, seen_fids, en, report)
 
@@ -743,7 +743,7 @@ def _run_streamed(ctx, root_id, cands, full, seen_at, profiler, record, collecto
 
 
 def _run_photo_pipeline(ctx, root_id, cands, full, seen_at, profiler, record, collector) -> None:
-    """Producer/consumer photo pipeline (§ decouple I/O from CPU concurrency).
+    """Producer/consumer photo pipeline (decouple I/O from CPU concurrency).
 
     ``io_workers`` producer threads read whole photo files into a **bounded** queue
     (memory backpressure); ``cpu_workers`` consumers hash + decode + PDQ from the
@@ -873,8 +873,8 @@ def _detect_deletions(ctx, root_id, existing, seen_fids, en: "Enumeration", repo
     """Forget instances gone from disk, unless under a suppressed (errored/pruned) subtree.
 
     An instance this pass never touched is a deletion candidate; we skip it only if
-    its path lies under a subtree we couldn't authoritatively read (§10.1). Then any
-    ``active`` asset left with zero instances is forgotten (§4 / §8 A2 step 11).
+    its path lies under a subtree we couldn't authoritatively read. Then any
+    ``active`` asset left with zero instances is forgotten.
     """
     db = ctx.db
     gone: list[dict] = []
@@ -903,7 +903,7 @@ def _detect_deletions(ctx, root_id, existing, seen_fids, en: "Enumeration", repo
 
 
 # ---------------------------------------------------------------------------
-# job handler (§8 A2)
+# job handler
 # ---------------------------------------------------------------------------
 def _run_scan(ctx: JobContext) -> None:
     params = ctx.params
@@ -912,7 +912,7 @@ def _run_scan(ctx: JobContext) -> None:
     dry_run = bool(params.get("dry_run"))
     is_all = bool(params.get("all"))
     profiler = ScanProfiler() if params.get("profile") else NULL_PROFILER
-    collector = ScanReport()  # always-on problem-file capture (persisted per §scan-results)
+    collector = ScanReport()  # always-on problem-file capture (persisted to scan_results)
     db = ctx.db
     seen_at = now_iso()
 
@@ -928,7 +928,7 @@ def _run_scan(ctx: JobContext) -> None:
     reports: list[dict] = []
     skipped_roots: list[dict] = []
 
-    # Filter out trash/busy roots, then enumerate each survivor once (§10.1: one
+    # Filter out trash/busy roots, then enumerate each survivor once (one
     # round-trip per directory). We keep each Enumeration so we don't walk twice.
     plan: list[tuple[dict, Enumeration]] = []
     for root_row in target_rows:
@@ -937,7 +937,7 @@ def _run_scan(ctx: JobContext) -> None:
                 skipped_roots.append({"name": root_row["name"], "reason": "trash root (never scanned)"})
                 continue
             raise ValueError(
-                f"{root_row['name']!r} is a trash root; scan never indexes trash folders (§6.1)"
+                f"{root_row['name']!r} is a trash root; scan never indexes trash folders"
             )
         holder = roots.root_holder(db, int(root_row["id"]))
         if holder is not None:
@@ -953,7 +953,7 @@ def _run_scan(ctx: JobContext) -> None:
         plan.append((root_row, en))
 
     if embed:
-        ctx.log("note: --embed pass is deferred to M7; scan wrote no embeddings.")
+        ctx.log("note: --embed pass is deferred; scan wrote no embeddings.")
 
     if not dry_run:
         ctx.set_total(sum(len(en.candidates) for _row, en in plan))
@@ -968,15 +968,15 @@ def _run_scan(ctx: JobContext) -> None:
         # Post-scan roots writes — only for a completed scan of a REACHABLE root. Dry-run
         # returns above; an interrupted/failed scan raises out of _scan_one_root before
         # here, so it writes nothing. An OFFLINE root is skipped: an unreachable pass
-        # fingerprinted nothing and ran no deletion-detection (§8 A2 step 11 / §10.1), so it
+        # fingerprinted nothing and ran no deletion-detection, so it
         # must not read as "full-scanned" or "clean" — the same reason probe writes nothing
-        # offline (§8 A2b). (Before the offline guard, `--full` stamped last_full_scan_at on
+        # offline. (Without the offline guard, `--full` would stamp last_full_scan_at on
         # a root whose enumeration failed, recording a full scan that never happened.)
         if not dry_run and not rep.get("root_offline"):
             # NB: the dedup-dirty signal (roots.needs_dedup) is NOT set here — it is set
             # per-file, in the SAME transaction as each new/backfilled asset write
             # (_persist_new / _persist_backfill), so an interrupted scan that committed new
-            # content can't leave it unset (§12 rung 3; a resume fast-path-skips the asset,
+            # content can't leave it unset (rung 3; a resume fast-path-skips the asset,
             # so an end-of-loop write would miss it). Here we only clear the probe signal +
             # stamp the full-scan timestamp.
             if full:
@@ -987,12 +987,12 @@ def _run_scan(ctx: JobContext) -> None:
                 )
             else:
                 # Incremental: consume the probe signal (the news are now fingerprinted, so
-                # the §12 dot moves off "new files probed" onto its scan/dedup rungs).
+                # the dot moves off "new files probed" onto its scan/dedup rungs).
                 db.execute("UPDATE roots SET probe_new_count=0 WHERE id=?", (root_row["id"],))
         reports.append(rep)
 
     # Persist the scan result (per (job, root)) + problem files so `status <root>`
-    # and the M6 TUI can re-render this scan. Dry-run writes nothing.
+    # and the TUI can re-render this scan. Dry-run writes nothing.
     if not dry_run:
         _persist_scan_result(ctx, reports, full=full, embed=embed, profiler=profiler,
                              collector=collector, created_at=seen_at)
@@ -1009,10 +1009,10 @@ def _persist_scan_result(ctx, reports, *, full, embed, profiler, collector, crea
     Keyed to this job (``ctx.job_id``); cascades away if the jobs row is deleted
     (e.g. dev clear-db). profile_json is stored only when profiling was on.
 
-    **Resume-proof problem set (§ interrupted-scan review).** The report must
+    **Resume-proof problem set (interrupted-scan review).** The report must
     describe the *root's current state*, not just what this pass touched — because
     resuming an interrupted scan is "re-run the same command", and the fast-path
-    then skips already-fingerprinted files (undecodables included, §8 A2 step 4).
+    then skips already-fingerprinted files (undecodables included).
     So a per-pass problem list would empty out on every re-run. Instead:
     - **undecodable** problem files + count are **re-derived from the catalog**
       (``assets.undecodable=1`` with a live instance in the root) — cumulative and
@@ -1113,9 +1113,9 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
     for sk in skipped_roots:
         ctx.log(f"skipped root {sk['name']}: {sk['reason']}")
     # (Per-file outcomes are surfaced via these log lines + the persisted
-    # scan_results/scan_problem_files, which `status <root>` re-renders — §4.)
+    # scan_results/scan_problem_files, which `status <root>` re-renders.)
 
-    # Uniform, human-showable outcome (§4 result_json / §12 TUI result card). The
+    # Uniform, human-showable outcome (result_json / TUI result card). The
     # aggregate counts + a one-line summary, plus the mode flags and any skips.
     n_read_err = sum(1 for p in collector.problems() if p.problem == "read-error")
     if dry_run:
@@ -1126,7 +1126,7 @@ def _emit_summary(ctx, reports, skipped_roots, collector, *, dry_run, full, embe
         # Selective: show only the metrics that actually happened (>0), in a fixed order.
         # Includes backfilled + matches_trashed so a backfill-only (post-merge) or
         # trash-absorb-only pass reads honestly rather than "no changes" (which is reserved
-        # for a genuine no-op re-scan, all fast-path-skipped — never blank, §12).
+        # for a genuine no-op re-scan, all fast-path-skipped — never blank).
         parts = [
             (agg["new"], "new"), (agg["exact_dup"], "exact-dup"),
             (agg["backfilled"], "filled-in"), (agg["matches_trashed"], "identified-trash"),

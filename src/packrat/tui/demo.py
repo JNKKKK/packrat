@@ -19,7 +19,7 @@ from .data import result_of
 from .fixtures import REFERENCE_NOW, _job, _rj
 
 
-# --- roots: ~33 → the Roots list (§2.1) spans several pages on any terminal ----
+# --- roots: ~33 → the Roots list spans several pages on any terminal ----
 # A spread of dot states (◉ deduped / ◐ scanned-only / ○ never) + trash roots,
 # several VERY LONG NAS paths (to verify middle-elide + full display on wide) and
 # a few LONG root NAMES (to verify the name column), varied counts (for [s] sort).
@@ -97,8 +97,8 @@ _ROOT_SPECS = [
 ]
 
 
-# Roots (by id) where a probe found unscanned files → ◐ grey "new files probed" (§12
-# 4-state dot). {id: new_count}; every other library root probed clean (count 0). Picked
+# Roots (by id) where a probe found unscanned files → ◐ grey "new files probed"
+# (4-state dot). {id: new_count}; every other library root probed clean (count 0). Picked
 # to span the cases: a scanned+deduped root (13 Screenshots) that got new drops, and a
 # never-scanned root (8 Scans) whose first probe found files (◐, NOT ○ — outranks never).
 _PROBE_NEW = {13: 128, 8: 640, 23: 54}
@@ -110,11 +110,11 @@ def _root(spec) -> dict:
     # size column shows varied realistic values; trash roots are empty.
     size_bytes = 0 if kind == "trash" else photos * 4_000_000 + videos * 60_000_000
     probe_new = 0 if kind == "trash" else _PROBE_NEW.get(rid, 0)
-    # Dedup-dirty flag (§12 rung 3): the spec's scan/dedup timestamps used to encode the
-    # green/yellow split via a recency compare; the ladder now uses this event flag, so
-    # derive it from the SAME relationship to preserve the demo's dot variety — a root
-    # scanned AFTER its last dedup is dirty (needs_dedup=1). A never-deduped root falls to
-    # yellow via the ladder's "never deduped" branch regardless, so its flag stays 0.
+    # Dedup-dirty flag (dot ladder rung 3): the ladder uses this event flag for the
+    # green/yellow split, so derive it from the spec's scan/dedup timestamps to give the
+    # demo its dot variety — a root scanned AFTER its last dedup is dirty (needs_dedup=1).
+    # A never-deduped root falls to yellow via the ladder's "never deduped" branch
+    # regardless, so its flag stays 0.
     needs_dedup = 1 if (dedup and scan and scan > dedup) else 0
     return {
         "id": rid, "name": name, "path": path, "kind": kind, "enabled": 1,
@@ -130,7 +130,7 @@ def _root(spec) -> dict:
 ROOTS = [_root(s) for s in _ROOT_SPECS]
 
 
-# --- running job + a deep queue backlog (§4 spans pages) ----------------------
+# --- running job + a deep queue backlog (spans pages) ----------------------
 RUNNING = _job(
     id=612, type="scan", root_id=6, status="running", total=45000, done=17800,
     started_at="2026-07-15T13:10:00", params_json=_rj({"root_id": 6, "full": True}),
@@ -178,7 +178,7 @@ def _queued(spec) -> dict:
 QUEUED = [_queued(s) for s in _QUEUE_SPECS]
 
 
-# --- recent/terminal jobs — one of every shape (§5 card coverage) -------------
+# --- recent/terminal jobs — one of every shape (card coverage) -------------
 RECENT = [
     _job(id=611, type="dedup", root_id=3, status="done", finished_at="2026-07-15T11:48:00",
          params_json=_rj({"root_id": 3, "confirm": True}), root_name="Photos",
@@ -361,7 +361,7 @@ def job_problem_files(job_id: int) -> list[dict]:
     return out
 
 
-# --- per-root detail + a long jobs history (§3 jobs list spans pages) ---------
+# --- per-root detail + a long jobs history (jobs list spans pages) ---------
 def _root_by_name(name: str) -> dict | None:
     for r in ROOTS:
         if r["name"] == name:
@@ -411,7 +411,7 @@ def root_jobs(name: str) -> list[dict]:
         return []
     rid = r["id"]
     # Real per-root rows for the two data-rich roots; a synthesized history otherwise
-    # so every root's detail Jobs list has enough rows to page (§3, 4 rows/page).
+    # so every root's detail Jobs list has enough rows to page (4 rows/page).
     mine = [dict(j) for j in RECENT if j.get("root_id") == rid]
     if name == "Photos":
         mine = [dict(_pending_analyze())] + mine

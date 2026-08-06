@@ -1,4 +1,4 @@
-"""TUI screen controllers (M6, §12) — the Textual screen classes.
+"""TUI screen controllers — the Textual screen classes.
 
 Split by screen (one module each) over a shared :mod:`~packrat.tui.frames.base`
 (:class:`FrameScreen` + the ``_review_verb``/``_empty_snapshot``/``_open_in_explorer``

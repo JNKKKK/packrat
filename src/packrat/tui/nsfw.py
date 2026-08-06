@@ -8,7 +8,7 @@ affordance for screen-sharing / screenshots of a media collection. Like
 (navigation, submits, Explorer opens) keep the true text.
 
 **Value-based, not frame-scanning.** The data that needs masking originates in exactly
-two columns — ``roots.name`` and ``roots.path`` (§8 A1) — so that is the *only* place
+two columns — ``roots.name`` and ``roots.path`` — so that is the *only* place
 we run keyword matching. From the live roots we derive the set of **sensitive tokens**
 (a name, a path, or a single path component that contains a keyword), each paired with
 its keyword-masked form, and then redact those literal strings wherever they appear in
@@ -108,7 +108,7 @@ def mask_text(text: str) -> str:
 
 
 def sensitive_tokens(roots: list[dict]) -> set[str]:
-    """The literal strings to redact, sourced ONLY from ``roots`` name/path (§8 A1).
+    """The literal strings to redact, sourced ONLY from ``roots`` name/path.
 
     For each root, a token is added for its ``name``, its ``path``, and each individual
     path **component** — but only when the value contains a keyword (``mask_text`` would

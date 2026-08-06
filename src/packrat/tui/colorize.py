@@ -1,7 +1,7 @@
 """Post-layout colorizer — apply theme role colors to a finished plain frame.
 
 The layout/render layers produce **plain, colorless** text (so width math and the
-golden-frame snapshot tests never see color markup — §Theming "the hard rule").
+golden-frame snapshot tests never see color markup — "the hard rule").
 This module is the *separate* color layer: it takes the composed 100×24 frame
 string and returns a Rich :class:`~rich.text.Text` with each span colored by its
 semantic **role** → the active :class:`~packrat.tui.tokens.Theme`'s color.
@@ -27,7 +27,7 @@ from .tokens import Theme
 # earlier roles win a cell (Text.stylize is applied in list order; later spans can
 # override, so put broad/lowest-priority first, specific/highest-priority last).
 ROLE_PATTERNS: list[tuple[str, str]] = [
-    # dim: the ○ never dot + ◐ probed-new dot (both grey — §12 4-state), ░ bar remainder
+    # dim: the ○ never dot + ◐ probed-new dot (both grey — 4-state), ░ bar remainder
     # (the guillemet-hint rule is applied LAST, below, so a ‹…› aside stays dim even when
     # it contains a `[k]` hint).
     ("dim", re.escape(tokens.DOT_NEVER)),
@@ -219,7 +219,7 @@ def recolor_dot_legend(text: Text, frame: str, theme: Theme = tokens.DEFAULT_THE
     """Recolor the dot legend's second ``◉`` (``◉ need dedup``) to warn (in place).
 
     The legend shows both ◉ states; the base glyph pass paints every ◉ green, so the
-    "need dedup" one must be corrected to yellow to match the row dots (§12). The
+    "need dedup" one must be corrected to yellow to match the row dots. The
     "deduped" ◉ and the grey ◐/○ are already correct from the glyph pass. No-op if the
     legend isn't on the frame (a screen without it)."""
     for m in _LEGEND_DEDUP_RE.finditer(frame):
@@ -283,7 +283,7 @@ def emphasize_selected_row(text: Text, frame: str, marker: str = tokens.CURSOR,
     """Emphasize the list row carrying the ``▸`` selection ``marker`` (in place,
     post-colorize) — **bold + the brighter ``selected`` foreground** (``#ffffff`` vs.
     the ``#d0d0d0`` body default), the highlighted-cursor-row look the ``selected``
-    role was defined for (§Theming).
+    role was defined for.
 
     Applies from **just after** the ``▸`` (the cursor keeps its accent color) to the
     row's right border, so the row *text* pops while the frame/box borders stay

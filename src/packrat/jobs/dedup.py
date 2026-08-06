@@ -1,4 +1,4 @@
-r"""The ``dedup`` operation (§8 B) — a stateful, three-stage review sequence.
+r"""The ``dedup`` operation — a stateful, three-stage review sequence.
 
 Dedup targets **one registered folder** and works purely from the fingerprints
 ``scan`` stored (hashes + PDQ) plus a **lazy** liveness stat — no eager whole-pool
@@ -12,7 +12,7 @@ a time** under ``<root>\_packrat_review\``, so each folder means exactly one thi
 ``--confirm`` applies the current stage (to the Recycle Bin) and **auto-advances**
 to the next non-empty stage; after the last it completes. One ``review_runs`` row
 spans the whole sequence, carrying a ``stage`` cursor (1..3) and ``stage_phase``
-(``staged`` | ``applied``) — the apply-then-advance crash marker (§8 B Phase 7).
+(``staged`` | ``applied``) — the apply-then-advance crash marker.
 
 Key simplifications vs. a two-folders-at-once design: stage 1 deletes only
 *redundant instances* (never removes an asset), so by stages 2–3 every asset still
@@ -23,7 +23,7 @@ another asset's last copy).
 
 Three review conventions: stage 1 present-shortcut = delete / remove-to-spare;
 stages 2–3 present-shortcut = keep / remove-to-delete. A renamed shortcut counts as
-removed (strict, §8 B Phase 5).
+removed (strict).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from ..util import now_iso
 from . import _guards
 from ._dbops import delete_instance as _delete_instance
 from ._dbops import forget_if_orphaned as _forget_if_orphaned
-# Keep-lead ranking (§8 B) lives in dedup_rank; re-exported names keep the call sites
+# Keep-lead ranking lives in dedup_rank; re-exported names keep the call sites
 # (and tests/test_video_lead.py, which drives dedup._pick_lead/_log_band/…) unchanged.
 from .dedup_rank import (  # noqa: F401
     _PATH_TIEBREAK,
@@ -71,13 +71,13 @@ _STAGE_LABEL = {
     STAGE_RECOMPRESS: "suspected recompressions",
     STAGE_EDIT: "minor edits",
 }
-#: Marker embedded in a stage-2 keep-lead's shortcut name (§8 B step 9). Both the
+#: Marker embedded in a stage-2 keep-lead's shortcut name. Both the
 #: staging code and `--keep-suggested` confirm key off this, so keep them in sync.
 _SUGGESTED_MARK = "_suggested"
 
 
 # ---------------------------------------------------------------------------
-# lazy DB cleanup (a plain delete is not trash, §4/§6) — see jobs._dbops.
+# lazy DB cleanup (a plain delete is not trash) — see jobs._dbops.
 # ---------------------------------------------------------------------------
 # job dispatch
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ def _run_dedup(ctx: JobContext) -> None:
 
 
 def _set_dedup_result(ctx: JobContext, action: str) -> None:
-    """Uniform outcome (§4 result_json) derived from the run's durable state.
+    """Uniform outcome (result_json) derived from the run's durable state.
 
     Read AFTER the mode ran, so it reflects committed state: a pending run's current
     stage + count summary (analyze/staged, or confirm that advanced to a next stage),
@@ -123,9 +123,9 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
                        "run_id": int(run["id"]),
                        "to_delete_exact": exact, "groups": len(groups), "members": members})
         # A confirm records the number of files it recycled into result_json.deleted;
-        # the lifetime-deduped metric SUMS that across every completed dedup job (§12).
+        # the lifetime-deduped metric SUMS that across every completed dedup job.
         # `deleted_count` is an "applied-but-not-yet-reported" accumulator on the run:
-        # each stage's apply bumps it (§8 B Phase 7), and here — when a confirm job lands
+        # each stage's apply bumps it, and here — when a confirm job lands
         # its result — we DRAIN it (report the value, then reset to 0 durably). This
         # (a) never double-counts across the per-stage confirm jobs of one auto-advancing
         # run, and (b) lets a crash-resumed confirm (which skipped the apply block) still
@@ -138,7 +138,7 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
                 )
         # The count phrase for run["stage"] (the CURRENT cursor): stage 1 has only exact
         # rows, stages 2/3 only near-dup groups — so show the one that stage actually has,
-        # never a "0 exact" for a stage that structurally can't hold exact dups (§8 B).
+        # never a "0 exact" for a stage that structurally can't hold exact dups.
         cur_counts = (f"{exact} exact" if run["stage"] == STAGE_EXACT
                       else f"{len(groups)} grp/{members} mbr")
         if run["status"] == "pending":
@@ -147,7 +147,7 @@ def _set_dedup_result(ctx: JobContext, action: str) -> None:
                 # non-empty stage and stages it — so run["stage"] here is the stage the
                 # run ADVANCED TO, not the one this job acted on. Report both, keyed off
                 # the applied stage recorded before the advance, so a stage-2
-                # keep-suggested confirm never reads as "staged stage 3" (§8 B).
+                # keep-suggested confirm never reads as "staged stage 3".
                 applied = getattr(ctx, "_dedup_confirmed_stage", run["stage"])
                 result["confirmed_stage"] = applied
                 result["summary"] = (
@@ -180,7 +180,7 @@ def _resolve_library_root(ctx: JobContext) -> dict:
 
 
 # ===========================================================================
-# ANALYZE (§8 B Phases 0–4) — open the run and stage the first non-empty stage
+# ANALYZE — open the run and stage the first non-empty stage
 # ===========================================================================
 def _analyze(ctx: JobContext) -> None:
     db = ctx.db
@@ -193,14 +193,14 @@ def _analyze(ctx: JobContext) -> None:
         ctx.log("note: this root has never had a `scan --full`; run `scan` first for current liveness.")
 
     # Compute stage 1 up front; if the ENTIRE run would be empty (no stage has any
-    # candidate) auto-complete without leaving a dangling pending run (§8 B Phase 0).
+    # candidate) auto-complete without leaving a dangling pending run.
     stage1 = _plan_stage(ctx, root_id, root_path, STAGE_EXACT, prefer_internal=prefer_internal)
     probe = _first_nonempty_stage(ctx, root_id, root_path, start=STAGE_EXACT,
                                   precomputed={STAGE_EXACT: stage1}, prefer_internal=prefer_internal)
     if probe is None:
         # "Already clean" — nothing to review, so the folder IS deduped as of now.
         # Record a completed dedup run (no pending row, no staging, no review_actions)
-        # so the last-successful-dedup timestamp (§11 "deduped <age>") is set. A run that
+        # so the last-successful-dedup timestamp ("deduped <age>") is set. A run that
         # went through zero non-empty stages is as "fully reviewed" as one confirmed
         # through all of them — both leave the folder with no actionable duplicates.
         with db.transaction() as conn:
@@ -210,7 +210,7 @@ def _analyze(ctx: JobContext) -> None:
                 (root_id, now_iso(), now_iso()),
             )
             # Dedup reached `completed` (already-clean path) ⇒ consume the dedup-dirty
-            # signal so the §12 dot moves to ◉ green (the root has no actionable dups now).
+            # signal so the dot moves to ◉ green (the root has no actionable dups now).
             conn.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root_id,))
         ctx.log("already clean: no exact duplicates or near-dup groups to review.")
         return
@@ -218,10 +218,10 @@ def _analyze(ctx: JobContext) -> None:
     # Open the run (owns the root until confirmed/cancelled). prefer_internal is stored
     # here ONCE and read from the run row by every later --confirm — the policy is locked
     # for the whole 3-stage sequence, since a bare confirm stages stage 2 and must apply
-    # the same preference stage 1 used (§8 B; see the run-scoped design note). The PDQ
+    # the same preference stage 1 used (see the run-scoped design note). The PDQ
     # thresholds are snapshotted here too (same lock-at-analyze pattern): the run's stages
     # and histogram bins derive from these values, so a later config edit can't retroactively
-    # rewrite an old run's bands — both faces read this row, not live config (§8 B).
+    # rewrite an old run's bands — both faces read this row, not live config.
     m = ctx.config.match
     with db.transaction() as conn:
         cur = conn.execute(
@@ -246,7 +246,7 @@ def _analyze(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# CONFIRM (§8 B Phases 5–7) — apply current stage, auto-advance
+# CONFIRM — apply current stage, auto-advance
 # ===========================================================================
 def _confirm(ctx: JobContext) -> None:
     db = ctx.db
@@ -264,7 +264,7 @@ def _confirm(ctx: JobContext) -> None:
     # NOT this confirm's params (a bare --confirm stages stage 2 and must apply the same
     # preference stage 1 used). A --prefer-internal on the confirm command that CONFLICTS
     # with the run's stored value is rejected: the run is already partly applied under one
-    # policy, so it can't flip mid-sequence (§8 B run-scoped design).
+    # policy, so it can't flip mid-sequence (run-scoped design).
     prefer_internal = bool(run["prefer_internal"])
     if ctx.params.get("prefer_internal") and not prefer_internal:
         raise ValueError(
@@ -286,7 +286,7 @@ def _confirm(ctx: JobContext) -> None:
             f"Confirm it normally: `packrat dedup {root['name']} --confirm`."
         )
 
-    # Resume the apply-then-advance crash window (§8 B Phase 7): if the current stage
+    # Resume the apply-then-advance crash window: if the current stage
     # was already applied (crash before staging the next), skip straight to advancing.
     if run["stage_phase"] != "applied":
         stage_dir = review.staging_folder(root_path, _STAGE_FOLDER[stage])
@@ -313,7 +313,7 @@ def _confirm(ctx: JobContext) -> None:
         # in ONE transaction. Persisting the count durably (not just on the ctx) is what
         # lets a crash-resumed --confirm — which skips this apply block entirely (the
         # `stage_phase == 'applied'` guard above) — still report the right deleted total
-        # into the lifetime-deduped metric (§8 B Phase 7). Otherwise the resumed run
+        # into the lifetime-deduped metric. Otherwise the resumed run
         # read 0 and the metric silently undercounted every crash-interrupted confirm.
         with db.transaction() as conn:
             conn.execute(
@@ -334,7 +334,7 @@ def _confirm(ctx: JobContext) -> None:
         return
     # Render the next stage's log with the run's ANALYZE-TIME threshold snapshot (from the
     # `run` row we already hold — SELECT *), NOT live config, so a confirm after a config
-    # edit reports the bands the run was analyzed under (matches the TUI poll; §8 B).
+    # edit reports the bands the run was analyzed under (matches the TUI poll).
     from .. import review_stats
     thresholds = review_stats.thresholds_from_row(run)
     _stage_and_pause(ctx, root, run_id, audit_dir, nxt, advancing=True,
@@ -342,7 +342,7 @@ def _confirm(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# CANCEL — discard the whole run's staging, delete nothing (§8 B Phase 7)
+# CANCEL — discard the whole run's staging, delete nothing
 # ===========================================================================
 def _cancel(ctx: JobContext) -> None:
     db = ctx.db
@@ -369,7 +369,7 @@ def _cancel(ctx: JobContext) -> None:
 
 
 # ===========================================================================
-# DRY-RUN — compute all 3 stages read-only; stage/write nothing (§8 B)
+# DRY-RUN — compute all 3 stages read-only; stage/write nothing
 # ===========================================================================
 def _dry_run(ctx: JobContext) -> None:
     root = _resolve_library_root(ctx)
@@ -401,13 +401,13 @@ def _plan_stage(ctx: JobContext, root_id: int, root_path: str, stage: int,
 
 
 def _plan_exact(ctx: JobContext, root_id: int, *, prefer_internal: bool = False) -> list[dict]:
-    """Stage 1: exact-duplicate resolution among the target root's active assets (§8 B Phase 2).
+    """Stage 1: exact-duplicate resolution among the target root's active assets.
 
     When an asset has copies both inside the target root and in another root, the
     default keeps the EXTERNAL copy and deletes the internal ones (``exact-external``).
     Under ``prefer_internal`` the roles flip: an internal copy survives and the external
     copies are deleted (``exact-internal-preferred``, marked ``is_external`` so the
-    network-permanent-delete warning still fires, §10 / [[review-network-count]]).
+    network-permanent-delete warning still fires, [[review-network-count]]).
     """
     db = ctx.db
     rows = db.query(
@@ -466,7 +466,7 @@ def _exact_action(asset_id: int, inst: dict, survivor: dict, reason: str, seq: i
         "survivor_path": survivor["path"], "group_no": None, "member_no": None,
         # is_external marks that the file being DELETED lives outside the target root —
         # true only under --prefer-internal (default stage 1 always deletes internal
-        # copies). Drives the network-permanent-delete warning (§10).
+        # copies). Drives the network-permanent-delete warning.
         "is_external": is_external, "is_lead": False, "lead_reason": None,
         "distance": None, "quality": None, "low_confidence": False,
         "shortcut_name": f"{seq:03d}.lnk",
@@ -475,9 +475,9 @@ def _exact_action(asset_id: int, inst: dict, survivor: dict, reason: str, seq: i
 
 def _plan_perceptual(ctx: JobContext, root_id: int, stage: int,
                      *, prefer_internal: bool = False) -> dict:
-    """Stage 2/3: perceptual grouping, banded by PDQ distance (§8 B Phase 3).
+    """Stage 2/3: perceptual grouping, banded by PDQ distance.
 
-    Runs the §5 matcher (target-root active assets vs. all active assets), then keeps
+    Runs the matcher (target-root active assets vs. all active assets), then keeps
     the edges whose distance falls in this stage's band:
     - stage 2 (recompression): photo ``d ≤ t_photo_recompress`` **plus all video** edges;
     - stage 3 (minor edit): photo ``t_photo_recompress < d ≤ t_photo_edit`` (no video).
@@ -517,10 +517,10 @@ def _group_actions(ctx, db, root_id, stage, banded_edges, *, prefer_internal=Fal
     """Build clusters from this stage's banded edges.
 
     Returns ``(actions, n_groups, lead_levels)`` where ``lead_levels`` is a
-    ``{level_label: count}`` tally of *why* each group's keep-lead won (§8 B stage-2
+    ``{level_label: count}`` tally of *why* each group's keep-lead won (stage-2
     lead-pick stats), empty unless this stage suggests leads (stage 2 only).
     ``prefer_internal`` reaches the keep-lead so a full-key tie in a mixed group favors
-    the internal copy (§8 B).
+    the internal copy.
     """
     if not banded_edges:
         return [], 0, {}
@@ -558,7 +558,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges, *, prefer_internal=Fal
     # Suggest a keep-lead only in stage 2 (recompression: members are essentially the
     # same content at differing compression, so "keep the least-compressed" is
     # meaningful — for photos AND video). Stage 3 (minor edits) is deliberately
-    # unranked — the edited copy may be the one to keep (§8 B).
+    # unranked — the edited copy may be the one to keep.
     suggest_lead = stage == STAGE_RECOMPRESS
 
     actions: list[dict] = []
@@ -598,7 +598,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges, *, prefer_internal=Fal
                 "is_external": inst["root_id"] != root_id, "distance": near_d,
                 "quality": my_q, "low_confidence": low_conf, "is_lead": is_lead,
                 # Why this member was chosen lead (the ranking-key decision level);
-                # only the lead carries it, others get "" in the manifest (§8 B).
+                # only the lead carries it, others get "" in the manifest.
                 "lead_reason": lead_level if is_lead else None,
                 "media_type": r.get("media_type"), "width": r.get("width"), "height": r.get("height"),
                 "size": r.get("size"),
@@ -609,7 +609,7 @@ def _group_actions(ctx, db, root_id, stage, banded_edges, *, prefer_internal=Fal
 
 
 def _asset_rank_fields(db, asset_ids):
-    """Load ranking fields for the keep-lead (§8 B): photo format/size + video bitrate/codec."""
+    """Load ranking fields for the keep-lead: photo format/size + video bitrate/codec."""
     if not asset_ids:
         return {}
     ph = ",".join("?" for _ in asset_ids)
@@ -681,7 +681,7 @@ def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False,
     root_id, root_path = int(root["id"]), root["path"]
     stage = plan["stage"]
 
-    # Persist this run's near-dup edges (dedup is the writer of similarity_edges, §4).
+    # Persist this run's near-dup edges (dedup is the writer of similarity_edges).
     if plan["edges"]:
         _upsert_edges(db, plan["edges"])
 
@@ -711,7 +711,7 @@ def _stage_and_pause(ctx, root, run_id, audit_dir, plan, *, advancing=False,
 
 
 def _materialize(ctx, root_path, run_id, stage, actions):
-    """Stat-before-create shortcuts + persist review_actions for ONE stage (§8 B Phase 4).
+    """Stat-before-create shortcuts + persist review_actions for ONE stage.
 
     Returns ``(staged, skipped)``. A vanished target is skipped + lazily forgotten; a
     stage-1 target whose survivor vanished is promoted early. Only rows whose shortcut
@@ -772,7 +772,7 @@ def _materialize(ctx, root_path, run_id, stage, actions):
     with db.transaction() as conn:
         # Idempotent re-materialize: clear any rows already persisted for this
         # (run_id, stage) before inserting. The apply-then-advance crash window
-        # (§8 B Phase 7) can commit a stage's review_actions, then crash before the
+        # can commit a stage's review_actions, then crash before the
         # stage-cursor UPDATE — on resume this stage is re-materialized, and without
         # this DELETE the rows would DOUBLE (there is no unique index on the plan),
         # double-counting members and mis-listing the audit. DELETE-then-INSERT makes
@@ -850,7 +850,7 @@ def _fmt_bitrate(size, duration_s) -> str:
 
 
 def _upsert_edges(db, edges) -> None:
-    """Upsert canonical-ordered near-dup edges into ``similarity_edges`` (§4)."""
+    """Upsert canonical-ordered near-dup edges into ``similarity_edges``."""
     ts = now_iso()
     with db.transaction() as conn:
         for e in edges:
@@ -863,10 +863,10 @@ def _upsert_edges(db, edges) -> None:
 
 
 # ---------------------------------------------------------------------------
-# confirm — read the user's edits + apply one stage (§8 B Phases 5–6)
+# confirm — read the user's edits + apply one stage
 # ---------------------------------------------------------------------------
 def _intends_delete(action: dict, stage: int, stage_dir: str) -> bool:
-    """Strict shortcut-presence rule (§8 B Phase 5; rename == removed)."""
+    """Strict shortcut-presence rule (rename == removed)."""
     present = review.path_exists(os.path.join(stage_dir, action["shortcut_name"]))
     if _STAGE_DEFAULT_DELETE[stage]:
         return present            # default-delete: present shortcut → delete
@@ -879,7 +879,7 @@ def _keep_suggested_intended(ctx, actions: list[dict]) -> list[dict]:
     edits entirely** (the whole point of the flag: "trust packrat's pick").
 
     A group's suggested lead is the persisted action whose ``shortcut_name`` carries the
-    ``_suggested`` marker (written at staging, §8 B step 9). **Safety:** if a group has
+    ``_suggested`` marker (written at staging). **Safety:** if a group has
     **no** suggested lead (e.g. an all-external group, or a lead whose ``.lnk`` failed
     to stage so its row wasn't persisted), the whole group is **spared** — never delete
     every copy of an asset because packrat couldn't name a keeper. Logs each such group.
@@ -900,7 +900,7 @@ def _keep_suggested_intended(ctx, actions: list[dict]) -> list[dict]:
 
 
 def _apply_stage(ctx, stage, intended):
-    """Recycle each intended file under the lazy liveness (+ stage-1 survivor) gate (§8 B Phase 6)."""
+    """Recycle each intended file under the lazy liveness (+ stage-1 survivor) gate."""
     db = ctx.db
     out = {"exact_deleted": 0, "perceptual_deleted": 0, "already_gone": 0,
            "survivor_vanished": 0, "external_deleted": 0, "network_deleted": 0,
@@ -965,7 +965,7 @@ def _record_already_gone(db, action, out) -> None:
 
 
 def _recycle_and_delete(db, action, out, *, perceptual: bool) -> None:
-    """Move the file to the Recycle Bin, then update the DB (§8 B Phase 6 step 18c)."""
+    """Move the file to the Recycle Bin, then update the DB."""
     path = action["path"]
     is_net = fsutil.is_network_path(path)
     try:
@@ -1015,7 +1015,7 @@ def _finalize_completed(ctx, root, run_id) -> None:
         conn.execute("UPDATE review_runs SET status='completed', confirmed_at=? WHERE id=?",
                      (now_iso(), run_id))
         # Dedup reached `completed` (all stages reviewed) ⇒ consume the dedup-dirty signal
-        # so the §12 dot moves to ◉ green (§12 rung 3 → rung 4). Paired with last_dedup_at.
+        # so the dot moves to ◉ green (rung 3 → rung 4). Paired with last_dedup_at.
         conn.execute("UPDATE roots SET needs_dedup=0 WHERE id=?", (root["id"],))
     ctx.log(f"dedup complete for {root['name']}: all stages reviewed.")
 
@@ -1046,7 +1046,7 @@ def _report_review_stats(ctx, thresholds, stage, actions: list[dict]) -> None:
 
     Both faces route through :mod:`packrat.review_stats`' ``stats_for_stage`` +
     ``lines_for_stage`` dispatch over the same ``review_actions`` shape, so the CLI staging
-    log and the box can't drift — neither the text NOR the stage→builder choice (§8 B). Silent
+    log and the box can't drift — neither the text NOR the stage→builder choice. Silent
     on empty stages. ``thresholds`` is the run's ANALYZE-TIME snapshot (from
     ``thresholds_from_row``), threaded in by the caller (analyze from config, confirm from the
     run row), NOT re-read from live config — so a confirm after a config edit still reports the
@@ -1081,7 +1081,7 @@ def _report_stage_confirm(ctx, stage, out) -> None:
 
 
 # ---------------------------------------------------------------------------
-# backup + audit JSON (§8.1, §10)
+# backup + audit JSON
 # ---------------------------------------------------------------------------
 def _proposed_json(ctx, root, run_id, plan, skipped) -> dict:
     cfg = ctx.config
@@ -1148,7 +1148,7 @@ register_job(
         handler=_run_dedup,
         # analyze OWNS the root (per-root exclusivity); confirm/cancel/dry-run act on
         # the already-owned pending run (or open nothing), so they acquire no root —
-        # the global slot + the existing pending row already serialize them (§3).
+        # the global slot + the existing pending row already serialize them.
         owned_root=lambda p: None if (p.get("confirm") or p.get("cancel") or p.get("dry_run"))
         else p.get("root_id"),
     )
