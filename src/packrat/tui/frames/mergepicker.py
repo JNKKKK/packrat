@@ -20,8 +20,9 @@ class MergePickerScreen(FrameScreen):
 
     ``[Tab]`` toggles the source between a paginated **registered-root** list
     (library roots, dest excluded) and a typed **external folder** path; ``↑/↓``
-    picks a root, ``←/→`` pages it, ``[Space]`` toggles ``--dry-run``, typing edits
-    the external path, ``[Enter]`` submits ``merge <source> --into <dest>``.
+    picks a root, ``←/→`` pages it, ``[Ctrl-D]`` toggles ``--dry-run`` (Space is a
+    literal char in the external-path field), typing edits the external path,
+    ``[Enter]`` submits ``merge <source> --into <dest>``.
     """
 
     BINDINGS = [

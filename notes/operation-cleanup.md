@@ -75,9 +75,11 @@ its shortcut to spare** the file (mark it "not trash" for this run). Renames cou
 per [dedup](operation-dedup.md)).
 
 `packrat cleanup <folder> --confirm`:
-6. Re-verify liveness per file (lazy stat, as [dedup](operation-dedup.md) Phase 6). Require typed confirmation of the
-   combined delete set; if `<folder>` is on a network/SMB root, warn that deletion is **permanent**
-   (no Recycle Bin — see [performance & safety](performance.md)). Then, to the **Recycle Bin** (permanent on NAS/SMB — see [performance & safety](performance.md)):
+6. Re-verify liveness per file (lazy stat, as [dedup](operation-dedup.md) Phase 6). Unlike the
+   one-shot exact/undecodable modes, perceptual `--confirm` has **no typed count-confirmation** — the
+   Explorer shortcut review *is* the confirmation (same as dedup `--confirm`). Then, to the **Recycle
+   Bin** (permanent on NAS/SMB — see [performance & safety](performance.md); the completion log tallies
+   how many deletions were on a network path):
    - **Exact matches** → delete the `file_instances` row; asset stays `trashed`.
    - **Perceptual matches still staged** (shortcut present) → delete the file **and mark its own
      asset `status='trashed'`**, `trash_reason='cleanup-perceptual'`, fingerprints retained — so

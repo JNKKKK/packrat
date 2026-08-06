@@ -1,20 +1,24 @@
 """The daemon HTTP API — FastAPI on 127.0.0.1 with a loopback token.
 
-Endpoints (all under token auth except ``/health``):
-- ``GET  /health``            — liveness + version (unauthenticated).
-- ``GET  /daemon``            — pid/port/uptime/in-flight job (``daemon status``).
-- ``POST /jobs``              — submit a job; always enqueued (durable queue).
-- ``GET  /jobs``              — recent jobs list.
-- ``GET  /jobs/{id}``         — one job's detail.
-- ``GET  /jobs/{id}/stream``  — SSE progress/state stream.
-- ``POST /jobs/{id}/cancel``  — cooperative cancel.
-- ``POST /jobs/{id}/prioritize`` — bump a queued job to the front.
-- ``GET  /status``            — global rollup snapshot.
-- ``GET  /roots``             — registered roots snapshot.
-- ``POST /roots``             — register a root; optional ``--scan``.
-- ``POST /scan``              — resolve a root arg + submit a scan job.
-- ``POST /merge``             — resolve ``--into`` + submit a merge job.
-- ``POST /shutdown``          — graceful stop (``daemon stop``).
+Resource-oriented: each read returns one concern, so there is **no** combined
+``/status`` (the CLI composes the rollup client-side from ``/stats`` + ``/jobs/live``
++ ``/reviews`` + ``/roots``). Endpoints (all under token auth except ``/health``):
+
+Reads (``GET``):
+- ``/health`` — liveness + version (unauthenticated); ``/daemon`` — pid/port/uptime/
+  in-flight job (``daemon status``).
+- ``/stats`` — collection summary; ``/reviews`` — open pending review runs.
+- ``/jobs`` — paged history; ``/jobs/live`` — running+queued+interrupted; ``/jobs/queued``
+  — the backlog; ``/jobs/{id}`` — one job; ``/jobs/{id}/stream`` — SSE; ``/jobs/{id}/
+  problem-files`` — a scan's undecodable/read-error files.
+- ``/roots`` — root list; ``/roots/resolve`` — handle→id; ``/roots/{id}`` — one root's
+  detail; ``/roots/{id}/history`` — that root's paged terminal history.
+- ``/cleanup/preview`` — the count a one-shot cleanup would delete.
+
+Mutations (``POST``): ``/jobs`` (generic submit) + the per-op submitters ``/scan``,
+``/probe``, ``/dedup``, ``/cleanup``, ``/merge``, ``/trash/refresh``, ``/untrash``,
+``/roots`` (register); ``/jobs/{id}/cancel``, ``/jobs/{id}/prioritize``, ``/jobs/
+cancel-queued``; ``/shutdown`` (``daemon stop``).
 
 :func:`run_daemon` binds the fixed loopback port **first** — the bind is the
 single-instance lock of the auto-spawn handshake: if the port is taken, another
@@ -197,10 +201,12 @@ def build_app(token: str, *, db_file=None, config_path=None):
     # int path param.
     @app.get("/jobs/live", dependencies=[Depends(require_token)])
     def jobs_live():
-        """Live job state (running + queued + interrupted + pending reviews), one
-        consistent read. Shared by the dashboard Queue box and the maximized Queue
-        screen; terminal history is lazy-loaded via /jobs, not here. Declared BEFORE the
-        /jobs/{job_id} catch-all so 'live' isn't parsed as an int job id."""
+        """Live job state (running + queued + interrupted), one consistent read.
+        Pending reviews are review_runs state, not jobs, and are served separately by
+        /reviews — not folded in here. Shared by the dashboard Queue box and the
+        maximized Queue screen; terminal history is lazy-loaded via /jobs, not here.
+        Declared BEFORE the /jobs/{job_id} catch-all so 'live' isn't parsed as an int
+        job id."""
         return queries.live_jobs()
 
     @app.get("/jobs/queued", dependencies=[Depends(require_token)])

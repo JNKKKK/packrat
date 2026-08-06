@@ -205,7 +205,7 @@ blowup.
      **Stage 3 (minor edits) is deliberately NOT ranked** — the *edited* copy may be the one you want
      to keep. → `is_lead` + `lead_reason` (the decision level, below) recorded in the plan; surfaced in
      `manifest.csv` (`suggested_lead`, `suggested_reason`, `media_type`, `width`, `height`, `size`,
-     `duration_s`, `codec`, `bitrate` columns) + `proposed.json`.
+     `duration_s`, `codec`, `bitrate` columns) + `proposed_stage{N}.json`.
      - **Keep-lead pick stats (reported at staging AND in the TUI Review box).** When stage 2 is
        staged, the report logs *how* each group's lead was decided — a tally over the ranking key's
        decision levels, **split into side-by-side photo and video columns** (photo: `resolution` /
@@ -262,13 +262,15 @@ next stage after applying the current one (Phase 6). Per staged action:
       HEVC-vs-H.264 call); `quality` is the member's PDQ quality (0–100; video: min across comparable frames);
       `low_confidence`=`1` when this member or its partner is below `review.low_quality_hint` (a
       flat/near-black spurious-collision hint to skip fast, see [fingerprints](fingerprints.md)).
-12. **Audit trail (capture point 1 — the proposed plan).** Write/append an immutable `proposed.json`
-    in this run's audit dir (audit trail, below): the full plan **for every stage as calculated**, each action with
-    its stage, target path, reason, survivor, group/member, distance, per-member `quality` and
-    `low_confidence`, plus skipped/spared counts and the thresholds in effect (`t_photo_recompress`,
-    `t_photo_edit`, `t_match_video`, the `video.*` knobs, `review.low_quality_hint`). During
-    `--dry-run` this is the whole preview; during a live run it records the plan as each stage is
-    computed. Immutable, outside the folder, unlike the in-folder `manifest.csv` (deleted at finalize).
+12. **Audit trail (capture point 1 — the proposed plan).** As each stage is staged, write an immutable
+    `proposed_stage{N}.json` (one per stage) in this run's audit dir (audit trail, below): that stage's
+    plan, each action with its target path, reason, survivor, group/member, distance, per-member
+    `quality` and `low_confidence`, plus skipped/spared counts and the thresholds in effect
+    (`t_photo_recompress`, `t_photo_edit`, `t_match_video`, the `video.*` knobs,
+    `review.low_quality_hint`); the run's root/`root_path` are recorded once at the file's top level,
+    not per action. Immutable, outside the folder, unlike the in-folder `manifest.csv` (deleted at
+    finalize). **`--dry-run` writes no audit at all** — it computes the three stages read-only and the
+    preview is log-only (no staging folders, shortcuts, DB rows, or audit files).
 13. Open the stage folder in Explorer (or its `_packrat_review\` parent), print the `--confirm` /
     `--cancel` commands **naming the current stage**, and **pause** (`review_runs.status='pending'`,
     `stage_phase='staged'`). If the current stage staged nothing (all targets gone), auto-advance to
@@ -341,18 +343,21 @@ merge's copied→registered gap):
     (still `pending`, same `stage`). *(A crash here leaves `applied` with nothing staged — reconcile
     must **not** roll this back, the deletions were correct; re-running `--confirm` sees `applied` and
     jumps straight to step 20.)*
+19b. **Record this stage's dispositions.** When a stage's deletions commit, write an immutable
+    `applied_stage{N}.json` (audit trail, below): the per-action final disposition for *that* stage —
+    `deleted` / `spared` / `kept` / `already-gone` / `survivor-vanished`, with path, asset_id,
+    Recycle-Bin destination — plus the stage's totals. This is the authoritative per-action record.
 20. **Stage the next non-empty stage** (Phases 3–4 above): compute stage `stage+1` (then `+2` if it's
-    empty), materialize its folder + `review_actions` + append to `proposed.json`, and commit
+    empty), materialize its folder + `review_actions` + write its `proposed_stage{N}.json`, and commit
     `stage=<next>`, `stage_phase='staged'`. Then **pause** with the next stage's `--confirm`/`--cancel`
     prompt. If **no non-empty stage remains**, instead finalize:
-21. **Audit + finalize.** Write the immutable `applied.json` (audit trail, below): the final disposition of every
-    action across all applied stages — `deleted` / `spared` / `kept` / `already-gone` /
-    `survivor-vanished`, with path, root, asset_id, Recycle-Bin destination, stage — plus totals and
-    `confirmed_at`. Delete all of this run's stage folders (shortcuts + manifests), leaving the shared
-    `_packrat_review\` parent. → **write** `review_runs.status='completed'`, `confirmed_at`; close the
-    `jobs` row. Report per-stage: exact deleted, perceptual deleted (stage 2/3), spared/kept, external
-    deleted, plus lazily-cleaned stale rows. **`--cancel`** (any stage) deletes **all** the run's stage
-    folders, marks the run `cancelled`, deletes nothing, and still writes `applied.json` (every action
+21. **Finalize.** Write a whole-run `applied.json` marking every action `reviewed` (a completion
+    summary — the per-action dispositions live in the `applied_stage{N}.json` files above). Delete all
+    of this run's stage folders (shortcuts + manifests), leaving the shared `_packrat_review\` parent.
+    → **write** `review_runs.status='completed'`, `confirmed_at`; close the `jobs` row. Report
+    per-stage: exact deleted, perceptual deleted (stage 2/3), spared/kept, external deleted, plus
+    lazily-cleaned stale rows. **`--cancel`** (any stage) deletes **all** the run's stage folders,
+    marks the run `cancelled`, deletes nothing, and still writes `applied.json` (every action
     `cancelled`). *(A run cancelled mid-sequence keeps whatever earlier stages already deleted — those
     were confirmed — and its `similarity_edges` rows, which are a cache never trusted as complete input.)*
 
@@ -377,14 +382,17 @@ Deleting a whole registered folder never erases this history.
 **Location:** one directory per run under
 `%APPDATA%\packrat\audit\{run_type}\{root_name}\{run_id}\` (`run_type` ∈ `dedup`,
 `cleanup-perceptual`), containing:
-- **`proposed.json`** — written at Phase 4 (capture point 1): the complete calculated plan
-  before any user review — every action (target path, root, asset_id, kind/reason, survivor,
+- **`proposed_stage{N}.json`** — written as each stage is staged (capture point 1): that stage's
+  calculated plan before any user review — every action (target path, asset_id, kind/reason, survivor,
   group/member, distance, `is_external`), the counts of skipped-at-staging/spared items, and the
-  active threshold/config. Immutable once written.
-- **`applied.json`** — written at Phase 7 (capture point 2): the final disposition of each
-  action (`deleted` / `spared` / `kept` / `already-gone` / `survivor-vanished` / `cancelled`),
-  with Recycle-Bin destinations for deleted files, totals, and `confirmed_at`. Written even on
-  `--cancel`.
+  active threshold/config; the run's root/`root_path` are at the file's top level. Immutable once written.
+- **`applied_stage{N}.json`** — written as each stage's deletions apply (capture point 2): the
+  per-action final disposition for that stage (`deleted` / `spared` / `kept` / `already-gone` /
+  `survivor-vanished`), with Recycle-Bin destinations and the stage's totals. **This is where the
+  real dispositions live.**
+- **`applied.json`** — written once at finalize: a whole-run completion summary that marks every
+  action `reviewed` (dispositions are in the per-stage files above). On **`--cancel`** it is written
+  instead with every action `cancelled`.
 
 **Properties:**
 - **Immutable & additive:** files are written once, never edited; a re-run of dedup on the same

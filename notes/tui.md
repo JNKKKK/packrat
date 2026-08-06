@@ -9,8 +9,8 @@ sample dataset (no daemon) for demoing/development.
 ## Interfaces
 
 - **Dashboard** (default): three stacked full-width sections — the packrat logo + live "N assets
-  hoarded" line beside the **Collection** stats box (total/photo/video/trashed + **lifetime deduped**,
-  the total files removed across all dedup runs); the **Roots** box (name, path, a **4-state
+  hoarded" line beside the **Collection** stats box (total/photo/video/size/trashed + **lifetime
+  deduped**, the total files removed across all dedup runs); the **Roots** box (name, path, a **4-state
   freshness dot** [see below], asset count, **total size on disk**); and the **Queue** box (the
   running job's live bar + the queued backlog preview). `[r]`/`[q]` focus the Roots/Queue box (heavy
   accent-colored frame + `▸` cursor); pressing the same key again **maximizes** into the full Roots /
@@ -37,14 +37,15 @@ sample dataset (no daemon) for demoing/development.
   histogram + the internal/external group make-up — the same `review_stats` block the CLI staging log
   prints. A focused box gets the
   heavy accent-colored border and its inside key hints read normal; the unfocused box **dims** its
-  hints (the Jobs sub-headers grey; the Review box's `[o]`/`[g]`/`[k]` grey). Within the focused Jobs
+  hints (the Jobs sub-headers grey; the Review box's `[o]`/`[g]`/`[k]`/`[b]` grey). Within the focused Jobs
   panel `[r]`/`[q]`/`[h]` pick the sub-section (Queued/History paginate with `←/→`, `↑/↓` selects),
   `[Enter]` opens the selected job's result card; the **Running** row shows the live `███░░░` progress
   bar. `Esc` un-focuses (a second `Esc` backs out). Actions map to CLI verbs: `[s]` scan, `[d]` dedup
   (a **choice modal** first picks the keep-preference — prefer external [default] vs. internal, i.e.
   `--prefer-internal`), `[m]` **merge-from picker** (see [architecture](architecture.md) — radio between a paginated registered-root
   list and a typed external-folder path, `Ctrl+D` dry-run toggle), `[c]` cleanup (choice modal: exact /
-  perceptual / undecodable), and `[o]`/`[g]`/`[k]` on a pending review (open Explorer / `--confirm` / `--cancel`).
+  perceptual / undecodable), and on a pending review `[o]`/`[g]`/`[k]` (open Explorer / `--confirm` / `--cancel`)
+  plus — for a stage-2 dedup — `[b]` (`--confirm --keep-suggested`: keep only each group's suggested lead).
   Actions that need **no confirmation** report via a non-blocking **toast** (a red error toast if the
   submit itself fails), never a modal popup; only confirm-gated deletes still open a modal.
 - **Queue interface** (see [data model](data-model.md)): three independently-paged sections — **Running**, **Queued** (with blocked

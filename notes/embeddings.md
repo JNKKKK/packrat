@@ -9,11 +9,13 @@ the `tags` table is intentionally omitted from the schema (see [data-model](data
 > tagging), never a dedup signal (see [fingerprints](fingerprints.md)). Dedup is decided entirely by content hash + perceptual
 > signature.
 
-- **Engine**: CLIP (open_clip, ViT-L/14 on the RTX). Produces a fixed-length float32 vector per
-  photo; for video, per sampled frame (aggregated).
+- **Engine**: CLIP (open_clip, ViT-L/14 on the RTX) — the *intended* production model. Produces a
+  fixed-length float32 vector per photo; for video, per sampled frame (aggregated). **Status: not yet
+  built** — the embedding pass is deferred, so today `scan --embed` writes nothing (the only CLIP code
+  in the tree is the decode smoke test, which loads a lighter ViT-B-32 just to prove the wheel imports).
 - **When computed**: only on an explicit **`scan --embed`** (or a future tagging pass) — never by
   a plain scan. Fully decoupled from dedup/merge: skipping it or having it fail changes no
-  dedup/merge result. Backfillable at any time.
+  dedup/merge result. Backfillable at any time (once the pass is implemented).
 - **Storage**: one `embeddings(asset_id, model, vector)` row per asset (see [data-model](data-model.md)). Search over them
   starts as brute-force cosine on a memory-mapped numpy matrix (see [data-model](data-model.md) Notes).
 - **What it unlocks later (design TBD)**: semantic search ("find beach photos"); zero-shot

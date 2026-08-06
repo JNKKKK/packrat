@@ -42,8 +42,9 @@ exact hash, and files matching a **trashed** hash are discarded.
    match a trashed hash, so the trashed set must be current first. (Runs for real even under
    `--dry-run` — see below.)
 4. Opportunistically fast-path-scan the `dest` root so the comparison set is current; warn if
-   the collection index is stale. (This runs under merge's ownership from step 2a — no other op can
-   touch the root meanwhile. Skipped under `--dry-run`, which must not mutate the catalog.)
+   the collection index is stale. (In execution this runs *after* step 5 opens the `merge_runs` row
+   — the run is opened first so the scan happens under merge's ownership, no other op touching the
+   root meanwhile. Skipped under `--dry-run`, which must not mutate the catalog.)
 5. Open a `jobs` row (`type='merge'`) and a **`merge_runs`** header (`status='planning'`,
    `dest_root_id`). The `merge_runs` row is the durable **cross-op guard**: its
    partial-unique `(dest_root_id) WHERE status IN ('planning','copying')` is exactly the
@@ -144,10 +145,13 @@ exact hash, and files matching a **trashed** hash are discarded.
 - A DB backup is taken before the Phase 3 copy.
 - **Resume trusts the frozen plan.** Re-running `merge <source> --into <dest>` while an open
   (`planning`/`copying`) `merge_runs` row exists for this dest **silently auto-resumes** it
-  instead of starting fresh — but **prints a clear notice** first (e.g. "Resuming interrupted
-  merge from <created_at>: N of M files already copied") so the user knows a prior run is being
-  continued, not restarted. It **skips Phase 1 entirely** (hashes already in `merge_plan_items`) and
-  **does not re-classify** — it replays the stored classification verbatim. Per source-file:
+  instead of starting fresh — but **prints a clear notice** first (e.g. "resuming interrupted
+  merge from <created_at>: N of M plan item(s) already done") so the user knows a prior run is being
+  continued, not restarted. A **`copying`** resume (the plan was frozen before the crash) **skips
+  Phase 1 entirely** (hashes already in `merge_plan_items`) and **does not re-classify** — it
+  replays the stored classification verbatim. A **`planning`** resume (Phase 1 was interrupted
+  before the plan froze) rebuilds the not-yet-frozen plan: it re-scans the dest, finishes hashing
+  any un-hashed files, and re-classifies. Per source-file, replaying a frozen (`copying`) plan:
   - `progress='registered'` or `copied-unindexed` → terminal; skip without even stat-ing the file
     (matters over SMB).
   - `progress='copied'` (crashed between rename and DB write) → the dest file already exists and
@@ -162,19 +166,18 @@ exact hash, and files matching a **trashed** hash are discarded.
     never re-reads source bytes.
 - **Finalize:** on completion set `merge_runs.status='done'`, `finished_at`; the run and its
   items are **retained** as queryable merge history (see [roadmap](roadmap.md) #5).
-- **Interruption (two paths — merge has no interactive pause and no `--cancel` flag):**
-  - **Cooperative cancel** — the *generic* job cancel (see [tech stack](tech-stack.md)) via the TUI `[c]` (see [tui](tui.md)) or another
-    terminal; **not** Ctrl-C (which only detaches the view, see [cli](cli.md)) and **not** a merge-specific
-    `--cancel` (that's a dedup/cleanup review verb). The worker sees the flag at its next
-    per-file checkpoint, sets `merge_runs.status='cancelled'`, and stops. Already-copied files
-    stay — merge is copy-only, so a partial copy leaves nothing unsafe; those files are now real
-    collection members. Re-running `merge` does **not** auto-resume a `cancelled` run (it's a
-    deliberate stop); it starts a fresh plan.
-  - **Process death or clean `daemon stop`** (crash / reboot / power loss / graceful shutdown) —
-    the run is left open (`planning`/`copying`) and its `jobs` row is reconciled to `interrupted`
-    on next daemon start (see [architecture](architecture.md)), **not** `cancelled`; re-running `merge <source> --into <dest>`
-    silently auto-resumes it per above. (This is why a stop/crash differs from a cancel: only the
-    explicit cancel above discards the plan.)
+- **Interruption (merge has no interactive pause and no `--cancel` flag).** A cooperative job
+  cancel (see [tech stack](tech-stack.md)) via the TUI `[c]` (see [tui](tui.md)) or another terminal,
+  a clean `daemon stop`, and a process death (crash / reboot / power loss) are all handled the same
+  way: the worker stops at its next per-file checkpoint, the `jobs` row lands `cancelled` (explicit
+  cancel) or `interrupted` (stop/crash reconciled on next start, see [architecture](architecture.md)),
+  and in **every** case the `merge_runs` row is **left open** (`planning`/`copying`) — merge never
+  writes `merge_runs.status='cancelled'`. Because merge is copy-only, a partial copy leaves nothing
+  unsafe (already-copied files are real collection members), so re-running `merge <source> --into
+  <dest>` **silently auto-resumes** the open run per above rather than discarding it. (The runtime
+  can't distinguish a user cancel from a clean stop — both use the shared cancel flag — so merge
+  favors "a stop never loses in-flight progress": the plan stays resumable.) *(Ctrl-C only detaches
+  the view, see [cli](cli.md); it does not interrupt the job.)*
 - `--dry-run` runs Phases 1–2 logic **in memory only** and prints the classification counts /
   would-copy list — it opens **no** `merge_runs`/`merge_plan_items` rows (so it neither trips the
   cross-op guard nor leaves a resumable run) and writes no asset rows. It **also computes the

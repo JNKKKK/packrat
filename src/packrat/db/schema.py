@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS review_actions (
     stage                    INTEGER,         -- dedup 1|2|3; cleanup writes 1 (see above)
     folder                   TEXT NOT NULL,   -- exact_dup_to_delete|suspect_recompression|with_minor_edits|perceptually_identified_trash
     kind                     TEXT,            -- exact|perceptual
-    reason                   TEXT,            -- exact-internal|exact-external|perceptual|cleanup-perceptual
+    reason                   TEXT,            -- exact-internal|exact-external|exact-internal-preferred|perceptual|cleanup-perceptual
     default_action           TEXT,            -- delete|keep
     asset_id                 INTEGER,         -- reference only (may dangle)
     instance_id              INTEGER,         -- reference only (may dangle)

@@ -120,6 +120,12 @@ For every candidate file:
      this is a re-appeared trashed fingerprint — see Phase 4. This is how identical bytes in two
      *different* paths become one asset with two instances (enforced by the `content_hash` unique
      index on assets; `file_instances` is unique on (`root_id`,`path`)).
+     - **In-place content edit (same path, changed bytes).** If a row already exists at this path but
+       the bytes changed, the hash misses this path's old asset and either hits a *different* asset or
+       misses entirely; the upsert repoints the row to the new/other asset. In the **same
+       transaction**, if that repoint left the *previous* asset `active` with zero remaining
+       instances, it is **forgotten** (asset + fingerprints deleted) — the deletion-detection in
+       step 11 can't catch this (the path is still present), so the upsert forgets the orphan directly.
      - **Backfill exception (a hit that should still (re)compute perceptual data).** After
        attaching the instance, **continue to steps 7–8** and in step 9 **update the existing asset
        in place** (write/replace `phash`/`vphash`, refresh metadata, set/clear
@@ -137,8 +143,10 @@ For every candidate file:
        is to catch byte *changes*, which surface as a hash **miss** (or a hit on a *different* asset),
        never as a hit on this same asset.
    - **Miss** → continue; create the asset in step 9.
-7. **Metadata** — decode/probe for dimensions, duration, capture time, codec (exiftool /
-   ffprobe). → values held for step 9 (→ `assets.width/height/duration_s/captured_at`, `size`).
+7. **Metadata** — dimensions, duration, capture time, codec, read **inline in the decode pass**:
+   PIL EXIF for photos, PyAV for videos. No per-file `exiftool`/`ffprobe` subprocess (which would cost
+   an extra SMB round-trip per file). → values held for step 9 (→
+   `assets.width/height/duration_s/captured_at`, `size`).
    (`media_type` is decided by **extension** via the allowlist — see [roots register](operation-register.md) — not by decoding, so it is
    known even for files that won't decode.)
 8. **Perceptual signature** — photo: PDQ + quality; video: duration + PDQ (with quality) of each of
@@ -147,13 +155,15 @@ For every candidate file:
    - **Video `codec` (see [dedup](operation-dedup.md) stage-2 keep-lead), same decode pass.** For a **video** that decodes,
      capture the video stream's `codec` name (`h264`/`hevc`/`av1`/…) from the already-open decoder —
      free, no extra work. → value held for step 9 (→ `assets.codec`). Feeds the video keep-lead's
-     codec-efficiency weight (see [dedup](operation-dedup.md)). **Photo and undecodable → NULL.**
+     codec-efficiency weight (see [dedup](operation-dedup.md)). **Photos → NULL; a truly-unopenable
+     file → NULL** (a video that opens but yields zero decodable frames is flagged `undecodable=1` yet
+     keeps the codec its decoder already reported).
    - **Decode failure (graceful, see [format coverage](tech-stack.md)):** if the pixels/frames won't decode (corrupt file,
      unsupported codec, missing wheel), **do not crash and do not abort the asset** — the BLAKE3
      hash (step 5) already gives it identity. Record it in step 9 with **`undecodable=1`**, the
      `decode_error` detail, and **no `phash`/`vphash` rows**. Metadata (step 7) is best-effort:
-     keep whatever `exiftool`/`ffprobe` returned (they often read headers of files Pillow/PyAV
-     can't fully decode); leave the rest NULL. Log and move on.
+     keep whatever the inline PIL/PyAV read returned before it failed; leave the rest NULL. Log and
+     move on.
 9. **Persist the new asset (single transaction).** → **write**:
    - `assets`: `content_hash`, `media_type`, `size`, `width`, `height`, `duration_s`,
      `captured_at`, `status='active'`, `added_at`, `undecodable` (0 normally, 1 on step-8 decode
@@ -180,12 +190,13 @@ For every candidate file:
 `similarity_edges` table from this data. Scan never writes similarity edges.)*
 
 **Phase 3 — Embeddings (only if `--embed`)**
-10. **By default skipped entirely — no embeddings computed, no `embeddings` rows written.** With
-    `--embed`, assets with no current `embeddings` row for the active model **and `undecodable=0`**
-    are queued for a batched CLIP pass → **write** `embeddings`: (`asset_id`, `model`, `vector`).
-    (Undecodable assets are skipped — CLIP needs a decoded frame, which is exactly what failed.)
-    Fully decoupled: skipping or failing this leaves every dedup/merge result identical;
-    backfillable later.
+10. **Deferred — not yet implemented.** A plain scan computes no embeddings and writes no
+    `embeddings` rows; passing `--embed` today only logs "note: --embed pass is deferred; scan wrote
+    no embeddings" and moves on. **As designed** (once built), `--embed` would queue assets with no
+    current `embeddings` row for the active model **and `undecodable=0`** for a batched CLIP pass →
+    **write** `embeddings`: (`asset_id`, `model`, `vector`); undecodable assets skipped (CLIP needs a
+    decoded frame). It is fully decoupled — computing it or not leaves every dedup/merge result
+    identical, and it is backfillable. See [embeddings](embeddings.md).
 11. **Deletion detection (every completed scan of a reachable root — not just `--full`).**
     Reconcile files removed from disk since last scan. This needs **no re-hashing**: enumeration
     (Phase 1 step 2) walks the whole tree on *every* scan, and every present file has its

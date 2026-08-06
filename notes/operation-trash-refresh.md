@@ -8,11 +8,12 @@ as `packrat trash refresh [<root>]` — see [CLI](cli.md)). Steps:
    that **single** trash root — see [CLI](cli.md)), enumerate its files (same allowlist/ignore rules as scan).
    `cleanup`/`merge` always invoke the all-roots form; only the standalone verb (and the TUI's
    trash-root modal) may scope to one. For each file:
-   - Compute BLAKE3 + perceptual signature (photo PDQ; video per-frame PDQ). **No embedding.**
-   - Resolve against `assets.content_hash`:
+   - Compute BLAKE3 and resolve against `assets.content_hash`. The perceptual signature (photo PDQ;
+     video per-frame PDQ) is computed **only on a content-hash miss** — a hash that already matches a
+     known asset carries its signatures from scan, so re-decoding is skipped. **No embedding, ever.**
      - **New content** → create an asset with `status='trashed'`, `trashed_at`,
-       `trash_reason='trash-folder'`, and persist its `phash`/`vphash` (so perceptual trash
-       exclusion works in merge).
+       `trash_reason='trash-folder'`, and persist its `phash`/`vphash` (computed here, so perceptual
+       trash exclusion works in merge).
      - **Matches an existing `active` asset** → flip it to `status='trashed'` (the user is telling
        us this content is junk); retain its fingerprints. Its library-folder instances remain on
        disk until a `cleanup` removes them.

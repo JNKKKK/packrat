@@ -7,13 +7,13 @@
 | Daemon API         | FastAPI + uvicorn (127.0.0.1 + token); single-worker job queue |
 | CLI                | Typer (thin client: submit job, stream progress, Ctrl-C detaches) |
 | TUI                | Textual (`packrat` no-args: logo + stats + live jobs + menu; later milestone) |
-| DB                 | SQLite (WAL); SQLAlchemy Core or light SQL layer |
+| DB                 | SQLite (WAL); a light raw-SQL layer (no ORM) |
 | Vector search      | numpy brute-force → hnswlib / sqlite-vec if needed |
 | Content hash       | blake3 |
 | Perceptual hash    | **pdqhash** only — 256-bit PDQ for both photos and video frames (see [fingerprints](fingerprints.md)). No `imagehash`/pHash anywhere. |
-| Image decode       | Pillow + **pillow-heif** (HEIC/AVIF), OpenCV where handy; **rawpy** for the opt-in RAW group |
-| Video              | ffmpeg / **PyAV** (frame sampling), ffprobe (metadata) |
-| Metadata           | exiftool via pyexiftool |
+| Image decode       | Pillow + **pillow-heif** (HEIC/AVIF); **rawpy** for the opt-in RAW group |
+| Video              | **PyAV** (bundles ffmpeg) — frame sampling + metadata probe |
+| Metadata           | inline in the decode pass: PIL EXIF (photos) / PyAV (videos) — no per-file subprocess. (`pyexiftool` is a dep but used only by the smoke test.) |
 | Embeddings (opt-in) | torch (CUDA) + open_clip — only on `scan --embed` (see [embeddings](embeddings.md)); OCR (PaddleOCR/Tesseract) is speculative/TBD |
 | Scheduling         | **APScheduler** (`BackgroundScheduler`, in daemon) — a **core dep** (pure-Python, no wheel risk); realized by `jobs/scheduler.py`'s `PeriodicScheduler` + `PeriodicTask` registry (see [architecture](architecture.md)), first client `probe` (see [scan](operation-probe.md)) |
 | Job cancellation   | cooperative — jobs poll a cancel flag at their existing checkpoints |
@@ -33,7 +33,8 @@ the pipeline operates on the decode output, not the file format:
 - **Perceptual hash** — `pdqhash`/PDQ on an RGB numpy array, for **both** photos (the still) and
   video (each sampled frame). Format-agnostic *given a decoded image*; one algorithm for both.
 - **CLIP embedding** takes a decoded RGB frame; it never sees the container/codec.
-- **Metadata** (`exiftool`) is an independent reader with the widest format support in the stack.
+- **Metadata** is read inline from the decoded file (PIL EXIF for photos, PyAV for videos), so it
+  rides the same decode pass rather than a separate reader.
 
 So the only thing to verify is: **every photo format decodes to one RGB still, and every video
 format decodes to sampled RGB frames.** Everything downstream then follows automatically.
@@ -42,8 +43,8 @@ format decodes to sampled RGB frames.** Everything downstream then follows autom
 |---|---|---|---|---|---|
 | jpg jpeg jfif png gif bmp tif tiff webp | Pillow (native; libwebp bundled) | ✅ | ✅ | ✅ | ✅ |
 | heic heif | `pillow-heif` (libheif) | ✅ | ✅ | ✅ | ✅ |
-| avif | Pillow ≥11.3 native, else `pillow-heif` | ✅ | ✅ | ✅ | ✅ | ⚠ POC |
-| RAW: dng cr2 cr3 nef arw raf orf rw2 pef srw | `rawpy` (LibRaw ≥0.20 for cr3) → embedded preview or postprocess | ✅ | ✅ | ✅ | ✅ | ⚠ POC |
+| avif | Pillow ≥11.3 native, else `pillow-heif` (⚠ POC) | ✅ | ✅ | ✅ | ✅ |
+| RAW: dng cr2 cr3 nef arw raf orf rw2 pef srw (⚠ POC) | `rawpy` (LibRaw ≥0.20 for cr3) → embedded preview or postprocess | ✅ | ✅ | ✅ | ✅ |
 | mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts ts 3gp | PyAV/ffmpeg (H.264/HEVC/VP9/AV1/MPEG-2/VC-1…) → sampled frames | ✅ | ✅ | ✅ | ✅ (ffprobe) |
 
 **Decode-stage notes:**
@@ -147,7 +148,11 @@ min_comparable_frames = 5    # fewer comparable pairs than this → no match (in
 low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_confidence (see fingerprints.md, annotate-only)
 
 [smb]
-scan_workers = 6       # concurrent hashing/decoding streams over SMB (see performance.md); 4–8 typical
+scan_workers = 6       # video-path (per-file) + fallback concurrency (see performance.md); 4–8 typical
+io_workers   = 0        # PHOTO pipeline: file-reader threads (0 = auto 4-8, SMB sweet spot)
+cpu_workers  = 0        # PHOTO pipeline: hash+decode+pdq threads (0 = auto cores-2)
+photo_buffer_budget_bytes = 1073741824  # RAM budget for in-flight photo buffers (1 GB)
+photo_buffer_max_bytes    = 134217728   # photos above this bypass buffering (stream, 128 MB)
 
 [audit]
 retention_days = 0     # 0 = keep review audits forever (see operation-dedup.md); >0 = prune older (deferred knob, see roadmap.md #5)

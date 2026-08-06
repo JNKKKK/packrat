@@ -76,6 +76,13 @@ screen does (the source-sharing principle — no box can drift from its full vie
   jobs, its `pending_review`). `GET /roots/{id}/history` — that root's terminal job history, paged
   (always terminal — the root's live running/queued come from `/roots/{id}`).
 
+The above are the dashboard-backing reads. A few more GET reads round out the surface: `GET /health`
+and `GET /daemon` (liveness / daemon pid+port+uptime for `daemon status`), `GET /jobs/queued` (the
+durable backlog oldest-first, with blocked reasons), `GET /jobs/{id}/problem-files` (a scan job's
+undecodable/read-error files), and `GET /cleanup/preview` (the count a one-shot cleanup would delete).
+The mutations are `POST` (`/jobs`, `/scan`, `/probe`, `/dedup`, `/cleanup`, `/merge`, `/trash/refresh`,
+`/untrash`, `/roots`, `/jobs/{id}/cancel`, `/jobs/{id}/prioritize`, `/shutdown`).
+
 There is **no combined `/status` snapshot** — the CLI `status` composes the global rollup client-side
 from `/stats` + `/jobs/live` + `/reviews` + `/roots` (a human summary, not a hot path). Two invariants
 this shape buys: (1) **unbounded lists are always paged** — job history (global and per-root) is never
@@ -115,12 +122,15 @@ worker exists. On **every** daemon start, before serving any request, it reconci
     files.
   - **dedup/cleanup analyze** interrupted mid-staging → the crash left a `pending` review_run with
     **half-built staging**. Reconciliation **rolls it back**: delete the partial
-    `_packrat_review\` staging folders and mark that review_run `cancelled` (record it as
-    `interrupted-analyze` in the audit `applied.json`, see [dedup workflow](operation-dedup.md)). This clears the way for a clean
-    re-run — otherwise the pending row would reject a fresh `dedup`, and `--confirm` on partial
-    staging would apply a wrong plan. *(A **completed** analyze — paused, fully staged, awaiting the
-    user — has no `running` job row, so it is untouched: its `pending` review_run and staging remain
-    exactly as left, ready for `--confirm`/`--cancel`.)*
+    `_packrat_review\` staging folders and mark that review_run `cancelled` (a status flip only — no
+    audit record is written). This clears the way for a clean re-run — otherwise the pending row
+    would reject a fresh `dedup`, and `--confirm` on partial staging would apply a wrong plan. Only a
+    **first-stage, never-confirmed** analyze is rolled back this way: a run past stage 1 (or with
+    `stage_phase='applied'`) has already had an earlier stage's deletions **confirmed**, so it is a
+    live multi-stage run and is **left `pending`** to resume via `--confirm`, not cancelled. *(A
+    **completed** analyze — paused, fully staged, awaiting the user — has no `running` job row, so it
+    is untouched: its `pending` review_run and staging remain exactly as left, ready for
+    `--confirm`/`--cancel`.)*
   - **dedup/cleanup `--confirm`** interrupted mid-apply → the review_run is still `pending` and the
     plan (`review_actions`) records intended deletions; re-running `--confirm` re-reads shortcut
     presence and re-applies via the per-file lazy-liveness gate (see [dedup workflow](operation-dedup.md) Phase 6), which is idempotent
@@ -131,9 +141,10 @@ worker exists. On **every** daemon start, before serving any request, it reconci
   row is reconciled, the daemon resumes draining them in `enqueued_at` order like normal. This is the
   point of a durable queue — an auto-appended `roots register --scan` (see [scan workflow](operation-register.md)) still runs after a
   crash/restart. **Carve-out (matches the running-job stance):** a queued **destructive apply**
-  (`dedup`/`cleanup --confirm`) is flipped to `interrupted` instead of auto-run — a delete-set must
-  never apply with nobody watching (same reason the daemon won't auto-resume a *running* `--confirm`),
-  so the user re-issues it deliberately. Non-destructive queued jobs (scan, merge, analyze,
+  (a `--confirm`, or a cleanup one-shot `--apply` such as `--trash-exact`/`--undecodable`) is flipped
+  to `interrupted` instead of auto-run — a delete-set must never apply with nobody watching (same
+  reason the daemon won't auto-resume a *running* `--confirm`), so the user re-issues it deliberately.
+  Non-destructive queued jobs (scan, merge, analyze,
   trash-refresh, untrash) drain automatically.
 - **Idempotency is what makes "just re-run" safe** for every case above — each op either resumes
   from a committed checkpoint/plan or re-derives a no-op for work already done. Reconciliation only
@@ -170,7 +181,9 @@ job must clear **both** to start.
 1. **Global: one mutating job runs at a time, the rest wait in a durable queue.** The single-worker
    queue is the enforcement point: exactly one mutating job is ever *running*. **Every** mutating
    submission is **enqueued** — a `jobs` row with `status='queued'` (see [data model](data-model.md)) — *never rejected at
-   submit*; nothing is turned away. The backlog is **persisted** (durable `jobs` rows, not an
+   submit*; nothing is turned away. (The one narrow exception is a submit-time dedup for `probe`: if an
+   un-started `probe` for the same root is already `queued`, the new submit coalesces to that job's id
+   rather than adding a second row — see [probe](operation-probe.md).) The backlog is **persisted** (durable `jobs` rows, not an
    in-memory list), so queued work survives a daemon restart and drains on the next start (see startup
    reconciliation above — with one safety carve-out: a queued destructive apply is *not* auto-run
    unattended). This is what lets one command line up work behind another (and, later, lets `roots
@@ -179,14 +192,16 @@ job must clear **both** to start.
    correct — a `running` row at boot is stale); the **backlog** is durable. No lockfile, no
    crash-stale lock. Read-only queries (`status`, `roots`, TUI stats) run anytime, concurrently, and
    never queue.
-   - **Dequeue picks the first *runnable* job in FIFO order — the queue waits on the worker, never on
-     a human.** When the worker frees, it scans the backlog oldest-first (`enqueued_at`, ties by `id`)
-     and runs the first job whose **owned root is free** (or that owns no root). A job whose owned
-     root is currently held by a **pending review / open merge** (guarantee 2) is **skipped, left
-     `queued`, and retried on a later pump** — not failed, not run. So FIFO holds *among runnable
-     jobs* and *among jobs contending for the same root*, but a runnable job legitimately passes a
-     blocked one ahead of it (the "recent jobs" list is therefore ordered by *start* time, not submit
-     time — intended). This is a small runnable-first scheduler, not strict FIFO.
+   - **Dequeue picks the first *runnable* job in priority-then-FIFO order — the queue waits on the
+     worker, never on a human.** When the worker frees, it scans the backlog ordered by `priority
+     DESC, enqueued_at, id` (so `packrat jobs prioritize` can bump a queued job to the front; ordinary
+     jobs are `priority=0` and thus plain oldest-first) and runs the first job whose **owned root is
+     free** (or that owns no root). A job whose owned root is currently held by a **pending review /
+     open merge** (guarantee 2) is **skipped, left `queued`, and retried on a later pump** — not
+     failed, not run. So the order holds *among runnable jobs* and *among jobs contending for the same
+     root*, but a runnable job legitimately passes a blocked one ahead of it (the "recent jobs" list is
+     therefore ordered by *start* time, not submit time — intended). This is a small runnable-first
+     scheduler, not strict FIFO.
    - **What wakes a blocked job is just the next pump.** The ops that free a root — `dedup`/`cleanup
      --confirm` (completes the review), `--cancel`, a resuming `merge` — are **themselves jobs**
      (see [dedup workflow](operation-dedup.md)/[trash model](operation-cleanup.md): `--confirm`/`--cancel` are separate `jobs` rows of the same type, dispatched by

@@ -10,7 +10,8 @@ which is background-only: the TUI *reflects* its result in the status dot rather
 keyshortcut, see [tui](tui.md).)
 
 **Shared client semantics** (all job-submitting commands — `scan`, `probe`, `dedup`, `merge`, `cleanup`,
-`trash refresh`, `untrash`, `scan --embed`): each **submits a job to the daemon** and streams its progress.
+`trash refresh`, `untrash`, and `roots register --scan`): each **submits a job to the daemon** and
+streams its progress (all accept `--detach` to submit and return without streaming).
 - **Ctrl-C detaches the view; the job keeps running in the daemon.** Re-attach or stop it via the
   `packrat` TUI, or from another terminal.
 - **`--detach`** submits the job and returns immediately without streaming.
@@ -58,8 +59,11 @@ Arguments
   <path>                 Folder to register as a root (absolute or relative).
 
 Options
-  --scan                 After registering, immediately enqueue and run a scan of this root.
-  --embed                With --scan, also run the CLIP embedding pass (implies --scan).
+  --scan                 After registering, immediately enqueue and run a scan of this root
+                         (streams progress; --detach submits and returns).
+  --full                 With --scan, do a full (re-fingerprint) scan rather than an incremental one.
+  --embed                With --scan, also run the CLIP embedding pass (implies --scan; the pass
+                         itself is not yet implemented — see `scan --embed`).
   --name <label>         Root handle; must be globally unique. Defaults to the folder's leaf
                          name. Use this to resolve a leaf-name collision without renaming.
   --kind library|trash   Root kind (default: library).
@@ -106,9 +110,11 @@ Options
   --all                  Scan every enabled root.
   --full                 Ignore the fast-path; re-fingerprint every file (integrity pass);
                          stamps last_full_scan_at on completion.
-  --embed                Also compute CLIP embeddings for tagging/search (see embeddings.md). Off by default.
-                         Only affects trash tagging and semantic search; dedup is identical
-                         either way. Backfillable later via `scan --embed` or the tagging pass.
+  --embed                Also compute CLIP embeddings for tagging/search (see embeddings.md).
+                         NOT YET IMPLEMENTED — the flag is accepted but the pass is deferred, so
+                         it writes no embeddings today. When built it will affect only trash
+                         tagging and semantic search; dedup is identical either way. Off by default.
+  --profile              Report where scan time went: NAS transfer vs CPU vs decode.
   --dry-run              Enumerate and report what would be indexed; write nothing.
   --json                 Machine-readable report.
 
@@ -256,9 +262,12 @@ Options (one mode required for a fresh op; --confirm/--cancel act on a pending p
   --undecodable          Delete the folder's undecodable files (see tech-stack.md) and mark each asset trashed
                          (trash_reason='cleanup-undecodable'). One-shot; no trash refresh.
   --confirm              Apply a pending --trash-perceptual run: delete exact matches + still-staged
-                         perceptual matches (typed confirmation; DB backup first). Confirmed
-                         perceptual deletions mark their asset `trashed`.
+                         perceptual matches (the Explorer shortcut review is the confirmation — no
+                         typed count-confirm here; DB backup first). Confirmed perceptual deletions
+                         mark their asset `trashed`.
   --cancel               Discard the pending --trash-perceptual run's staging; delete nothing.
+  --yes, -y              Skip the typed count-confirmation on the one-shot modes (--trash-exact /
+                         --undecodable). No effect on --trash-perceptual (which has no count-confirm).
   --dry-run              Report the count/list that would be deleted (and, with --trash-perceptual,
                          staged) without deleting or staging. NOTE: the trash modes still refresh-
                          and-empty the trash collection (see trash-model.md); --undecodable does not.
@@ -471,7 +480,8 @@ Exit code is non-zero if any format fails, so it doubles as a CI/setup gate. (Se
 Opens the Textual TUI — the default face of the tool (see [tui](tui.md)). Every action it offers is also one of
 the CLI commands above (design tenet in [goals and concepts](goals-and-concepts.md)); the TUI is a live window onto the same daemon jobs.
 `--offline` runs it on a bundled sample dataset (no daemon) for demoing; `--nsfw` masks adult-content
-root names/paths on screen (display-only privacy redaction, see [tui](tui.md)).
+root names/paths on screen (display-only privacy redaction, see [tui](tui.md)). `packrat --version`
+prints the version and exits.
 
 ## Dev-only commands
 A `packrat dev …` group (currently `dev clear-db`, which empties the catalog) is registered **only in

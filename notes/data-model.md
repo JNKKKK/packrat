@@ -17,9 +17,10 @@ roots(
                      last_dedup_at>last_scan_at recency test (last_scan_at bumps on every walked
                      file, so a no-op re-scan must NOT flip a deduped root back to yellow). */)
   -- (per-root scan interval deferred with scheduled scans → M8; not settable in v1)
-  -- last_probe_at/probe_new_count/needs_dedup are nullable/default-0 (a row predating them reads
-  --   NULL/0 = current behavior); the live DB gets them via db.connection._ensure_added_columns
-  --   (ALTER TABLE ADD COLUMN), a fresh DB from SCHEMA_SQL — no migration runner (pre-release — this file).
+  -- last_probe_at/probe_new_count/needs_dedup (+ scan_results.moved) are nullable/default-0 (a row
+  --   predating them reads NULL/0 = current behavior); the live DB gets them via
+  --   db.connection._ensure_added_columns (ALTER TABLE ADD COLUMN), a fresh DB from SCHEMA_SQL — no
+  --   migration runner (pre-release — this file).
 
 assets(
   id, content_hash /* blake3, unique */, media_type /* photo|video (by extension) */,
@@ -84,6 +85,9 @@ review_runs(   -- one stateful review lifecycle (dedup OR perceptual-cleanup) pe
                       ONE source (review_stats.thresholds_from_row) and a later config.toml edit can't
                       retroactively rewrite an old run's bands. Nullable — a row predating the columns
                       reads NULL → callers fall back to review_stats._T_* defaults (no migration). */,
+  deleted_count /* files recycled by this run but NOT YET folded into a job's result_json.deleted —
+                   a crash-safe running tally; drained (→0) when a confirm job records its result, so
+                   the lifetime-deduped metric never double-counts across a run's confirm jobs */,
   created_at, confirmed_at )
   -- partial UNIQUE(root_id) WHERE status='pending'  → at most one open review run per folder.
   --   ONE row spans dedup's whole 3-stage sequence; `stage`/`stage_phase` track progress within it,
@@ -133,6 +137,8 @@ merge_plan_items(   -- the persisted, crash-safe, FROZEN per-source-file plan fo
   rep_of_hash,                     -- dup-in-source only: the sibling hash whose rep this defers to
   dest_path,                       -- final dest path incl. any numeric-suffix collision rename; NULL until copied
   progress /* pending|copied|registered|copied-unindexed|skipped|error */, error )
+  -- UNIQUE(run_id, source_rel_path): one row per (run, source file) — the Phase-1 UPSERT key, so a
+  --   resumed hash pass reuses each file's row instead of duplicating it.
   --   copied         = file written+verified, DB register still pending (the crash gap; resume finishes it)
   --   registered     = terminal: file on disk AND catalogued
   --   copied-unindexed = terminal: file written to an IGNORED dest path, deliberately NOT registered
@@ -158,10 +164,14 @@ jobs(    id, type,
                         the operation-dedup.md audit) stay authoritative for deep forensics ([Enter] details). A job
                         that died before finishing may carry a partial or NULL result_json — its
                         `status` (+ `error`) still records the outcome, so every job is show-able. */,
-         params_json )
+         params_json,
+         priority /* INTEGER default 0; `packrat jobs prioritize` bumps it. Dequeue orders by
+                     priority DESC, then enqueued_at — so a bumped job jumps the queue, and the bump
+                     survives a daemon restart (it is a durable column, not an in-memory flag). */ )
   -- `enqueued_at` = when the row was created (as `queued`); `started_at` = when the worker actually
-  --   BEGAN running it (NULL while still queued); `finished_at` = terminal time. FIFO order =
-  --   enqueued_at (ties by id). A job submitted while the worker is free is enqueued and started in
+  --   BEGAN running it (NULL while still queued); `finished_at` = terminal time. Dequeue order =
+  --   priority DESC, then enqueued_at (ties by id) — ordinary jobs are priority 0, so among them it is
+  --   plain oldest-first. A job submitted while the worker is free is enqueued and started in
   --   the same breath (both stamps ~together); one submitted while busy waits with started_at NULL
   --   in the durable backlog until it runs (architecture.md guarantee 1).
   -- `total`/`done` are a PROGRESS-DISPLAY counter only (work units finished / total, drives the
@@ -186,6 +196,7 @@ scan_results(   -- persisted scan report; one row per (completed scan job, root)
   full, embed, profiled,                 -- the flags that produced this scan
   candidates, new, exact_dup, backfilled, matches_trashed, skipped_fastpath,
   undecodable, errors, deleted_instances, forgotten_assets, root_offline,   -- the operation-scan.md A2 banner counts
+  moved,                                 -- files relinked to a new path without re-hashing (retrofit column)
   profile_json /* ScanProfiler snapshot, NULL unless --profile */, created_at )
   -- PRIMARY KEY (job_id, root_id). A `--all` scan writes one row PER library root under a single
   --   job_id; re-scanning a root APPENDS a new row (new job_id) — the table is a growing per-root
@@ -207,6 +218,9 @@ scan_problem_files(   -- the undecodable / unreadable files behind scan_results'
   --   re-appears on every scan of the root (grows per-scan, not per-distinct-problem — roadmap.md #10).
   -- `read-error` rows are per-pass: an unreadable file has no asset to re-derive, and leaves no row
   --   to fast-path-skip, so it is re-detected on every pass anyway.
+
+meta( key /* PRIMARY KEY */, value )   -- small daemon-owned key/value store: the `schema_version`
+                                       --   and any other daemon-level scalars. Not per-asset data.
 ```
 
 Notes
