@@ -22,7 +22,7 @@ sample dataset (no daemon) for demoing/development.
   + `page i/N` share the header line. **Trash-root exception:** a `kind='trash'`
   root has **no detail screen** (detail is scan/dedup/merge/cleanup — all library-only), so `[Enter]`
   on one instead opens a **confirm modal** (the packrat mascot clutching a trash can) asking to absorb +
-  empty that folder; confirming issues `packrat trash refresh <root>` (see [trash refresh](trash-model.md)). Same guard from either
+  empty that folder; confirming issues `packrat trash refresh <root>` (see [trash refresh](operation-trash-refresh.md)). Same guard from either
   entry point — the dashboard Roots box and this maximized list — so a trash root is never mistaken for
   a browsable library root (see [design tenets](goals-and-concepts.md): the modal action is exactly the CLI verb, nothing TUI-only).
 - **Root detail** (see [architecture](architecture.md)): a **3-column stats header** (a folder ASCII icon · assets/photos/videos +
@@ -59,7 +59,7 @@ sample dataset (no daemon) for demoing/development.
 
 **The 4-state freshness dot (a color signal, not just a shape).** Each library root shows one dot;
 **color, not just shape, carries the meaning** — `◉` is drawn **both green and yellow**. Driven by
-`roots.probe_new_count` (see [probe](workflow-scan.md)) + `roots.needs_dedup` + `last_scan_at`/`last_dedup_at`, resolved in this
+`roots.probe_new_count` (see [probe](operation-probe.md)) + `roots.needs_dedup` + `last_scan_at`/`last_dedup_at`, resolved in this
 precedence order (`tui/tokens.status_dot`, a pure `(glyph, role)` function):
 1. **`probe_new_count > 0`** → **`◐` grey** — a probe found unscanned files waiting. **Outranks every
    other state, including `never`**: a freshly-registered root whose first probe finds files shows ◐,
@@ -156,7 +156,7 @@ is scoped to be safe and unsurprising:
   daemon is shared and client-agnostic (one per machine, see [architecture](architecture.md)), and the TUI needs the real name to act, so
   masking is a per-view presentation toggle applied on the way to the screen.
 - **Value-based, not frame-scanning.** Keywords are matched **only** against the live roots' `name` and
-  `path` (the two columns the sensitive text originates from, see [scan](workflow-scan.md)) — plus each individual path
+  `path` (the two columns the sensitive text originates from, see [scan](operation-scan.md)) — plus each individual path
   *component* (so an elided path's surviving segment is still caught). Those literal values are then
   replaced by their masked form **wherever they appear**: a root row, a job label (`scan <root>`), a
   review path, a toast, a modal. Because only real root-derived strings are ever rewritten, **app chrome

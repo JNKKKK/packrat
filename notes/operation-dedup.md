@@ -5,7 +5,7 @@ as **Windows shortcuts** inside that folder, for the user to review in Explorer 
 It works from the fingerprints scan already stored in the DB (hashes, `phash`/`vphash`). Comparison
 spans all **active** assets across the whole collection: an asset in the target folder is judged
 against active copies in *external* registered folders too. **Trashed assets are excluded** — dedup
-only collapses copies of things you're keeping; trash exclusion is `merge`/`cleanup`'s job (see [trash-model](trash-model.md)).
+only collapses copies of things you're keeping; trash exclusion is `merge`/`cleanup`'s job (see [trash-model](operation-cleanup.md)).
 
 **A dedup run is a fixed three-stage sequence, presented one stage at a time** so review stays
 focused and each folder means one thing. Each stage stages its own kind of duplicate into its own
@@ -363,7 +363,7 @@ so it is never accidental.
 
 **Why dedup is DB-first with lazy liveness:** the *decision* work is pure DB comparison — no eager
 whole-pool stat. It stats a file only when a stage acts on it: once creating that file's shortcut
-(no broken `.lnk`) and once immediately before deleting it (the authoritative gate). **Merge** (see [merge](workflow-merge.md)) is
+(no broken `.lnk`) and once immediately before deleting it (the authoritative gate). **Merge** (see [merge](operation-merge.md)) is
 unrelated to this machinery: it hashes transient source files and classifies them by exact hash — no
 perceptual signatures, no `similarity_edges`, no shortcuts.
 

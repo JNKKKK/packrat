@@ -60,14 +60,14 @@
   row exists iff we believe a file lives at that path; discovering it gone deletes the row (no
   `present` flag). This split is what makes "track by fingerprint,
   files move around" work cleanly.
-- **Root** — a registered folder tree, each with a globally-unique name (see [scan workflow](workflow-scan.md)). Types:
+- **Root** — a registered folder tree, each with a globally-unique name (see [scan workflow](operation-register.md)). Types:
   - `library` root — folders whose contents belong to the collection (e.g. the iPhone backup
     folder). Indexed by `scan`.
   - `trash` root — a transient **inbox**: files the user drops in are absorbed into the permanent
-    trashed-hash set and the folder emptied ("refresh the trash collection", see [trash refresh](trash-model.md)). **`scan` never
+    trashed-hash set and the folder emptied ("refresh the trash collection", see [trash refresh](operation-trash-refresh.md)). **`scan` never
     touches trash roots.** Any number of trash roots may exist; they form one logical trashed set.
 - **Fingerprint layers** (cheap → expensive):
-  1. **Fast-path key**: `path` + exact `size` + tolerant `mtime` (see [scan workflow](workflow-scan.md)) — used only to *skip*
+  1. **Fast-path key**: `path` + exact `size` + tolerant `mtime` (see [scan workflow](operation-scan.md)) — used only to *skip*
      re-fingerprinting unchanged files, never for identity.
   2. **Content hash**: BLAKE3 of file bytes — exact-duplicate identity.
   3. **Perceptual signature**: robust to recompression/resize.

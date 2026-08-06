@@ -57,7 +57,7 @@ touches the code next, not as a project journal. When you add or edit a comment:
 
 - **No pointers to the design spec by section number.** Don't write `§8 B` or `see §3`. If a comment
   needs to reference the design, link the relevant `notes/` file by name (e.g. "see
-  notes/workflow-dedup.md") or, better, just state the rule inline.
+  notes/operation-dedup.md") or, better, just state the rule inline.
 - **No milestone or tracking tags.** Don't tag comments with `M1`–`M8`, `M6 TUI`, code-review finding
   labels (`F1`, `F5`, …), or ticket/issue numbers. (`# noqa: …` lint codes are not tracking tags —
   keep those.)

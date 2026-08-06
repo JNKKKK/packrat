@@ -35,10 +35,10 @@ function.
   drop-on-external), perceptual banding into recompression (stage 2, + all video) and minor-edit
   (stage 3, photo) stages, Windows-shortcut staging (`_exact_dup_to_delete\` /
   `_suspect_recompression\` / `_with_minor_edits\`), the pending+stage-cursor state machine with
-  `--confirm` auto-advance, `--cancel`, `--dry-run`, and the audit trail (see [dedup](workflow-dedup.md)) (`proposed.json` +
+  `--confirm` auto-advance, `--cancel`, `--dry-run`, and the audit trail (see [dedup](operation-dedup.md)) (`proposed.json` +
   `applied.json` in APPDATA). Builds the perceptual matching engine (see [fingerprints](fingerprints.md)) (also reused by
   `cleanup --trash-perceptual`).
-- ✅ **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (see [trash refresh](trash-model.md) —
+- ✅ **M4 — Trash model**: multiple `kind='trash'` roots, "refresh the trash collection" (see [trash refresh](operation-trash-refresh.md) —
   index trash-folder files → record/flip assets to `trashed` → empty the folders), scan's refusal
   to index trash roots, `packrat cleanup` (mode-required: `--trash-exact` count-confirm removal;
   `--trash-perceptual` stateful staging of recompressed-trash matches for review — reuses the M3
@@ -58,7 +58,7 @@ function.
   every action submitting a real daemon call (see [design tenets](goals-and-concepts.md)). The default entrypoint and a live window onto
   daemon jobs from any terminal; `--offline` renders bundled sample data. Pure presentation over the
   M0 runtime's durable **queue** + per-job **`root_id`/`result_json`** columns (see [architecture](architecture.md) / [data model](data-model.md)).
-- ✅ **M6.5 — Probe + periodic scheduler**: the `probe` job (see [probe](workflow-scan.md) — cheap discovery: count
+- ✅ **M6.5 — Probe + periodic scheduler**: the `probe` job (see [probe](operation-probe.md) — cheap discovery: count
   new/changed files without fingerprinting; owns its root; one-pending-per-root submit-dedup;
   `packrat probe`/`--all`, `POST /probe`), the **general periodic scheduler** it realizes
   (`jobs/scheduler.py` — APScheduler `BackgroundScheduler` + a declarative `PeriodicTask` registry,
@@ -81,7 +81,7 @@ function.
 1. **Near-dup thresholds** `t_photo_recompress`, `t_photo_edit`, and `T_match_video` need empirical
    tuning on your real data (burst shots and edited copies are the hard photo cases; heavy re-encodes
    the hard video ones). They are **separate cutoffs** (see [fingerprints](fingerprints.md)): `t_photo_edit` is the photo match
-   decision and `t_photo_recompress` bands matched photos into dedup's stage-2/stage-3 review (see [dedup](workflow-dedup.md));
+   decision and `t_photo_recompress` bands matched photos into dedup's stage-2/stage-3 review (see [dedup](operation-dedup.md));
    the video cutoff only feeds the `frame_match_fraction` vote and tolerates frame noise, so expect
    `T_match_video` to land more permissive. Calibrate all three — plus the `video.*` structure knobs —
    on a small labeled sample. **Single-signal risk (accepted, see [embeddings](embeddings.md) gap review):** photos rely on
@@ -100,10 +100,10 @@ function.
    (`win32com` Shell.CreateShortcut) or `winshell`. Confirm thumbnail preview works for `.lnk`
    targets in Explorer (it does for real files; verify in the M3 spike). Fallback if `.lnk`
    previews disappoint: NTFS hardlinks (same volume only) or symlinks (needs privilege).
-5. **Audit-trail retention (see [dedup](workflow-dedup.md)):** the knob now exists — `audit.retention_days` in `config.toml`
+5. **Audit-trail retention (see [dedup](operation-dedup.md)):** the knob now exists — `audit.retention_days` in `config.toml`
    (see [config](tech-stack.md)), default `0` = keep forever. What remains deferred is only the **pruning pass** that acts
    on a `>0` value (nothing deletes old audits yet). **Merge:** its `merge_runs`/`merge_plan_items`
-   rows are now **retained on completion** (see [merge](workflow-merge.md) Safety & resume), giving merge a queryable
+   rows are now **retained on completion** (see [merge](operation-merge.md) Safety & resume), giving merge a queryable
    in-DB history (source, dest, per-file classification/disposition). Open sub-question: do we
    *also* want merge to emit the same on-disk `proposed.json`/`applied.json` under
    `%APPDATA%\packrat\audit\merge\…` for symmetry with dedup/cleanup, or is the retained DB plan
@@ -111,14 +111,14 @@ function.
 6. **Recompressed-trash on merge (accepted):** `merge` excludes trashed content by **exact hash
    only** — a *recompressed* copy of trashed content slips through as `new` on ingest. This is the
    accepted cost of keeping merge simple/one-shot; it is caught afterward by
-   `cleanup <dest> --trash-perceptual` (see [trash model](trash-model.md)), which stages recompressed-trash matches for review.
+   `cleanup <dest> --trash-perceptual` (see [trash model](operation-cleanup.md)), which stages recompressed-trash matches for review.
    (`dedup` still excludes trashed assets from grouping — see [fingerprints](fingerprints.md) — so cleanup is the dedicated path.)
 7. **`packrat config` command (deferred):** v1 config is a hand-edited, auto-created
    `%APPDATA%\packrat\config.toml` (see [config](tech-stack.md)) — there is no CLI to read/write keys. A future
    `packrat config get/set` (with value validation and a `--json` view) is a nicety; the TOML
    format is chosen to be forward-compatible with it. Not needed for v1, which only requires the
    file to exist, self-document its defaults, and reload per job.
-8. **Batch / list untrash (deferred):** v1 `untrash` (see [trash model](trash-model.md)) is **by-file only** — you present the
+8. **Batch / list untrash (deferred):** v1 `untrash` (see [trash model](operation-untrash.md)) is **by-file only** — you present the
    file(s) to forget from trash memory, matched by exact hash. Deferred niceties: (a) a
    **read-only `packrat trash list`** (metadata-only view of trash memory — count, by reason, by
    date — no preview, since no pixels are stored); (b) a **batch `untrash --since <time>` /
@@ -126,13 +126,13 @@ function.
    `trashed_at`/`trash_reason`; would need a typed count-confirm since it acts without a file in
    hand). Not required for v1: presenting recovered files (e.g. from the Recycle Bin) already covers
    the accidental-trash case.
-9. **Root removal / rename (deferred):** v1's `roots` command has `register` (add, see [scan](workflow-scan.md)) and
+9. **Root removal / rename (deferred):** v1's `roots` command has `register` (add, see [scan](operation-register.md)) and
    `list` (see [cli](cli.md)) — but not `roots unregister` (drop a root: delete its `roots` row + cascade its
    instances/orphaned assets, with a typed confirm) or `roots rename` (change a root's `name`
    handle, re-checking global uniqueness). Needed before the TUI's "Manage roots" panel (see [tui](tui.md)) can
    do more than add + list; scoped as a small follow-on to the `roots` group, not v1-critical.
 10. **Scan-result retention (deferred; accepted growth):** every completed scan persists a
-   `scan_results` row per root + a `scan_problem_files` row per current problem file (see [data model](data-model.md), [scan](workflow-scan.md) Phase 5),
+   `scan_results` row per root + a `scan_problem_files` row per current problem file (see [data model](data-model.md), [scan](operation-scan.md) Phase 5),
    kept **indefinitely** so the M6 TUI can navigate scan history. Two accumulation facts,
    accepted for now: (a) re-scanning a root **appends** a new `scan_results` row (never replaces),
    so a frequently-scanned root grows one row per scan; (b) because the undecodable problem set is
@@ -140,6 +140,6 @@ function.
    undecodable on *every* scan — it grows **per-scan, not per-distinct-problem** (a root with 50
    permanent undecodables scanned 200× → ~10K rows, mostly duplicates). Rows are tiny so this is
    fine at v1 scale, but unbounded. Deferred fix: a retention knob (mirroring `audit.retention_days`,
-   see [dedup](workflow-dedup.md)) — e.g. keep the last N `scan_results` per root or prune older than N days, cascading their
+   see [dedup](operation-dedup.md)) — e.g. keep the last N `scan_results` per root or prune older than N days, cascading their
    problem files — plus possibly deduping the current-undecodable list against the previous scan's.
    `status <root>` reads only the newest row, so this is purely storage hygiene, not correctness.

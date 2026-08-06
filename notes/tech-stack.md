@@ -15,7 +15,7 @@
 | Video              | ffmpeg / **PyAV** (frame sampling), ffprobe (metadata) |
 | Metadata           | exiftool via pyexiftool |
 | Embeddings (opt-in) | torch (CUDA) + open_clip — only on `scan --embed` (see [embeddings](embeddings.md)); OCR (PaddleOCR/Tesseract) is speculative/TBD |
-| Scheduling         | **APScheduler** (`BackgroundScheduler`, in daemon) — a **core dep** (pure-Python, no wheel risk); realized by `jobs/scheduler.py`'s `PeriodicScheduler` + `PeriodicTask` registry (see [architecture](architecture.md)), first client `probe` (see [scan](workflow-scan.md)) |
+| Scheduling         | **APScheduler** (`BackgroundScheduler`, in daemon) — a **core dep** (pure-Python, no wheel risk); realized by `jobs/scheduler.py`'s `PeriodicScheduler` + `PeriodicTask` registry (see [architecture](architecture.md)), first client `probe` (see [scan](operation-probe.md)) |
 | Job cancellation   | cooperative — jobs poll a cancel flag at their existing checkpoints |
 | Locking            | in-daemon single-worker queue (mutating ops); `review_runs` row (per-root review) |
 | Optional watch     | watchdog (real-time; not required for v1) |
@@ -100,34 +100,34 @@ world already in the stack (above).
 - **Re-read at each job start.** The daemon reloads `config.toml` when a job begins, so an edit
   applies to the **next** scan/dedup/merge/cleanup with no daemon restart. A job already running
   keeps the snapshot it started with — which is exactly the config the audit trail records "in
-  effect" for that run (see [dedup](workflow-dedup.md)). A malformed file → the job is rejected with a parse error naming the
+  effect" for that run (see [dedup](operation-dedup.md)). A malformed file → the job is rejected with a parse error naming the
   bad key, and the daemon keeps serving read-only queries with the last-good config.
 - **Missing keys fall back to the built-in default** (the file need not be exhaustive); **unknown
   keys are ignored with a logged warning** (forward-compat / typo signal).
 
 **Scope — global only.** Every knob here is collection-wide. The one *per-root* setting is the
 `--ignore` glob list, which is bound to each root at `roots register` time and stored on the `roots` row
-(see [scan](workflow-scan.md)), **not** in this file. (The `roots.ignore_globs` column and the deferred per-root scan
+(see [scan](operation-register.md)), **not** in this file. (The `roots.ignore_globs` column and the deferred per-root scan
 interval (see [data model](data-model.md)) are the only per-root config; everything else is global.)
 
 **The knobs (defaults are the shipped values):**
 
 ```toml
 [allowlist]
-# Media extensions that become assets (see workflow-scan.md). Photo + video are the fixed default set.
+# Media extensions that become assets (see operation-scan.md). Photo + video are the fixed default set.
 raw = false            # include the RAW group (dng cr2 cr3 nef arw raf orf rw2 pef srw); needs rawpy
-# photo/video extension lists are editable here too, but default to the workflow-scan.md closed sets.
+# photo/video extension lists are editable here too, but default to the operation-scan.md closed sets.
 
 [fastpath]
-mtime_tolerance_s = 2  # tolerant-mtime skip window (see workflow-scan.md, step 4); 0 = strict path+size+mtime
+mtime_tolerance_s = 2  # tolerant-mtime skip window (see operation-scan.md, step 4); 0 = strict path+size+mtime
 
 [match]
-t_photo_recompress = 10   # photo PDQ cutoff for dedup stage 2 (recompression band, see fingerprints.md / workflow-dedup.md)
+t_photo_recompress = 10   # photo PDQ cutoff for dedup stage 2 (recompression band, see fingerprints.md / operation-dedup.md)
 t_photo_edit       = 32    # photo PDQ match cutoff (see fingerprints.md); recompress < d ≤ edit → stage 3 (minor edit)
 t_match_video      = 90    # per-frame PDQ cutoff for video (see fingerprints.md); looser, the frame vote reclaims precision
 pdq_max_edge       = 512   # downscale each image/frame to this longest edge before PDQ (~7x faster; 0 = full-res)
-video_bitrate_tie_pct = 10.0  # video keep-lead (see workflow-dedup.md): effective-bitrates within this % tie → codec then path
-# codec-efficiency weights for the video keep-lead effective bitrate (see workflow-dedup.md); unlisted codec → 1.0
+video_bitrate_tie_pct = 10.0  # video keep-lead (see operation-dedup.md): effective-bitrates within this % tie → codec then path
+# codec-efficiency weights for the video keep-lead effective bitrate (see operation-dedup.md); unlisted codec → 1.0
 [match.codec_weights]
 h264 = 1.0
 hevc = 2.0    # == h265 (same codec); ~2x more efficient than h264
@@ -150,10 +150,10 @@ low_quality_hint = 50  # photo PDQ quality below this flags a near-dup pair low_
 scan_workers = 6       # concurrent hashing/decoding streams over SMB (see performance.md); 4–8 typical
 
 [audit]
-retention_days = 0     # 0 = keep review audits forever (see workflow-dedup.md); >0 = prune older (deferred knob, see roadmap.md #5)
+retention_days = 0     # 0 = keep review audits forever (see operation-dedup.md); >0 = prune older (deferred knob, see roadmap.md #5)
 
 [schedule]
-# Background periodic jobs (see architecture.md scheduler / workflow-scan.md probe). Interval edits apply on the NEXT
+# Background periodic jobs (see architecture.md scheduler / operation-probe.md probe). Interval edits apply on the NEXT
 # daemon restart (a background cadence, so no live reload in v1).
 probe_interval_hours = 24     # run a probe sweep (one probe per enabled library root) every N hours
 probe_enabled        = true   # off-switch for the scheduled probe (probe stays a manual CLI verb)
@@ -161,6 +161,6 @@ probe_enabled        = true   # off-switch for the scheduled probe (probe stays 
 
 > **Defaults marked tuning-dependent** (`t_photo_recompress`, `t_photo_edit`, `t_match_video`, the
 > `video.*` knobs, and the keep-lead `codec_weights` / `video_bitrate_tie_pct`) are **starting points
-> to be calibrated on real data before the first full scan** (see [fingerprints](fingerprints.md), [dedup](workflow-dedup.md), [roadmap](roadmap.md) #1) — not
+> to be calibrated on real data before the first full scan** (see [fingerprints](fingerprints.md), [dedup](operation-dedup.md), [roadmap](roadmap.md) #1) — not
 > claimed-correct constants. `mtime_tolerance_s`, `allowlist.raw`, `smb.scan_workers`, and
 > `review.low_quality_hint` are ordinary operational settings.

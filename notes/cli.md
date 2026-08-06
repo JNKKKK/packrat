@@ -1,7 +1,7 @@
 # CLI surface (complete command reference)
 
 Adding a folder is two commands (`roots register` then `scan`); `probe` cheaply checks whether a root
-has unscanned files (no fingerprinting, see [probe](workflow-scan.md)); `dedup` de-duplicates one folder via Explorer
+has unscanned files (no fingerprinting, see [probe](operation-probe.md)); `dedup` de-duplicates one folder via Explorer
 shortcuts (analyze → `--confirm`); `merge` copies new files in (exact-hash, one shot); trash is
 handled by `cleanup`, `trash refresh`, and `untrash` (see [trash model](trash-model.md)). `status` (read-only) and `jobs`
 (list / cancel / prioritize the work queue) surface runtime state; `daemon` manages the background
@@ -32,14 +32,14 @@ keyshortcut, see [tui](tui.md).)
 **Root argument resolution — path vs. `--name` handle.** Commands that take a registered root
 (`scan`, `probe`, `dedup`, `cleanup`, and `merge --into`) accept **either** a filesystem path **or** a
 root's `--name` handle. Resolution is unambiguous and order-independent:
-1. If the argument, canonicalized as a path (see [scan workflow](workflow-scan.md) step 1), exactly matches a root's stored `path`
+1. If the argument, canonicalized as a path (see [scan workflow](operation-scan.md) step 1), exactly matches a root's stored `path`
    → that root.
 2. Else, if it case-insensitively matches a root's `name` → that root.
 3. Else → error ("no registered root at path or named `<arg>`"; suggest `packrat roots` to list).
 A path never collides with a handle in practice (a handle is a bare label like `iPhone`, a path
 contains separators/a drive), and path match is tried first so an odd handle can't shadow a real
 path. `untrash <path>` is **excluded** — its argument is arbitrary bytes to hash, never a root
-(see [trash model](trash-model.md)).
+(see [trash model](operation-untrash.md)).
 
 ## `packrat roots` — manage roots
 The **noun for root lifecycle/metadata.** v1 subcommands: **`register`** (add) and **`list`**
@@ -124,7 +124,7 @@ it skips a held root and logs it rather than parking the whole sweep.
 ```
 
 ## `packrat probe`
-Walk a registered library root and **count new/changed files without fingerprinting** (see [probe](workflow-scan.md)) —
+Walk a registered library root and **count new/changed files without fingerprinting** (see [probe](operation-probe.md)) —
 scan's cheap *discovery* half. No BLAKE3/decode/PDQ and no catalog writes beyond a per-root "new
 files waiting" signal (`roots.probe_new_count`) the TUI surfaces as a 4-state status dot (see [tui](tui.md)). Runs
 automatically every 24 h per root via the scheduler (see [architecture](architecture.md)); this verb triggers one now.
@@ -148,7 +148,7 @@ is a no-op for any root still waiting. Never fingerprints — press `[s]`/`packr
 ```
 
 ## `packrat dedup`
-Dedup **one registered folder** as a **3-stage sequence** (see [dedup workflow](workflow-dedup.md)), one stage staged + reviewed at a
+Dedup **one registered folder** as a **3-stage sequence** (see [dedup workflow](operation-dedup.md)), one stage staged + reviewed at a
 time under `<root>\_packrat_review\`: **stage 1** `_exact_dup_to_delete\` (byte-identical copies,
 default-DELETE) → **stage 2** `_suspect_recompression\` (recompressions + all video near-dups,
 default-KEEP) → **stage 3** `_with_minor_edits\` (photo minor-edits/crops, default-KEEP). `--confirm`
@@ -213,7 +213,7 @@ Options
   --into <dest>          Destination folder; must resolve inside a library root. Required. If the
                          resolved dest path falls under the root's ignore rules, files still copy
                          there but are NOT catalogued (scan won't track them) — merge warns loudly
-                         per ignored subpath (see workflow-merge.md, Phase 4 step 13).
+                         per ignored subpath (see operation-merge.md, Phase 4 step 13).
   --dry-run              Print classification counts / would-copy list (incl. the ignored-dest
                          warning); copy nothing, write no asset rows. NOTE: still
                          refreshes-and-empties the trash collection (see trash-model.md) — that step always runs.
@@ -235,7 +235,7 @@ Cull junk from a library folder. **Requires exactly one mode** (no bare default)
   (stateful: analyze → `--confirm`); deletes exact matches too, at confirm.
 - `--undecodable` — files whose pixels won't decode (see [format coverage](tech-stack.md)); deletes them **and marks each asset
   `trashed`** so a re-import is excluded from a future merge. One-shot count-confirm. Does **not**
-  touch the trashed set. See [trash model](trash-model.md) / [format coverage](tech-stack.md).
+  touch the trashed set. See [trash model](operation-cleanup.md) / [format coverage](tech-stack.md).
 
 ```
 packrat cleanup <folder> --trash-exact       # one-shot: refresh → count-confirm → delete
@@ -272,7 +272,7 @@ perceptual stages (`_suspect_recompression\` / `_with_minor_edits\`).
 ## `packrat trash refresh`
 Absorb whatever is sitting in the registered trash folders into the permanent trashed-hash set,
 then empty those folders (to Recycle Bin). Runs automatically inside `cleanup` and `merge`;
-exposed standalone for when you've just dropped junk into a trash folder (see [trash model](trash-model.md)).
+exposed standalone for when you've just dropped junk into a trash folder (see [trash model](operation-trash-refresh.md)).
 
 ```
 packrat trash refresh [<root>] [--json]
@@ -306,7 +306,7 @@ files emptied.
 Reverse an accidental trash: **forget content from the permanent trashed-hash set** so it's no
 longer excluded from future merges. You *present the file* (it's the identifier — packrat stores no
 pixels to preview); untrash hashes it and matches by exact content hash. **It does not restore the
-file's bytes** (that's the Recycle Bin, see [performance](performance.md)) and writes nothing to disk — only DB rows. See [trash model](trash-model.md).
+file's bytes** (that's the Recycle Bin, see [performance](performance.md)) and writes nothing to disk — only DB rows. See [trash model](operation-untrash.md).
 
 ```
 packrat untrash <path> [--dry-run] [--json]
@@ -348,7 +348,7 @@ summary because it's a summary view, not a hot path. `<root>` resolves the handl
 
 **Dedup/cleanup review state — show only what's actionable.** The one state worth surfacing is a
 **`pending` review run** (a paused dedup or cleanup awaiting the user); completed/cancelled runs are
-history and live in the [audit trail](workflow-dedup.md), **not** here. Per root:
+history and live in the [audit trail](operation-dedup.md), **not** here. Per root:
 - **Pending run present** → highlight it (`⚠`), with everything needed to act: `run_type`, how long
   ago it was staged, a count summary, the `_packrat_review\` path to open in Explorer, and the exact
   `--confirm` / `--cancel` commands. Because a pending run *owns* the root (see [architecture](architecture.md) per-root
@@ -371,11 +371,11 @@ history and live in the [audit trail](workflow-dedup.md), **not** here. Per root
 
 **With a root path/handle (`packrat status <root>`):** that root's detail — its pending run's full
 plan breakdown (+ the review-folder path and confirm/cancel commands), and the most-recent completed
-run's timestamp + one-line outcome (deeper forensics: the [audit trail](workflow-dedup.md)). **Plus the root's
+run's timestamp + one-line outcome (deeper forensics: the [audit trail](operation-dedup.md)). **Plus the root's
 most-recent completed scan result** (see [data model](data-model.md) `scan_results`, read newest-first): the scan banner counts +
 flags, and — the actionable part — the list of **problem files** with paths + reasons
 (`scan_problem_files`: undecodable / read-error). The undecodable set reflects the root's *current*
-catalog state (re-derived, stable across resume/incremental — see [scan workflow](workflow-scan.md) Phase 5), so it answers "what in
+catalog state (re-derived, stable across resume/incremental — see [scan workflow](operation-scan.md) Phase 5), so it answers "what in
 this folder won't decode, and why." Problem-file detail is shown **only** here (per-root), not in the
 global rollup. Historical scans are retained in `scan_results` for the M6 TUI to page through; the
 CLI shows only the latest.
@@ -405,7 +405,7 @@ Read-only — runs anytime, never blocked (see [architecture](architecture.md)).
 The same cancel the TUI `[c]` issues (see [architecture](architecture.md), [tui](tui.md)), addressable by id from any terminal:
 - **Running** → a **cooperative** stop at the job's next checkpoint; it lands `cancelled` (terminal,
   distinct from a `daemon stop`'s `interrupted`). For `merge`/review this discards the resumable
-  plan (a deliberate abort, see [merge workflow](workflow-merge.md) / [dedup workflow](workflow-dedup.md)).
+  plan (a deliberate abort, see [merge workflow](operation-merge.md) / [dedup workflow](operation-dedup.md)).
 - **Queued** (runnable *or* blocked) → **dropped** from the backlog immediately (`cancelled`, never
   ran).
 - A **terminal** job (done/error/cancelled/interrupted) → no-op.

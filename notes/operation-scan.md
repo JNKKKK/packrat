@@ -1,126 +1,4 @@
-# Core workflows
-
-This section specifies three behaviors, step by step, so the logic can be reviewed
-for correctness:
-
-- **A. Add a folder to the collection** — catalog an existing on-disk folder (`roots register` +
-  `scan`). Pure indexing; it never moves, renames, copies, or deletes any file. Only the
-  database changes. Scan writes **all per-asset fingerprint data** to the DB.
-- **B. Dedup a single registered folder** — from the DB fingerprints (plus a liveness check),
-  find the target folder's duplicates against the whole collection, stage removable copies as
-  Explorer **shortcuts** inside the folder, and — after the user reviews and confirms — delete
-  them (to Recycle Bin). One pending run per folder; pending → completed.
-- **C. Merge a folder into an existing folder** — discard trash and copy into a destination only
-  the files new to the *whole* collection, decided by **exact hash only** (no near-dup matching,
-  no review). Read-only on the source; copy-only on the destination.
-
-**Division of labor (important):** `scan` (A) produces *per-asset* data only — hash, metadata,
-perceptual signatures. The *pairwise near-dup* matching (which asset is visually a near-dup of
-which) is done **only** by `dedup` (B), over DB assets. `merge` (C) does **not** do near-dup
-matching at all — it classifies incoming files purely by exact `content_hash` (dup-in-source /
-trashed / exact-known / new), collapsing byte-identical duplicates but leaving recompressed
-near-dups for `dedup`. The one kind of duplicate scan *does* resolve is **exact byte-identical**
-files — that is identity assignment (a second `file_instance` on the same asset), enforced by
-the `content_hash` unique index, not near-dup dedup.
-
-All three rely on the **asset / file-instance** split and the identity rules below.
-
-## Identity rules (used by all three workflows)
-- **Exact identity** = BLAKE3 content hash. Files with the *same bytes* are the **same asset**
-  with multiple **file instances** (e.g. the same photo living in two folders). Adding such a
-  file never creates a second asset — it just adds a file-instance row pointing at the
-  existing asset.
-- **Near-duplicate** = *different bytes, visually the same* (recompressed / resized /
-  re-encoded). These are **distinct assets** linked by a recorded **similarity edge**, never
-  silently collapsed. Near-dup relationships are found and acted on **only by `dedup`** (see [dedup](workflow-dedup.md));
-  `merge` does not consider them.
-- **Trashed-hash exclusion** applies during **merge** (discard incoming exact-hash trash matches)
-  and **cleanup** (delete library exact-hash trash matches). Trashed assets keep their
-  fingerprints forever (physical file may be gone); this is what excludes re-appearing junk. Merge
-  matches trash by **exact hash only** — a recompressed copy of trashed content is caught later by
-  `dedup`, not by merge.
-
----
-
-## A. Add a folder to the collection — two separate operations
-
-Adding a folder is deliberately split into two commands so a cheap bookkeeping action is never
-coupled to a multi-hour fingerprinting job:
-
-- **`roots register`** — record the folder as a root. Metadata-only, instantaneous, touches no files.
-- **`scan`** — walk a registered root and fingerprint its contents. This is the resumable,
-  long-running indexing job. **It does not compute CLIP embeddings unless `--embed` is passed**
-  — dedup never needs them, so the default scan stays lean.
-
-Both are non-destructive: files are read-only, the only writes are to the packrat database.
-(`roots register` is grouped under the `roots` command — the noun for root lifecycle/metadata —
-alongside `roots list`; `scan` stays a flat top-level verb because it is a *job run against* a
-root, not root bookkeeping. See [cli](cli.md).)
-
----
-
-### `roots register` — declare a folder as a root (metadata-only)
-
-```
-packrat roots register "D:\Backup\iPhone"           # default kind: library
-packrat roots register "D:\Backup\iPhone" --scan    # register, then immediately kick off a scan
-```
-
-1. Resolve the path to an absolute, long-path-safe form; require it to exist, be a directory,
-   and be readable.
-2. **Overlap check:** reject if the path is already a root, or is nested inside / contains an
-   existing root (prevents double-indexing the same bytes under two roots).
-3. **Unique-name check:** the folder's **leaf name** (the last path component, e.g. `iPhone`)
-   must be globally unique across all roots, compared case-insensitively. So with
-   `D:\Backup\iPhone` already registered, `D:\test\iPhone` is **rejected** even though it is a
-   different path — the leaf `iPhone` collides. Rationale: the leaf name is used as the human-
-   facing handle for a root, so it must be unambiguous. The error suggests either picking a
-   differently-named folder or passing an explicit `--name <label>` to override the handle (the
-   label, not the path, is what must be unique).
-4. Insert a `roots` row: `path`, `name` (leaf name or `--name`), `kind=library`, `enabled=1`,
-   `last_full_scan_at=NULL`. Bind the **ignore set** to the root (see below).
-5. Report the root id/name and that it is registered but **not yet scanned** — nothing is
-   walked or fingerprinted here. The root contributes nothing to dedup/merge until a `scan`
-   completes. With `--scan`, immediately enqueue a `scan` job for this root (equivalent to
-   running `packrat scan <path>` next) and stream its progress; `--scan --embed` also runs the
-   embedding pass.
-
-**What the ignore set is (and what "bind" means):** the ignore set is the filter that decides
-which files a later `scan` will even *look at* — matched files are skipped entirely (never
-hashed, fingerprinted, or turned into assets). It has two parts:
-- **Junk/system exclusions** — `Thumbs.db`, `desktop.ini`, `.DS_Store`, hidden/system-attribute
-  files, zero-byte files, and packrat's own staging area `_packrat_review\` (which contains dedup's
-  per-stage folders `_exact_dup_to_delete\` / `_suspect_recompression\` / `_with_minor_edits\` and
-  cleanup's `_perceptually_identified_trash\`) plus `.lnk` shortcuts.
-- **Media extension allowlist** — only these become assets. The **default** is a fixed, closed
-  set (case-insensitive), defined once here and reused everywhere:
-  - **Photo:** `jpg jpeg jfif png gif bmp tif tiff webp avif heic heif`
-  - **Video:** `mp4 m4v mov avi mkv webm wmv flv mpg mpeg m2ts mts ts 3gp`
-
-  Anything else (`.txt`, `.zip`, `.pdf`, sidecars like `.aae`, etc.) is ignored. The set lives
-  in config and can be edited, but the shipped default is exactly the two lists above — no
-  open-ended "…".
-
-  **Optional RAW group (off by default):** `dng cr2 cr3 nef arw raf orf rw2 pef srw`. Enable via
-  config (`allowlist.raw = true`) when you want camera RAW files catalogued. It is opt-in
-  because RAW needs a separate decode path (`rawpy`) for metadata/perceptual hashing, and many
-  workflows keep RAW+JPEG pairs where you may not want both indexed.
-
-There is a **global default** ignore set from config; "bind" simply records, on the root, which
-set applies (the default, optionally extended with per-root patterns via `--ignore <glob>`). It
-is stored at register time so every scan of that root reuses the same rules deterministically.
-
-Note the two mechanisms differ in form: the **allowlist** is a set of file *extensions* (what
-qualifies as media at all), while **`--ignore` patterns are gitignore-style path globs** (e.g.
-`**/cache/**`, `*.tmp`, `Screenshots/`), not a comma-separated extension list. A file is scanned
-only if its extension is in the allowlist AND it matches none of the ignore patterns.
-
-Registering alone leaves the collection unchanged in content terms; it just tells packrat this
-folder exists and how to treat it. Follow with `scan` (or use `roots register --scan`).
-
----
-
-### `scan` — walk a registered root and fingerprint it (the indexing job)
+# `scan` — walk a registered root and fingerprint it (the indexing job)
 
 ```
 packrat scan "D:\Backup\iPhone"     # incremental; fingerprint new/changed files. No embeddings.
@@ -129,14 +7,14 @@ packrat scan "D:\Backup\iPhone" --embed   # also compute CLIP embeddings for tag
 ```
 
 Scan is purely per-asset: it fills in every fingerprint column for each file but computes **no
-near-dup relationships** — those are the `dedup` operation's job (see [dedup](workflow-dedup.md)). The one exception is
+near-dup relationships** — those are the `dedup` operation's job (see [dedup](operation-dedup.md)). The one exception is
 exact byte-identity, which scan must resolve because it decides asset identity. Each step below
 notes exactly what it writes.
 
 **Phase 1 — Enumerate**
 1. Resolve the target to a registered root (error if it isn't one — `roots register` it first).
    **Reject `kind='trash'` roots** — trash folders are transient inboxes indexed only by "refresh
-   the trash collection" (see [trash refresh](trash-model.md)), never by `scan` (whose "index and keep" semantics would fight the
+   the trash collection" (see [trash refresh](operation-trash-refresh.md)), never by `scan` (whose "index and keep" semantics would fight the
    "index then empty" model). → reads `roots` (match `path`); no write.
 1a. **Per-root exclusivity check (see [architecture](architecture.md) guarantee 2).** If this root has an active operation — a
    `pending` `review_runs` row (dedup or cleanup) or an open `merge_runs` row
@@ -178,7 +56,7 @@ For every candidate file:
      `--embed` pass has its own "no `embeddings` row yet" gate (Phase 3 step 10), independent of
      the fast-path.
    - **Consequence for merge-created assets.** A file copied by `merge` gets an `assets` row with
-     `undecodable=0` and **no** `phash`/`vphash` yet (see [merge](workflow-merge.md) step 11), so it is **not** fully
+     `undecodable=0` and **no** `phash`/`vphash` yet (see [merge](operation-merge.md) step 11), so it is **not** fully
      fingerprinted → the fast-path won't skip it → the next `scan <dest>` hashes it, hits the
      existing asset (step 6), and takes the **backfill exception** to fill perceptual data
      in place. This is exactly why the predicate must distinguish "no perceptual rows because
@@ -247,7 +125,7 @@ For every candidate file:
        in place** (write/replace `phash`/`vphash`, refresh metadata, set/clear
        `undecodable`/`decode_error`) — *not* insert a new asset — when the hit asset is either:
        - **(a) not-yet-fingerprinted:** `undecodable=0` with **no** perceptual rows — characteristically
-         a merge-created asset (see [merge](workflow-merge.md) step 11). Fires on **any** scan (incremental or `--full`): such
+         a merge-created asset (see [merge](operation-merge.md) step 11). Fires on **any** scan (incremental or `--full`): such
          an asset fails the step-4 predicate, so an unchanged merge-created file reaches step 6 even
          on a plain incremental scan, and gets filled in here.
        - **(b) undecodable retry:** `undecodable=1` **and this is `--full`** — re-attempt decode
@@ -261,15 +139,15 @@ For every candidate file:
    - **Miss** → continue; create the asset in step 9.
 7. **Metadata** — decode/probe for dimensions, duration, capture time, codec (exiftool /
    ffprobe). → values held for step 9 (→ `assets.width/height/duration_s/captured_at`, `size`).
-   (`media_type` is decided by **extension** via the allowlist — see roots register above — not by decoding, so it is
+   (`media_type` is decided by **extension** via the allowlist — see [roots register](operation-register.md) — not by decoding, so it is
    known even for files that won't decode.)
 8. **Perceptual signature** — photo: PDQ + quality; video: duration + PDQ (with quality) of each of
    the `video.sample_frames` frames sampled at fixed timeline fractions (see [fingerprints](fingerprints.md)). → values held for
    step 9 (→ `phash` / `vphash` rows). *No near-dup comparison here.*
-   - **Video `codec` (see [dedup](workflow-dedup.md) stage-2 keep-lead), same decode pass.** For a **video** that decodes,
+   - **Video `codec` (see [dedup](operation-dedup.md) stage-2 keep-lead), same decode pass.** For a **video** that decodes,
      capture the video stream's `codec` name (`h264`/`hevc`/`av1`/…) from the already-open decoder —
      free, no extra work. → value held for step 9 (→ `assets.codec`). Feeds the video keep-lead's
-     codec-efficiency weight (see [dedup](workflow-dedup.md)). **Photo and undecodable → NULL.**
+     codec-efficiency weight (see [dedup](operation-dedup.md)). **Photo and undecodable → NULL.**
    - **Decode failure (graceful, see [format coverage](tech-stack.md)):** if the pixels/frames won't decode (corrupt file,
      unsupported codec, missing wheel), **do not crash and do not abort the asset** — the BLAKE3
      hash (step 5) already gives it identity. Record it in step 9 with **`undecodable=1`**, the
@@ -298,7 +176,7 @@ For every candidate file:
    re-attempts decode, and **clears `undecodable`/`decode_error` and writes phash rows** if it now
    succeeds. A plain incremental scan never retries them.
 
-*(Near-dup linking is intentionally absent — it is the `dedup` operation (see [dedup](workflow-dedup.md)), which writes the
+*(Near-dup linking is intentionally absent — it is the `dedup` operation (see [dedup](operation-dedup.md)), which writes the
 `similarity_edges` table from this data. Scan never writes similarity edges.)*
 
 **Phase 3 — Embeddings (only if `--embed`)**
@@ -340,7 +218,7 @@ For every candidate file:
     user trashed this content; re-appearing on disk doesn't un-trash it). The file physically
     exists but the collection still treats the content as trash. → counted as `matches-trashed`
     in the report; no status change. Remove these re-appearances with **`packrat cleanup <folder>`**
-    (see [trash model](trash-model.md)), which deletes library files whose content is trashed.
+    (see [cleanup](operation-cleanup.md)), which deletes library files whose content is trashed.
 
 **Phase 5 — Report**
 14. Summarize: new assets, files that were exact-dups of a known asset (new instance only),
@@ -367,73 +245,5 @@ picks up where it stopped without any explicit cursor. (`jobs.done` is only the 
 see [data model](data-model.md) — not the resume key.) If the daemon died mid-scan, startup reconciliation flips the stale
 `running` row to `interrupted` (see [architecture](architecture.md)); the next `scan` (manual or scheduled) then continues via the
 fast-path. Re-running `roots register` on an existing root is rejected by the overlap check.
-
----
-
-### `probe` — cheap discovery: is there anything new here worth a scan?
-
-```
-packrat probe "D:\Backup\iPhone"     # count new/changed files; write NO fingerprints
-packrat probe --all                  # probe every enabled library root (one job each)
-```
-
-`probe` (`jobs/probe.py`) splits the two halves `scan` conflates — *discovery* (walk + notice
-new paths; seconds, no per-file I/O) and *fingerprinting* (hash + decode + PDQ; the multi-hour
-cost). Probe is **discovery-only**: it answers one question about a root — *are there files here
-we haven't scanned yet?* — and records a per-root "new files waiting" signal (the TUI surfaces it
-as a status-dot state, see [tui](tui.md)), so the user learns a root needs a `scan` without remembering they
-dropped files in. Runs every 24 h per root via the scheduler (see [architecture](architecture.md)); never blocks the user (press
-`[s]`/`packrat scan` to scan now). CLI-exposed; **no** TUI keyshortcut (background-only).
-
-**What it does.** Reuse scan's `enumerate_root(root_path, ignore)` (the walk + allowlist + ignore
-filter — Phase 1) to build the candidate list, then per candidate apply scan's **existing
-fast-path skip predicate** (path + exact size + tolerant mtime + "fully fingerprinted", step 4)
-to decide *known* vs *new/changed*. Count the news. **No BLAKE3, no decode, no PDQ, no
-`assets`/`phash`/`vphash` writes** — that is exactly the line between probe and scan. The
-predicate is factored into a shared helper (`scan.load_existing_instances` +
-`scan.is_fastpath_hit`) that both scan and probe call, so **"probe says N" ⇒ "scan would
-fingerprint ≥ N"** holds by construction — no second copy of the rule.
-
-- **"New"** = a candidate with no matching live `file_instances` row, OR a matching row whose
-  size/mtime drifted past tolerance (a changed file also needs re-scanning).
-- Probe does **no deletion-detection** (that mutates the catalog — scan's job, needs the full
-  pass). Probe is **read-only on the catalog**; its only write is the per-root signal.
-- **Trash roots:** never probed (scan never touches `kind='trash'` — see [trash refresh](trash-model.md)); `probe --all`
-  iterates `enabled=1 AND kind='library'`.
-- **Offline / unreadable root** (SMB blip, see [SMB/NAS performance](performance.md)): report `root_offline`, write **no** signal —
-  absence of a readable listing ≠ "no new files"; never let an unreachable root read as "clean".
-
-**Per-root exclusivity — probe OWNS its root.** `owned_root=root_id`, so a probe **waits in the
-backlog until its root is idle** (no running scan/dedup/cleanup/merge on it) via the existing
-dequeue gate (see [architecture](architecture.md) guarantee 2), exactly like scan. Rationale for N per-root probe jobs over one
-`probe --all` sweep: a single sweep owns no root and *iterates*, so at a busy root it must either
-skip it (a silent miss) or stall the whole sweep; N per-root jobs sidestep it — each is an
-independent queue entry the scheduler holds until *its* root frees. The cost ("100 roots → 100
-jobs / 24 h") is bounded by the submit-dedup below. Probe is sub-second-to-seconds, so the brief
-block it imposes is negligible; non-destructive → reconcile drains a queued probe normally, an
-interrupted running probe just re-runs (idempotent — recomputes from scratch, writes nothing else).
-
-**The signal.** On **clean completion** (not offline): set `last_probe_at=now` and
-`probe_new_count=<n found>` — which may be **0** (found nothing). Writing 0 is correct and
-important: it means "a probe ran and there's nothing unscanned," so the dot stays whatever the
-scan/dedup state says (see [tui](tui.md)). **A completed `scan` clears `probe_new_count=0`** (Phase 5, alongside
-`last_full_scan_at`; skipped for a dry-run or an offline root) — the news are now fingerprinted.
-Because the count is self-clearing, `count > 0` *is* the "latest meaningful op is a
-probe-with-news" state — no `last_activity` column needed, and it stays honest if the user deletes
-the new files and re-probes (re-enumeration finds 0 → dot reverts).
-
-**Submit-time dedup — "one pending probe per root".** The queue never dedups in general (every
-submission is enqueued — see [architecture](architecture.md) guarantee 1). A **narrow, probe-only** exception in `JobQueue.submit`
-(`_dedup_probe`): if an un-started `probe` job for the same `root_id` is already `status='queued'`,
-skip the insert and return that job's id. Match `queued` only — **not** a *running* probe (a fresh
-queued one after it is legitimate; files may have arrived after it started). This bounds the "100
-roots" backlog: a root whose probe from yesterday is still `queued` (worker backed up) gets a no-op
-today. Scan/dedup/merge still enqueue freely.
-
-**Result / CLI / API.** `result_json`: `{op:"probe", new_count, root_offline, candidates}` for the
-[tui](tui.md) job card. `packrat probe <root>`/`--all`/`--detach`/`--json`, `client.submit_probe` (returns a
-list of job ids), `POST /probe` (does the `--all` fan-out to per-root submissions). [goals and concepts](goals-and-concepts.md) parity
-holds: probe is a first-class CLI verb; the TUI only *reflects* its result in the dot, and the
-user's manual equivalent is `[s]` scan.
 
 ---

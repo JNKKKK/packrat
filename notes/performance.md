@@ -16,7 +16,7 @@
   backup of the DB before every merge/trash-commit.
 
 **Deletion target — Recycle Bin where it exists, permanent on NAS/SMB (accepted).** Every
-"move to Recycle Bin" in this plan (dedup, cleanup, trash refresh — [trash model](trash-model.md), [dedup workflow](workflow-dedup.md)/[trash model](trash-model.md)) means: attempt
+"move to Recycle Bin" in this plan (dedup, cleanup, trash refresh — [trash model](operation-cleanup.md), [dedup workflow](operation-dedup.md)/[trash model](operation-trash-refresh.md)) means: attempt
 the Windows Recycle Bin (via `send2trash`/`SHFileOperation`). **Windows provides no Recycle Bin
 for network locations** (UNC / mapped-drive paths), and per the SMB / NAS performance section below most roots live on the Synology
 NAS — so for those files the delete is **permanent** (the shell either errors or hard-deletes).
@@ -87,6 +87,6 @@ Mapping this onto packrat's operations:
   listing." **Implementation note:** track the set of cleanly-enumerated directories during Phase 1
   and scope the Phase-3 step-11 `DELETE … WHERE last_seen_at < start` to instances whose parent dir
   is in that set.
-- **mtime stability.** The fast-path already tolerates small mtime jitter (see [scan workflow](workflow-scan.md), step 4). A
+- **mtime stability.** The fast-path already tolerates small mtime jitter (see [scan workflow](operation-scan.md), step 4). A
   NAS-side reindex or an rsync that rewrites timestamps by more than the tolerance will force
   re-fingerprinting of those files — correct but costly; note it if you run such tools.

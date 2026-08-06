@@ -2,12 +2,12 @@
 
 This section defines the fingerprints packrat stores per asset and the two separate notions of
 "duplicate" built on them. It is reference material; the operations that *act* on it are
-scan/dedup/merge (see [scan](workflow-scan.md), [dedup](workflow-dedup.md),
-[merge](workflow-merge.md)) and cleanup (see [trash-model](trash-model.md)).
+scan/dedup/merge (see [scan](operation-scan.md), [dedup](operation-dedup.md),
+[merge](operation-merge.md)) and cleanup (see [trash-model](operation-cleanup.md)).
 
 ## The fingerprints
 
-Three fingerprints, all produced by **`scan`** (see [scan](workflow-scan.md)) and stored in the DB. Computing them is
+Three fingerprints, all produced by **`scan`** (see [scan](operation-scan.md)) and stored in the DB. Computing them is
 scan's job; every other operation reads them.
 
 - **Content hash — BLAKE3 of the file bytes.** The identity key: same bytes ⇒ same asset. Cheap,
@@ -37,8 +37,8 @@ Everything downstream rests on this distinction:
 - **Perceptual near-duplicate — different bytes, visually the same** (recompressed, resized,
   re-encoded, cropped…). These are **distinct assets** joined by a recorded similarity edge, never
   silently collapsed — because both files genuinely exist. Deciding what to do about them needs
-  human review, so this is **only** ever surfaced by `dedup` (see [dedup](workflow-dedup.md)) and `cleanup --trash-perceptual`
-  (see [trash-model](trash-model.md)), which stage candidates in Explorer for the user.
+  human review, so this is **only** ever surfaced by `dedup` (see [dedup](operation-dedup.md)) and `cleanup --trash-perceptual`
+  (see [trash-model](operation-cleanup.md)), which stage candidates in Explorer for the user.
 
 Exact resolution is cheap and safe enough to run inline anywhere; perceptual matching is a
 deliberate, reviewed, opt-in operation.
@@ -55,11 +55,11 @@ file I/O.
   together (which is why pHash is not computed or stored for photos at all — decided in the embeddings gap
   review; a single signal, no dead data). The matcher itself reports the raw PDQ distance for a
   matched pair; **`dedup` bands that distance into two review stages** with two cutoffs
-  `t_photo_recompress < t_photo_edit` (see [dedup](workflow-dedup.md) / [tech-stack](tech-stack.md)): `d ≤ t_photo_recompress` = a recompression
+  `t_photo_recompress < t_photo_edit` (see [dedup](operation-dedup.md) / [tech-stack](tech-stack.md)): `d ≤ t_photo_recompress` = a recompression
   (stage 2, near-certain), `t_photo_recompress < d ≤ t_photo_edit` = a minor edit/crop (stage 3,
   scrutinize). The engine's own match cutoff is the wider `t_photo_edit`; the tighter cutoff only
   splits already-matched pairs into stages, so it is a review-ergonomics band, not a second recall
-  gate. (`cleanup --trash-perceptual` uses the single wider cutoff, no banding — see [trash-model](trash-model.md).)
+  gate. (`cleanup --trash-perceptual` uses the single wider cutoff, no banding — see [trash-model](operation-cleanup.md).)
   - **Photo quality — annotate, never gate (asymmetric with video).** PDQ's 0–100 quality is
     *stored* per photo but **does not exclude** a photo from matching. This is deliberate and
     differs from video (`video.min_frame_quality`): a video has ~12 frames, so dropping a bad one
@@ -69,7 +69,7 @@ file I/O.
     1. **Confidence hint in review.** PDQ on flat/near-black/letterboxed/low-detail images yields
        hashes that spuriously collide, flooding review with junk pairs. So every staged photo
        near-dup carries its (and its partner's) quality in the `manifest.csv` / `proposed.json`
-       (see [dedup](workflow-dedup.md)), and a pair where *either* photo is below `review.low_quality_hint` (default **50**,
+       (see [dedup](operation-dedup.md)), and a pair where *either* photo is below `review.low_quality_hint` (default **50**,
        same scale as video) is **flagged low-confidence** — a visual cue to skip it fast, not a
        removal. Nothing is hidden; noisy matches are just easy to dismiss.
     2. **Future gate, no re-scan.** Because quality is already stored, a `min_photo_quality` *gate*
@@ -87,7 +87,7 @@ file I/O.
   positions* and the duration pre-filter keeps their lengths close enough to stay aligned.
 
   **Video match parameters (concrete defaults; canonical values live in `config.toml` (see [tech-stack](tech-stack.md)), logged
-  with each run).** These were previously unspecified — pinned here so [dedup](workflow-dedup.md) / [trash-model](trash-model.md) are
+  with each run).** These were previously unspecified — pinned here so [dedup](operation-dedup.md) / [trash-model](operation-cleanup.md) are
   implementable:
 
   | Param | Default | Meaning |
@@ -95,7 +95,7 @@ file I/O.
   | `video.sample_frames` | **12** | Frames sampled per video, at the **midpoints of N equal segments**: `t_k = duration·(k+0.5)/N`, `k=0..N-1` (offset by the stream's `start_time`, which transport streams commonly make non-zero). Proportional positions ⇒ same-content clips align frame-to-frame. Short clips (e.g. a 3 s Live-Photo `.MOV`) still get all 12. **Transport streams (`.ts`/`.m2ts`/`.mts`)** need two robustness fallbacks the mp4/mov path doesn't: (a) they often report **no duration** → recovered by a demux-only last-packet-timestamp pass; (b) they often **break mid-file seeking** (a seek to a non-zero target silently returns nothing) → sampling falls back from per-target seeks to one sequential decode pass picking the nearest frame to each target. Both engage only when the seek path under-delivers, so well-behaved containers keep the cheap seek. |
   | `video.duration_tol_s` | **1.0 s** | Absolute floor of the duration pre-filter. |
   | `video.duration_tol_pct` | **5.0 %** | Relative part. Two videos pass the pre-filter iff `|d₁−d₂| ≤ max(duration_tol_s, duration_tol_pct%·min(d₁,d₂))` — so a 3 s clip tolerates ~1 s drift, a 2 h movie ~6 min. |
-  | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoffs `t_photo_recompress`/`t_photo_edit`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) A video near-dup is a single frame-vote match — it is **not** banded into recompress/edit stages; all video matches go to dedup stage 2 (see [dedup](workflow-dedup.md)). |
+  | `T_match_video` (per-frame distance) | **e.g. 90** | A frame-pair *matches* iff its PDQ Hamming distance ≤ `T_match_video`. **Separate from the photo cutoffs `t_photo_recompress`/`t_photo_edit`** and typically **more permissive**: video frames carry inter-frame-compression / motion-blur / keyframe-drift noise a still doesn't, and the frame-fraction vote below reclaims the precision a looser per-frame cutoff spends. (Same 0–255 PDQ Hamming scale as photo, different tuned value.) A video near-dup is a single frame-vote match — it is **not** banded into recompress/edit stages; all video matches go to dedup stage 2 (see [dedup](operation-dedup.md)). |
   | `video.frame_match_fraction` | **0.60** | The two videos are a near-dup iff **≥ 60 %** of *comparable* frame-pairs (see quality gate) match within `T_match_video`. This vote is video's *second* precision control — the one photos lack — which is exactly why the two cutoffs need not (and should not) be equal. |
   | `video.min_frame_quality` | **50** | PDQ emits a 0–100 quality per frame; dark/blurry/transition frames score low and hash unreliably. A frame below this is **excluded** from comparison (stored, but flagged). A frame-pair is *comparable* only if **both** frames clear the gate. |
   | `video.min_comparable_frames` | **5** | If fewer than this many comparable frame-pairs remain after the quality gate, the pair is **not** matched — insufficient evidence beats a coin-flip. |
@@ -104,7 +104,7 @@ file I/O.
 (video)** (all configurable and logged). Same 0–255 PDQ Hamming scale, tuned independently. For a
 **photo** the single comparison *is* the decision: `t_photo_edit` is the engine's match cutoff (a
 pair with `d ≤ t_photo_edit` is a near-dup), and `t_photo_recompress` (the tighter value) *bands*
-matched pairs into dedup's two review stages (see [dedup](workflow-dedup.md)) — it is not a separate recall gate. For a
+matched pairs into dedup's two review stages (see [dedup](operation-dedup.md)) — it is not a separate recall gate. For a
 **video** the per-frame cutoff only feeds a **majority vote** (`video.frame_match_fraction`), a
 second precision control, and frames are noisier — so `T_match_video` is typically the most
 permissive. A pair is a near-dup iff:
@@ -121,7 +121,7 @@ distance cutoffs.) Set each threshold high enough to catch what PDQ *structurall
 (recompression, resize, format conversion) plus the harder cases you want a look at (crops,
 rotations, borders/watermarks, heavy re-encodes); every hit lands in the review folder either way,
 so a permissive threshold just means more candidates to eyeball, never a silent deletion. The
-operation (see [dedup](workflow-dedup.md) / [trash-model](trash-model.md)) decides how matches are staged. **All three cutoffs
+operation (see [dedup](operation-dedup.md) / [trash-model](operation-cleanup.md)) decides how matches are staged. **All three cutoffs
 (`t_photo_recompress`, `t_photo_edit`, `T_match_video`) and every `video.*` knob need calibration
 on real data — see [roadmap](roadmap.md) #1.**
 
@@ -138,7 +138,7 @@ on real data — see [roadmap](roadmap.md) #1.**
 
 The first full `scan` of 100K assets is a one-time multi-hour cost (video decode dominates over
 SMB); it is checkpointed per file and resumes after interruption. Later scans are cheap via the
-fast-path (see [scan](workflow-scan.md)), which skips re-fingerprinting unchanged files. The perceptual matcher runs on
+fast-path (see [scan](operation-scan.md)), which skips re-fingerprinting unchanged files. The perceptual matcher runs on
 the stored signatures (a few MB in the DB) — seconds of CPU, no I/O (see [performance](performance.md)).
 Embeddings, if ever wanted, are a separate opt-in `scan --embed` pass and not part of this
 baseline cost.

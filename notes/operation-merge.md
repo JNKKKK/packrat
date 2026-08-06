@@ -6,7 +6,7 @@ genuinely-new items into the backup folder.
 **Merge is deliberately simple: `merge = discard trash + copy what's new`, decided entirely by
 exact content hash.** No perceptual/near-dup matching, no CLIP, no review folder, no interactive
 pause. It does collapse **byte-identical** duplicates (within the source and against the
-collection), but *recompressed* near-dup cleanup is a separate concern handled by `dedup` (see [dedup](workflow-dedup.md))
+collection), but *recompressed* near-dup cleanup is a separate concern handled by `dedup` (see [dedup](operation-dedup.md))
 *after* the files are in the collection.
 
 ```
@@ -25,7 +25,7 @@ exact hash, and files matching a **trashed** hash are discarded.
    so that copied files become catalogued members of the collection. If `dest` is under no library
    root → error (offer to `roots register` it first). Reject if `source` and `dest` overlap. **Ignored
    dest (warn, don't block):** if the resolved `dest` itself falls under the root's ignore rules
-   (allowlist/`--ignore` globs, see [scan](workflow-scan.md)), do **not** hard-error — files still copy, but they will be
+   (allowlist/`--ignore` globs, see [scan](operation-scan.md)), do **not** hard-error — files still copy, but they will be
    left *uncatalogued* (Phase 3 step 11) and merge warns per ignored subpath (Phase 4 step 13),
    because registering under an ignored path would let the next scan silently forget them. A plain
    note here is enough; the loud warning is at report time once the exact count is known.
@@ -37,7 +37,7 @@ exact hash, and files matching a **trashed** hash are discarded.
    before proceeding, and it acquires that ownership only when it actually runs (opening `merge_runs`
    at step 5). (A `--dry-run` merge opens no run and writes nothing — but it also then skips step 4's
    scan, see below.)
-3. **Refresh the trash collection** (see [trash refresh](trash-model.md)) — absorb any files sitting in the registered trash
+3. **Refresh the trash collection** (see [trash refresh](operation-trash-refresh.md)) — absorb any files sitting in the registered trash
    roots into the trashed-hash set and empty those folders. Merge discards incoming files that
    match a trashed hash, so the trashed set must be current first. (Runs for real even under
    `--dry-run` — see below.)
@@ -47,7 +47,7 @@ exact hash, and files matching a **trashed** hash are discarded.
 5. Open a `jobs` row (`type='merge'`) and a **`merge_runs`** header (`status='planning'`,
    `dest_root_id`). The `merge_runs` row is the durable **cross-op guard**: its
    partial-unique `(dest_root_id) WHERE status IN ('planning','copying')` is exactly the
-   "in-flight merge plan targeting this root" that dedup (see [dedup](workflow-dedup.md) Phase 0) and cleanup (see [cleanup](trash-model.md)) wait
+   "in-flight merge plan targeting this root" that dedup (see [dedup](operation-dedup.md) Phase 0) and cleanup (see [cleanup](operation-cleanup.md)) wait
    behind (dequeue gate, see [architecture](architecture.md)). **Dry-run opens neither `merge_runs` nor `merge_plan_items`** — it must
    not trip that guard and has no resume need. This plan is internal crash-safety only — merge does not pause
    for the user.
@@ -101,7 +101,7 @@ exact hash, and files matching a **trashed** hash are discarded.
       atomic rename into place. (Guarantees no partial/corrupt files.) → set the item's
       `progress='copied'` and store its final `dest_path` (incl. any `(1)` collision rename).
 11. **Register** each copied file — **but first check its final dest path against the dest root's
-    ignore set** (the same allowlist + `--ignore` globs bound to the root, see [scan](workflow-scan.md)), evaluated on the
+    ignore set** (the same allowlist + `--ignore` globs bound to the root, see [scan](operation-scan.md)), evaluated on the
     path *relative to the root* (not to `<dest>`), because that is exactly what a later `scan` will
     test. Two outcomes:
     - **Dest path is NOT ignored (the normal case)** → **write** `assets` (`status='active'`, hash
@@ -116,7 +116,7 @@ exact hash, and files matching a **trashed** hash are discarded.
       `progress='copied-unindexed'` and record the ignored dest path. **Rationale (this is the fix
       for the silent-forget bug):** if we registered a file living under an ignored path, the next
       `scan` would not enumerate it → its `last_seen_at` would never bump → deletion-detection
-      (see [scan](workflow-scan.md) Phase 3 step 11) would delete its `file_instances` row and **forget the asset while the
+      (see [scan](operation-scan.md) Phase 3 step 11) would delete its `file_instances` row and **forget the asset while the
       file still sits on disk** (and a later merge would re-copy it as `new`). By leaving it
       unregistered, the file is simply untracked — consistent with how scan treats *any* file under
       an ignore rule, regardless of how it got there. The file is copied (structure mirrored, as
@@ -182,7 +182,7 @@ exact hash, and files matching a **trashed** hash are discarded.
   root's ignore set) and prints the same per-subpath ignored-destination warning as Phase 4 step
   13 — so the user learns about an ignored `--into` target *before* copying, when it is still
   cheap to fix. **But Phase 0's "refresh the trash collection" still runs for real** — trash
-  folders are absorbed and emptied even in dry-run (see [trash refresh](trash-model.md)); only the copy and all plan/asset writes
+  folders are absorbed and emptied even in dry-run (see [trash refresh](operation-trash-refresh.md)); only the copy and all plan/asset writes
   are skipped.
 - Merge is copy-only (non-destructive), so it proceeds without a typed confirmation; use
   `--dry-run` first to preview.

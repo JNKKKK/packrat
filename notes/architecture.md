@@ -30,7 +30,7 @@ cancel. This is what makes a job survive the terminal that launched it.
 - the **SQLite DB** (single writer — see concurrency below);
 - a **persisted job queue** running **one mutating job at a time**, the rest waiting in a durable
   FIFO backlog that survives restart (guarantee 1 below); each job is cooperatively cancellable and
-  checkpointed/resumable (per the [scan](workflow-scan.md)/[dedup](workflow-dedup.md)/[merge](workflow-merge.md) workflows);
+  checkpointed/resumable (per the [scan](operation-scan.md)/[dedup](operation-dedup.md)/[merge](operation-merge.md) workflows);
 - the **periodic-job scheduler** (`jobs/scheduler.py`, **now realized** — see below) which
   submits jobs like any client;
 - the review-run state (`review_runs`) and audit trail.
@@ -40,7 +40,7 @@ tunable settings from `%APPDATA%\packrat\config.toml` (see [tech stack](tech-sta
 **The periodic scheduler (`PeriodicScheduler`, `jobs/scheduler.py`).** A thin wrapper over
 APScheduler's `BackgroundScheduler` + a declarative `PeriodicTask` registry (`PERIODIC_TASKS`,
 mirroring the `JobSpec` pattern), general enough for future periodic work (scheduled `--full`
-scans → M8, audit pruning [dedup workflow](workflow-dedup.md), embedding backfills [embeddings](embeddings.md)). Its **first client is `probe`** (see [scan workflow](workflow-scan.md)): the `probe-all` task's `submit(queue, db)` thunk fans out to one `probe <root>` per
+scans → M8, audit pruning [dedup workflow](operation-dedup.md), embedding backfills [embeddings](embeddings.md)). Its **first client is `probe`** (see [scan workflow](operation-probe.md)): the `probe-all` task's `submit(queue, db)` thunk fans out to one `probe <root>` per
 enabled library root every `schedule.probe_interval_hours` (24 h default, small jitter). The
 scheduler is **just another queue client** — its job func runs on APScheduler's own thread and
 only calls `queue.submit(...)`, never runs job work, so the "one mutating job at a time"
@@ -102,34 +102,34 @@ worker exists. On **every** daemon start, before serving any request, it reconci
   re-kill it on boot) and never resumes a *destructive* apply (`dedup`/`cleanup --confirm`) with
   nobody watching. Resume paths per type (all already specified — this step only flips the stale
   status flag so the machinery can re-engage):
-  - **scan** → re-run `scan`; the **fast-path** (path+size+mtime skip, see [scan workflow](workflow-scan.md) step 4) makes already-
+  - **scan** → re-run `scan`; the **fast-path** (path+size+mtime skip, see [scan workflow](operation-scan.md) step 4) makes already-
     fingerprinted files no-ops, so it effectively continues where it left off — `jobs.done` is just
     the progress number, not the resume key. Deletion-detection is naturally safe (it keys off this
-    pass's enumeration, see [scan workflow](workflow-scan.md) step 11).
+    pass's enumeration, see [scan workflow](operation-scan.md) step 11).
   - **merge** → its `merge_runs` row is still open (`planning`/`copying`); re-running `merge`
-    silently auto-resumes from the frozen plan (see [merge workflow](workflow-merge.md)). *(A crash in Phase 1 before the plan was
+    silently auto-resumes from the frozen plan (see [merge workflow](operation-merge.md)). *(A crash in Phase 1 before the plan was
     committed leaves no open `merge_runs` → re-run just starts fresh.)*
-  - **trash refresh** → idempotent by construction (record-then-delete, see [trash refresh](trash-model.md)); re-run re-processes
+  - **trash refresh** → idempotent by construction (record-then-delete, see [trash refresh](operation-trash-refresh.md)); re-run re-processes
     only the trash files still present.
-  - **untrash** → idempotent (hash → forget/reactivate, see [trash model](trash-model.md)); re-run is a no-op on already-handled
+  - **untrash** → idempotent (hash → forget/reactivate, see [trash model](operation-untrash.md)); re-run is a no-op on already-handled
     files.
   - **dedup/cleanup analyze** interrupted mid-staging → the crash left a `pending` review_run with
     **half-built staging**. Reconciliation **rolls it back**: delete the partial
     `_packrat_review\` staging folders and mark that review_run `cancelled` (record it as
-    `interrupted-analyze` in the audit `applied.json`, see [dedup workflow](workflow-dedup.md)). This clears the way for a clean
+    `interrupted-analyze` in the audit `applied.json`, see [dedup workflow](operation-dedup.md)). This clears the way for a clean
     re-run — otherwise the pending row would reject a fresh `dedup`, and `--confirm` on partial
     staging would apply a wrong plan. *(A **completed** analyze — paused, fully staged, awaiting the
     user — has no `running` job row, so it is untouched: its `pending` review_run and staging remain
     exactly as left, ready for `--confirm`/`--cancel`.)*
   - **dedup/cleanup `--confirm`** interrupted mid-apply → the review_run is still `pending` and the
     plan (`review_actions`) records intended deletions; re-running `--confirm` re-reads shortcut
-    presence and re-applies via the per-file lazy-liveness gate (see [dedup workflow](workflow-dedup.md) Phase 6), which is idempotent
+    presence and re-applies via the per-file lazy-liveness gate (see [dedup workflow](operation-dedup.md) Phase 6), which is idempotent
     (already-deleted files → "already-gone"). The DB backup taken before apply is the backstop.
 - **Durable `queued` backlog → drained, with one carve-out.** Because the backlog is persisted
   (guarantee 1 below, [data model](data-model.md) `jobs.status='queued'`), jobs that were merely *waiting* — never started, so
   nothing on disk or in the DB was touched — are **not** stale and are **kept**: after the running
   row is reconciled, the daemon resumes draining them in `enqueued_at` order like normal. This is the
-  point of a durable queue — an auto-appended `roots register --scan` (see [scan workflow](workflow-scan.md)) still runs after a
+  point of a durable queue — an auto-appended `roots register --scan` (see [scan workflow](operation-register.md)) still runs after a
   crash/restart. **Carve-out (matches the running-job stance):** a queued **destructive apply**
   (`dedup`/`cleanup --confirm`) is flipped to `interrupted` instead of auto-run — a delete-set must
   never apply with nobody watching (same reason the daemon won't auto-resume a *running* `--confirm`),
@@ -174,7 +174,7 @@ job must clear **both** to start.
    in-memory list), so queued work survives a daemon restart and drains on the next start (see startup
    reconciliation above — with one safety carve-out: a queued destructive apply is *not* auto-run
    unattended). This is what lets one command line up work behind another (and, later, lets `roots
-   register --scan` append a scan behind whatever is running — see [scan workflow](workflow-scan.md)). The worker *slot* is still
+   register --scan` append a scan behind whatever is running — see [scan workflow](operation-register.md)). The worker *slot* is still
    in-memory (a live daemon runs at most one job in *this* process, which is what makes reconciliation
    correct — a `running` row at boot is stale); the **backlog** is durable. No lockfile, no
    crash-stale lock. Read-only queries (`status`, `roots`, TUI stats) run anytime, concurrently, and
@@ -189,7 +189,7 @@ job must clear **both** to start.
      time — intended). This is a small runnable-first scheduler, not strict FIFO.
    - **What wakes a blocked job is just the next pump.** The ops that free a root — `dedup`/`cleanup
      --confirm` (completes the review), `--cancel`, a resuming `merge` — are **themselves jobs**
-     (see [dedup workflow](workflow-dedup.md)/[trash model](trash-model.md): `--confirm`/`--cancel` are separate `jobs` rows of the same type, dispatched by
+     (see [dedup workflow](operation-dedup.md)/[trash model](operation-cleanup.md): `--confirm`/`--cancel` are separate `jobs` rows of the same type, dispatched by
      params). So "root freed → re-examine the backlog" needs no separate signal: the queue is pumped
      after **every** job finishes (which you need anyway to start the next one), and the confirm/cancel
      job's completion *is* that pump. **Invariant to preserve:** the queue must be pumped whenever a
@@ -208,7 +208,7 @@ job must clear **both** to start.
      the backlog (`cancelled`, never ran) — distinct from cancelling the running one (see cancellation above).
 
 2. **Per-root: one *active* operation owns a root at a time** (running **or** pending). This is the
-   general invariant that the per-operation validations ([dedup workflow](workflow-dedup.md) Phase 0, [trash model](trash-model.md), [merge workflow](workflow-merge.md) Phase 0) and the
+   general invariant that the per-operation validations ([dedup workflow](operation-dedup.md) Phase 0, [trash model](operation-cleanup.md), [merge workflow](operation-merge.md) Phase 0) and the
    DB's partial-unique indexes ([data model](data-model.md): one pending `review_runs` per root; one open `merge_runs` per
    dest root) all enforce as special cases. State it once here so no pair is missed (the previous
    text enumerated dedup/cleanup/merge pairwise and **omitted scan** — the gap this closes):
@@ -223,13 +223,13 @@ job must clear **both** to start.
    > when a job actually runs, so two same-root ops can sit in the queue but never run at once, and the
    > partial-unique indexes are never violated (the second analyze opens its `review_runs` row only
    > after the first is confirmed/cancelled). **`scan` is included:** a `scan R` behind a pending
-   > review/open merge waits in the backlog rather than churning the plan's rows (see [scan workflow](workflow-scan.md) step 1a); a
+   > review/open merge waits in the backlog rather than churning the plan's rows (see [scan workflow](operation-scan.md) step 1a); a
    > scheduled / `--all` scan still **skips that root and logs it** (it iterates roots rather than
    > owning one, so it must not park the whole sweep on one under-review root).
 
    **Owned vs. referenced — what is *not* locked.** Exclusivity is on the **owned** root only, not
    on roots an op merely reads or can reach into: `dedup` compares against **all active assets
-   collection-wide** and may delete an *external* survivor in another root (see [dedup workflow](workflow-dedup.md) cross-folder note);
+   collection-wide** and may delete an *external* survivor in another root (see [dedup workflow](operation-dedup.md) cross-folder note);
    `merge` reads every root's hashes. Locking those "referenced" roots would serialize nearly
    everything (dedup touches almost all of them), so we don't. Cross-root reach stays safe by a
    different mechanism — the **lazy-liveness gates**: confirm/apply re-`stat()`s each file by its
